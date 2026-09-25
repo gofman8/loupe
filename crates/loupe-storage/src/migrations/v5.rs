@@ -119,7 +119,7 @@ mod tests {
 				.unwrap()
 				.schema_version()
 				.unwrap(),
-			6
+			crate::migrations::LATEST_SCHEMA_VERSION
 		);
 	}
 
@@ -157,7 +157,13 @@ mod tests {
 			assert_eq!(fixtures::schema(&conn), before_schema);
 			assert_eq!(fixtures::rows(&conn, "SELECT * FROM findings ORDER BY id"), before_rows);
 			apply_pending(&mut conn).unwrap();
-			assert_eq!(fixtures::markers(&conn), (6, 6));
+			assert_eq!(
+				fixtures::markers(&conn),
+				(
+					crate::migrations::LATEST_SCHEMA_VERSION,
+					crate::migrations::LATEST_SCHEMA_VERSION
+				)
+			);
 		}
 	}
 }

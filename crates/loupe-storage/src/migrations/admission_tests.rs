@@ -84,7 +84,7 @@ fn refuse_cross_repo_job(table: &'static str, original_job: i64) {
 		assert_eq!(failure.stage, super::MigrationStage::Admission);
 		assert_eq!(failure.reason, super::MigrationReason::ForeignKeyViolation);
 		assert_eq!(failure.source_version, Some(u32::try_from(version).unwrap()));
-		assert_eq!(failure.target_version, 6);
+		assert_eq!(failure.target_version, super::LATEST_SCHEMA_VERSION);
 		let conn = fixtures::open(&path);
 		assert_eq!(
 			fixtures::markers(&conn),
@@ -95,7 +95,7 @@ fn refuse_cross_repo_job(table: &'static str, original_job: i64) {
 		conn.execute(&sql, [original_job]).unwrap();
 		drop(conn);
 		let db = Db::open(&path, &MasterKey::for_tests()).unwrap();
-		assert_eq!(db.schema_version().unwrap(), 6);
+		assert_eq!(db.schema_version().unwrap(), super::LATEST_SCHEMA_VERSION);
 	}
 }
 
@@ -174,7 +174,7 @@ fn upgrade_admission_queued_scan_start_overflow() {
 
 #[test]
 fn upgrade_admission_leased_scan_start_overflow() {
-	refuse_after("jobs", "started_at", 7, i64::MAX.into(), |conn| {
+	refuse_after_upgrade(6, "jobs", "started_at", 7, i64::MAX.into(), |conn| {
 		conn.execute_batch(
 			"UPDATE jobs SET state='leased',worker_id=1,
 		 lease_expires_at=9223372036854775807,job_capability_hash=zeroblob(32) WHERE id=7;",
@@ -193,7 +193,7 @@ fn upgrade_admission_preserves_representable_scan_start() {
 		conn.execute("UPDATE jobs SET started_at=?1 WHERE id=7", [start]).unwrap();
 		drop(conn);
 		let db = Db::open(&path, &MasterKey::for_tests()).unwrap();
-		assert_eq!(db.schema_version().unwrap(), 6);
+		assert_eq!(db.schema_version().unwrap(), super::LATEST_SCHEMA_VERSION);
 		let conn = fixtures::open(&path);
 		assert_eq!(
 			conn.query_row("SELECT started_at FROM jobs WHERE id=7", [], |row| row
@@ -233,7 +233,7 @@ fn upgrade_admission_missing_builtin_kind() {
 			assert_eq!(failure.reason, super::MigrationReason::MissingRequiredJobKind);
 			assert_eq!(failure.field, Some(kind));
 			assert_eq!(failure.source_version, Some(u32::try_from(version).unwrap()));
-			assert_eq!(failure.target_version, 6);
+			assert_eq!(failure.target_version, super::LATEST_SCHEMA_VERSION);
 			let conn = fixtures::open(&path);
 			assert_eq!(
 				fixtures::markers(&conn),
@@ -249,7 +249,7 @@ fn upgrade_admission_missing_builtin_kind() {
 			drop(conn);
 			assert_eq!(
 				Db::open(&path, &MasterKey::for_tests()).unwrap().schema_version().unwrap(),
-				6
+				super::LATEST_SCHEMA_VERSION
 			);
 		}
 	}
@@ -257,6 +257,13 @@ fn upgrade_admission_missing_builtin_kind() {
 
 fn refuse_after(
 	table: &'static str, column: &'static str, rowid: i64, bad: Value,
+	setup: impl FnOnce(&Connection),
+) {
+	refuse_after_upgrade(super::LATEST_SCHEMA_VERSION, table, column, rowid, bad, setup);
+}
+
+fn refuse_after_upgrade(
+	target: u32, table: &'static str, column: &'static str, rowid: i64, bad: Value,
 	setup: impl FnOnce(&Connection),
 ) {
 	let dir = tempfile::tempdir().unwrap();
@@ -272,7 +279,28 @@ fn refuse_after(
 	let schema = fixtures::schema(&conn);
 	let before = snapshot(&conn);
 	drop(conn);
-	let error = match Db::open(&path, &MasterKey::for_tests()) {
+	let open = || {
+		if target == super::LATEST_SCHEMA_VERSION {
+			Db::open(&path, &MasterKey::for_tests())
+		} else {
+			// v7 requires an offline queue before admission. Keep the earlier
+			// leased-row policy controls on the published v6 upgrade itself.
+			assert_eq!(target, 6);
+			Db::bootstrap_with_migration(
+				Connection::open(&path).unwrap(),
+				&MasterKey::for_tests(),
+				|conn| {
+					super::apply_with_finalizer(
+						conn,
+						&MIGRATIONS[..6],
+						|conn, _| crate::jobs::validate_stored_rows(conn),
+						&mut |_, _| Ok(()),
+					)
+				},
+			)
+		}
+	};
+	let error = match open() {
 		Err(error) => error,
 		Ok(_) => panic!("upgrade admission must reject invalid {table}.{column} row {rowid}"),
 	};
@@ -284,7 +312,7 @@ fn refuse_after(
 	assert_eq!(failure.rowid, Some(rowid));
 	assert_eq!(failure.stage, super::MigrationStage::Admission);
 	assert_eq!(failure.source_version, Some(5));
-	assert_eq!(failure.target_version, 6);
+	assert_eq!(failure.target_version, target);
 	assert!(!format!("{error} {error:?} {error:#}").contains("private-upgrade-payload"));
 	assert!(std::error::Error::source(&error).is_none());
 	let conn = fixtures::open(&path);
@@ -293,8 +321,8 @@ fn refuse_after(
 	assert_eq!(snapshot(&conn), before);
 	conn.execute(&sql, (&original, rowid)).unwrap();
 	drop(conn);
-	let db = Db::open(&path, &MasterKey::for_tests()).unwrap();
-	assert_eq!(db.schema_version().unwrap(), 6);
+	let db = open().unwrap();
+	assert_eq!(db.schema_version().unwrap(), target);
 }
 
 macro_rules! rejects {
@@ -468,7 +496,7 @@ UPDATE findings SET repo_id=2,job_id=90 WHERE id=6;",
 
 #[test]
 fn upgrade_admission_missing_leased_verify_target() {
-	refuse_after("jobs", "target_finding_id", 8, 999999.into(), |conn| {
+	refuse_after_upgrade(6, "jobs", "target_finding_id", 8, 999999.into(), |conn| {
 		conn.execute("UPDATE jobs SET state='leased' WHERE id=8", []).unwrap();
 	});
 }
@@ -660,7 +688,10 @@ fn upgrade_admission_every_historical_version_is_atomic() {
 		assert_eq!(snapshot(&conn), before);
 		conn.execute("UPDATE registered_repos SET owner='c' WHERE id=3", []).unwrap();
 		drop(conn);
-		assert_eq!(Db::open(&path, &MasterKey::for_tests()).unwrap().schema_version().unwrap(), 6);
+		assert_eq!(
+			Db::open(&path, &MasterKey::for_tests()).unwrap().schema_version().unwrap(),
+			super::LATEST_SCHEMA_VERSION
+		);
 	}
 }
 
@@ -704,7 +735,7 @@ INSERT INTO jobs(repo_id,kind,state,enqueued_at) VALUES(1,'future.phase','succee
 		.collect();
 	drop(conn);
 	let db = Db::open(&path, &MasterKey::for_tests()).unwrap();
-	assert_eq!(db.schema_version().unwrap(), 6);
+	assert_eq!(db.schema_version().unwrap(), super::LATEST_SCHEMA_VERSION);
 	db.with_conn(|conn| {
 		for ((table, expected), (_, columns)) in before.iter().zip(&projections) {
 			if table != "schema_meta" {
@@ -731,5 +762,8 @@ INSERT INTO jobs(repo_id,kind,state,enqueued_at) VALUES(1,'future.phase','succee
 	})
 	.unwrap();
 	drop(db);
-	assert_eq!(Db::open(&path, &MasterKey::for_tests()).unwrap().schema_version().unwrap(), 6);
+	assert_eq!(
+		Db::open(&path, &MasterKey::for_tests()).unwrap().schema_version().unwrap(),
+		super::LATEST_SCHEMA_VERSION
+	);
 }

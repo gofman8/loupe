@@ -54,6 +54,7 @@ pub mod scope;
 pub mod scope_sequence_fuzz;
 pub mod secrets;
 pub mod source_refs;
+pub mod terminal_payloads;
 pub mod terminal_receipt;
 pub(crate) mod transaction;
 pub mod workers;
@@ -76,6 +77,8 @@ mod source_migration_tests;
 mod sql_ingress_tests;
 
 #[cfg(test)]
+mod evidence_tests;
+#[cfg(test)]
 mod proof_tests;
 #[cfg(test)]
 mod replay_tests;
@@ -97,6 +100,23 @@ mod test_support;
 pub use db::{Db, Error, Result};
 pub use loupe_core::canonical;
 pub use review::{Conflict, Entity, Ownership};
+
+/// A malformed modern payload is an error, never historical or missing evidence.
+#[derive(Clone, PartialEq, Eq)]
+pub enum StoredEvidence<T> {
+	Missing,
+	Historical,
+	Recorded(T),
+}
+impl<T> std::fmt::Debug for StoredEvidence<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(match self {
+			Self::Missing => "StoredEvidence::Missing",
+			Self::Historical => "StoredEvidence::Historical",
+			Self::Recorded(_) => "StoredEvidence::Recorded([redacted])",
+		})
+	}
+}
 
 #[cfg(test)]
 mod scope_agreement_tests;

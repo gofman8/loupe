@@ -14,12 +14,16 @@ use rusqlite::Row;
 mod app;
 mod refs;
 mod reporting;
+mod review_payload;
 #[cfg(test)]
 mod tests;
 pub(crate) use app::{app, app_summary};
 use policy::{AuditName, JobDiagnostic, JobKindName, RevisionText};
 pub(crate) use refs::{inspected_refs, unit_refs};
 pub(crate) use reporting::{reporting, scanner_document};
+pub(crate) use review_payload::{
+	drilldown_terminal, finding_evidence, survey_terminal, verification_terminal,
+};
 
 // debug-ok: fixed category, static field and closed policy rule only.
 #[derive(Debug)]
@@ -354,17 +358,61 @@ impl Validate<&[u8], Db> for StoredInventoryPath {
 pub(crate) fn inventory_path(
 	row: &Row<'_>, index: usize, representable: bool,
 ) -> rusqlite::Result<crate::inventory::InventoryPath<Db>> {
-	if representable {
-		Ok(crate::inventory::InventoryPath::Representable(
+	let source = if representable {
+		Some(
 			column(row, index)?
 				.validate(StoredInventoryPath)
 				.map_err(|e| sql_error(index, ReadError::existing(e)))?,
-		))
+		)
 	} else {
 		// Display aliases for invalid Git bytes retain their visible status.
 		// They must not be reinterpreted as a representable RepoPath.
-		inventory(row, index).map(crate::inventory::InventoryPath::Unrepresentable)
+		None
+	};
+	Ok(crate::inventory::InventoryPath::stored(inventory(row, index)?, None, source))
+}
+
+struct StoredInventoryBytes;
+impl Validate<&[u8], Db> for StoredInventoryBytes {
+	type Output = crate::inventory::RawPath<Db>;
+	type Error = Error;
+	fn validate<'v>(
+		self, input: Unvalidated<'v, &[u8]>, mark: Mark<'v, Db>,
+	) -> Result<Self::Output, Error> {
+		crate::inventory::RawPath::new(&mark, input.get())
 	}
+}
+
+pub(crate) fn stored_inventory_path(
+	row: &Row<'_>, rendering: usize, raw: usize, source: usize, representable: bool,
+) -> rusqlite::Result<crate::inventory::InventoryPath<Db>> {
+	if representable {
+		// Keep the published admission policy for historical display paths.
+		// A missing source projection must not reclassify malformed text as
+		// an intentionally unrepresentable Git entry.
+		column(row, rendering)?
+			.validate(StoredInventoryPath)
+			.map_err(|error| sql_error(rendering, ReadError::existing(error)))?;
+	}
+	let raw = if is_null(row, raw)? {
+		None
+	} else {
+		Some(
+			blob(row, raw)?
+				.validate(StoredInventoryBytes)
+				.map_err(|error| admission_error(raw, error))?,
+		)
+	};
+	let source = if is_null(row, source)? {
+		None
+	} else {
+		Some(
+			column(row, source)?
+				.validate(StoredInventoryPath)
+				.map_err(|error| sql_error(source, ReadError::existing(error)))?,
+		)
+	};
+	Ok(crate::inventory::InventoryPath::stored(inventory(row, rendering)?, raw, source))
 }
 
 /// Only this exact historical classification permits the designated Db→Agent

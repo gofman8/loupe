@@ -5,7 +5,7 @@ use loupe_provenance::{Db, Source};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::review::{changed, classify, parsed, string_enum};
-use crate::{ownership, Conflict, Entity, Error, Ownership, Result};
+use crate::{inventory, ownership, Conflict, Entity, Error, Ownership, Result};
 
 string_enum!(State { Building => "building", Active => "active", Retired => "retired" });
 string_enum!(Coverage { Complete => "complete", Partial => "partial", Unknown => "unknown" });
@@ -135,7 +135,7 @@ pub fn activate(scope: &crate::scope::RepoScope<'_>, id: i64, now: i64) -> Resul
 	scope.require_operator()?;
 	let tx = scope.conn;
 	let successor = get(scope, id)?.ok_or(Error::NotFound(Entity::Generation, id))?;
-	if successor.state != State::Building {
+	if successor.state != State::Building || inventory::manifest_sealed(scope, id)? == Some(false) {
 		return Err(Error::Conflict(Conflict::GenerationState));
 	}
 	let active: Option<i64> = tx
@@ -181,11 +181,15 @@ pub(crate) fn abandon_superseded_bootstrap(
 	let tx = scope.conn;
 	changed(tx.execute("UPDATE review_generations SET state='retired',retired_reason='superseded bootstrap',retired_at=?2 WHERE generation_id=?1 AND repo_id=?3 AND state='building'", params![id,now,scope.repo_id])?, Conflict::GenerationState)
 }
+/// Legacy setup only; managed generations publish through their bootstrap owner.
 pub fn set_profile<S: Source>(
 	scope: &crate::scope::RepoScope<'_>, id: i64, version: i64, profile: &BoundedJson<Payload, S>,
 ) -> Result<()> {
 	scope.require_operator()?;
 	let tx = scope.conn;
+	if inventory::manifest_sealed(scope, id)?.is_some() {
+		return Err(Error::Conflict(Conflict::GenerationState));
+	}
 	changed(tx.execute("UPDATE review_generations SET profile_version=?2,generated_profile=?3,generated_profile_digest=?4 WHERE generation_id=?1 AND repo_id=?5 AND state IN ('building','active') AND ?2>0 AND (?2>profile_version OR generated_profile IS NULL)",params![id,version,profile.expose(),profile.digest().as_slice(),scope.repo_id])?,Conflict::GenerationState)
 }
 pub fn set_corroboration(
@@ -200,7 +204,10 @@ pub fn set_coverage(
 ) -> Result<()> {
 	scope.require_operator()?;
 	let tx = scope.conn;
-	if coverage == Coverage::Complete && !coverage_rollup(scope, id)?.complete() {
+	if coverage == Coverage::Complete
+		&& (inventory::manifest_sealed(scope, id)? == Some(false)
+			|| !coverage_rollup(scope, id)?.complete())
+	{
 		return Err(Error::Conflict(Conflict::Coverage));
 	}
 	changed(tx.execute("UPDATE review_generations SET coverage=?2 WHERE generation_id=?1 AND repo_id=?3 AND state IN ('building','active') AND (?2<>'complete' OR corroboration_state='satisfied')",params![id,coverage.as_str(),scope.repo_id])?,Conflict::Coverage)
@@ -214,7 +221,26 @@ pub fn coverage_rollup(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<C
 			r.get(0)
 		})?;
 	let needs_follow_up = tx.query_row(&format!("SELECT COUNT(*) {uncovered} AND (SELECT r.disposition FROM review_unit_results r WHERE r.review_unit_id=u.review_unit_id AND r.invalidated=0 AND r.commit_sha=g.generation_commit_sha AND r.profile_version=g.profile_version ORDER BY r.review_unit_result_id DESC LIMIT 1)='needs_follow_up'"),params![id,scope.repo_id],|r|r.get(0))?;
-	let unresolved_inventory = tx.query_row("SELECT COUNT(*) FROM generation_inventory WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=generation_inventory.generation_id AND g.repo_id=?2) AND disposition='unresolved'",params![id,scope.repo_id],|r|r.get(0))?;
+	let unresolved_inventory = if inventory::manifest_sealed(scope, id)?.is_some() {
+		// Historical nonmembers are retained evidence targets, not entries in
+		// this manifest. Every persisted mapping must still name this source.
+		tx.query_row(
+			"SELECT COUNT(*) FROM generation_inventory i
+			 WHERE i.generation_id=?1 AND i.manifest_position IS NOT NULL
+			 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=i.generation_id AND g.repo_id=?2)
+			 AND (i.disposition='unresolved' OR (i.disposition='mapped' AND (
+			 NOT EXISTS (SELECT 1 FROM generation_inventory_units m
+			   WHERE m.generation_id=i.generation_id AND m.inventory_entry_id=i.inventory_entry_id)
+			 OR EXISTS (SELECT 1 FROM generation_inventory_units m
+			   JOIN review_units u ON u.review_unit_id=m.review_unit_id AND u.generation_id=m.generation_id
+			   WHERE m.generation_id=i.generation_id AND m.inventory_entry_id=i.inventory_entry_id
+			   AND NOT EXISTS (SELECT 1 FROM json_each(u.source_refs) r
+			     WHERE json_extract(r.value,'$.path')=i.source_path)))))",
+			params![id, scope.repo_id], |row| row.get(0),
+		)?
+	} else {
+		tx.query_row("SELECT COUNT(*) FROM generation_inventory WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=generation_inventory.generation_id AND g.repo_id=?2) AND disposition='unresolved'",params![id,scope.repo_id],|r|r.get(0))?
+	};
 	Ok(CoverageRollup { missing_results, needs_follow_up, unresolved_inventory })
 }
 pub fn set_pending_follow_up<S: Source>(

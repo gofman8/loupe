@@ -13,6 +13,7 @@ mod framework;
 mod v3;
 mod v5;
 mod v6;
+mod v7;
 
 pub use error::{MigrationFailure, MigrationReason, MigrationStage};
 use framework::apply_with_finalizer;
@@ -35,6 +36,14 @@ mod ownership_tests;
 mod source_adoption_tests;
 #[cfg(test)]
 mod v3_tests;
+#[cfg(test)]
+mod v7_admission_tests;
+#[cfg(test)]
+mod v7_failure_tests;
+#[cfg(test)]
+mod v7_ownership_tests;
+#[cfg(test)]
+mod v7_tests;
 
 /// One migration step. Versions are dense (1, 2, 3, ...) and applied in
 /// ascending order.
@@ -59,6 +68,7 @@ const MIGRATIONS: &[Migration] = &[
 	Migration::Sql { version: 4, sql: V4_GITHUB_APP },
 	Migration::Structural { version: 5, run: v5::run },
 	Migration::Sql { version: 6, sql: v6::SOURCE_METADATA },
+	Migration::Structural { version: 7, run: v7::run },
 ];
 
 /// The highest version this build knows about.

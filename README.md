@@ -451,10 +451,12 @@ For the coordinated HTTP protocol-3 rollout, follow the
 [protocol upgrade runbook](contrib/upgrading-protocol-v3.md). This foundation
 keeps review-phase claims disabled; it does not activate the v2 harness.
 
-For existing installations moving to schema 6, follow the
-[offline upgrade runbook](contrib/upgrading-schema-v3.md) before deploying the
-new server. Stop all workers and the old server, then take a verified backup;
-queued work may remain. Schema-2 upgrades refuse outstanding leases.
+For existing installations, follow the
+[schema-v7 offline upgrade runbook](contrib/upgrading-schema-v7.md) before
+deploying the new server. Stop workers and the old server, then take a
+verified backup. Queued legacy work may remain, but leased jobs block the migration.
+The [historical v3 runbook](contrib/upgrading-schema-v3.md) documents the
+intervening migration for older databases.
 
 ### 6. Register a repo and trigger a scan
 
@@ -554,9 +556,17 @@ unless you watch the tracker repo with *All activity*. Set your watch
 to *Participating and @mentions* to hear only about threads you take
 part in.
 
-Upgrading an existing deployment: follow the
-[offline upgrade runbook](contrib/upgrading-schema-v3.md). Configure the app,
-then switch repos one at a time with `loupectl repo set-github-reporting` (below), or
+Upgrading an existing deployment requires the
+[schema-v7 offline procedure](contrib/upgrading-schema-v7.md) and a
+[coordinated protocol-3 rollout](contrib/upgrading-protocol-v3.md) of
+server, workers, CLI and web. Schema v4 introduced GitHub App
+compatibility without table changes; published v5/v6 add report identity
+and source metadata. The v7 migration rebuilds review storage and
+requires cleared leases and a verified
+backup. Do not upgrade a running mixed-version deployment.
+
+After the coordinated upgrade, configure the app, then switch repos
+one at a time with `loupectl repo set-github-reporting` (below), or
 script it from `loupectl repo list --json`. PAT repos keep working
 untouched.
 The dashboard's add-repo form defaults to the app as well and shows

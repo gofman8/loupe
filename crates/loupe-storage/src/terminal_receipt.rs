@@ -5,7 +5,7 @@ use loupe_core::{JobKind, JobState};
 use loupe_provenance::{Db, Source};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::review::{classify, optional, parsed, string_enum};
+use crate::review::{is_unique, optional, parsed, string_enum};
 use crate::{Conflict, Entity, Error, Result};
 // The receipt's phase is the job's kind; reusing `JobKind` keeps the two
 // from drifting when a kind is added.
@@ -90,7 +90,15 @@ pub fn insert<MetaS: Source, ReasonS: Source, TitleS: Source, RecipeS: Source, C
 	}
 	tx.execute("INSERT INTO job_terminal_receipts (job_id,phase,terminal_reason,subject_title,subject_digest,pinned_commit_sha,effective_recipe,result_digest,evidence_rung,result_counts,finishing_capability_hash,created_at)
  SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12 WHERE EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?13)",params![new.job_id,new.phase.as_str(),new.terminal_reason.expose(),new.subject_title.map(BoundedText::expose),new.subject_digest.map(|d|d.as_slice()),new.pinned_commit_sha.expose(),new.effective_recipe.expose(),new.result_digest.as_slice(),new.evidence_rung.map(EvidenceRung::as_str),new.result_counts.map(BoundedJson::expose),new.finishing_capability_hash.map(|d|d.as_slice()),now,scope.repo_id])
- .map_err(|e|classify(e,"job_terminal_receipts.job_id",Conflict::TerminalReceipt))?;
+ .map_err(|error| {
+     if is_unique(&error, "job_terminal_receipts.job_id")
+         || is_unique(&error, "job_terminal_receipts.job_id, job_terminal_receipts.phase")
+     {
+         Error::Conflict(Conflict::TerminalReceipt)
+     } else {
+         error.into()
+     }
+ })?;
 	Ok(tx.last_insert_rowid())
 }
 pub fn get(scope: &crate::scope::RepoScope<'_>, job: i64) -> Result<Option<Receipt>> {
