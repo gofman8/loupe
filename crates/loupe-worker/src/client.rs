@@ -99,10 +99,18 @@ impl ServerClient {
 		struct BuiltinLeaseRequest {
 			protocol_version: u16,
 			capabilities: Vec<&'static str>,
+			review_capabilities: loupe_proto::review_lease::LeaseList<
+				loupe_proto::review_lease::ReviewCapability,
+				3,
+			>,
 			wait_seconds: u32,
 		}
-		let req =
-			BuiltinLeaseRequest { protocol_version: PROTOCOL_VERSION, capabilities, wait_seconds };
+		let req = BuiltinLeaseRequest {
+			protocol_version: PROTOCOL_VERSION,
+			capabilities,
+			review_capabilities: Default::default(),
+			wait_seconds,
+		};
 		#[allow(
 			clippy::disallowed_methods,
 			reason = "Lease HTTP egress carries only the closed worker capability catalog to the configured server."
@@ -448,6 +456,51 @@ mod tests {
 			.unwrap_err();
 		assert!(!format!("{error:?}").contains(HEADER_CAPABILITY));
 		assert!(!error.to_string().contains(HEADER_CAPABILITY));
+	}
+
+	#[tokio::test]
+	async fn lease_request_keeps_review_capabilities_empty() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let base = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+		let task = tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			let body = loop {
+				let mut buf = [0; 1024];
+				let read = stream.read(&mut buf).await.unwrap();
+				assert_ne!(read, 0, "request ended early");
+				request.extend_from_slice(&buf[..read]);
+				let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+					continue;
+				};
+				let headers = std::str::from_utf8(&request[..end]).unwrap();
+				let length: usize = headers
+					.lines()
+					.find_map(|line| {
+						let (name, value) = line.split_once(':')?;
+						name.eq_ignore_ascii_case("content-length")
+							.then(|| value.trim().parse().unwrap())
+					})
+					.unwrap();
+				if request.len() >= end + 4 + length {
+					break request[end + 4..end + 4 + length].to_vec();
+				}
+			};
+			let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+			assert_eq!(request["review_capabilities"], serde_json::json!([]));
+			assert_eq!(request["capabilities"], serde_json::json!(["verify:llm"]));
+			let body = format!("{{\"kind\":\"empty\",\"protocol_version\":{PROTOCOL_VERSION}}}");
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nX-Loupe-Protocol: {PROTOCOL_VERSION}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+				body.len()
+			);
+			stream.write_all(response.as_bytes()).await.unwrap();
+		});
+		ServerClient::from_parts(reqwest::Client::new(), base)
+			.lease(vec!["verify:llm"], 0)
+			.await
+			.unwrap();
+		task.await.unwrap();
 	}
 
 	#[tokio::test]

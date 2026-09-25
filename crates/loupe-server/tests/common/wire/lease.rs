@@ -17,6 +17,9 @@ pub struct LeaseRequest {
 	pub protocol_version: u16,
 	pub capabilities: Vec<String>,
 	#[serde(default)]
+	pub review_capabilities:
+		loupe_proto::review_lease::LeaseList<loupe_proto::review_lease::ReviewCapability, 3>,
+	#[serde(default)]
 	pub wait_seconds: u32,
 }
 

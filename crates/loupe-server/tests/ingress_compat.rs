@@ -105,6 +105,53 @@ async fn lease_overflow_number_keeps_syntax_category() {
 }
 
 #[tokio::test]
+async fn review_advertisements_are_closed_and_bounded_at_worker_ingress() {
+	let f = fixture();
+	for review_capabilities in [
+		"[]",
+		r#"["review:survey:v1"]"#,
+		r#"["review:survey:v1","review:drilldown:v1","review:verify:v1"]"#,
+	] {
+		let request = format!(
+			r#"{{"protocol_version":{PROTOCOL_VERSION},"capabilities":[],"review_capabilities":{review_capabilities}}}"#
+		);
+		let (status, body) =
+			send(&f, Some(&f.worker), post("/v1/jobs/lease", Some("application/json"), request))
+				.await;
+		assert_eq!(status, StatusCode::OK);
+		assert!(matches!(
+			serde_json::from_str::<common::wire::LeaseResponse>(&body).unwrap(),
+			common::wire::LeaseResponse::Empty { .. }
+		));
+	}
+	for (review_capabilities, expected) in [
+		(r#"["private-review-capability-sentinel"]"#, StatusCode::UNPROCESSABLE_ENTITY),
+		(
+			r#"["review:survey:v1","review:drilldown:v1","review:verify:v1","review:survey:v1"]"#,
+			StatusCode::UNPROCESSABLE_ENTITY,
+		),
+		("null", StatusCode::UNPROCESSABLE_ENTITY),
+		("{}", StatusCode::UNPROCESSABLE_ENTITY),
+		// The existing closed enum's serde visitor classifies a numeric
+		// variant as syntax, unlike a string naming an unknown variant.
+		("[1]", StatusCode::BAD_REQUEST),
+	] {
+		let request = format!(
+			r#"{{"protocol_version":{PROTOCOL_VERSION},"capabilities":[],"review_capabilities":{review_capabilities}}}"#
+		);
+		let (status, body) =
+			send(&f, Some(&f.worker), post("/v1/jobs/lease", Some("application/json"), request))
+				.await;
+		assert_eq!(
+			status,
+			expected,
+			"invalid or over-limit review advertisements must not be silently ignored: {review_capabilities}"
+		);
+		assert!(!body.contains("private-review-capability-sentinel"));
+	}
+}
+
+#[tokio::test]
 async fn malformed_field_containers_receive_syntax_rejection() {
 	// RawValue scans a complete token before type validation, so malformed
 	// containers yield syntax/400 rather than a wrong-type/422 response.
@@ -114,7 +161,7 @@ async fn malformed_field_containers_receive_syntax_rejection() {
 	let malformed_array = format!(r#"{{"protocol_version":{PROTOCOL_VERSION},"capabilities":[["#);
 	let unknown_overflow =
 		format!(r#"{{"protocol_version":{PROTOCOL_VERSION},"capabilities":[],"future":1e400}}"#);
-	let positional = format!(r#"[{PROTOCOL_VERSION},["verify:secrets"],0]"#);
+	let positional = format!(r#"[{PROTOCOL_VERSION},["verify:secrets"],[],0]"#);
 	let wrong_object =
 		format!(r#"{{"protocol_version":{PROTOCOL_VERSION},"capabilities":[{{}}]}}"#);
 	let wrong_array = format!(r#"{{"protocol_version":{PROTOCOL_VERSION},"capabilities":[[]]}}"#);

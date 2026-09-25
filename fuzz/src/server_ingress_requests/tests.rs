@@ -52,6 +52,44 @@ direct_controls! {
 }
 
 #[test]
+fn protocol_three_review_capabilities_keep_their_own_schema() {
+	for body in [
+		r#"{"protocol_version":3,"capabilities":["verify:llm"],"review_capabilities":[]}"#,
+		r#"{"protocol_version":3,"capabilities":[],"review_capabilities":["review:survey:v1","review:drilldown:v1","review:verify:v1"],"wait_seconds":7}"#,
+		r#"[3,["verify:llm"],["review:survey:v1"],7]"#,
+	] {
+		let observed = actual::worker_request(WorkerRequest::Lease, body.as_bytes())
+			.0
+			.unwrap_or_else(|error| panic!("valid protocol-3 lease refused: {error:?}"));
+		assert!(
+			observed.get("review_capabilities").is_some(),
+			"actual observation must retain the phase advertisements"
+		);
+		check(5, body.as_bytes());
+	}
+	for caps in [
+		r#"["private_body_sentinel"]"#,
+		r#"["review:survey:v1","review:drilldown:v1","review:verify:v1","review:survey:v1"]"#,
+		"null",
+		"{}",
+		"[1]",
+	] {
+		let body =
+			format!(r#"{{"protocol_version":3,"capabilities":[],"review_capabilities":{caps}}}"#);
+		assert!(actual::worker_request(WorkerRequest::Lease, body.as_bytes()).0.is_err());
+		check(5, body.as_bytes());
+	}
+	for body in [
+		r#"{"protocol_version":3,"capabilities":[],"review_capabilities":[],"review_capabilities":[]}"#,
+		r#"[3,["verify:llm"],7]"#,
+		r#"[2,["exact"],3]"#,
+	] {
+		assert!(actual::worker_request(WorkerRequest::Lease, body.as_bytes()).0.is_err());
+		check(5, body.as_bytes());
+	}
+}
+
+#[test]
 fn original_agent_spans_match_append_positions_even_for_equal_tokens() {
 	for mode in 0..36 {
 		span_recipe(mode);
@@ -106,7 +144,7 @@ fn syntax_data_policy_and_ignored_grammar_remain_distinct() {
 		);
 	}
 	for body in [
-		r#"[2,["exact"],3]"#,
+		r#"[3,["exact"],[],3]"#,
 		r#"{"protocol_version":2,"capabilities":["exact"],"unknown":1e400}"#,
 		r#"{"protocol_version":2,"capabilities":["exact"],"unknown":"\uD800"}"#,
 	] {

@@ -140,6 +140,7 @@ fn decode(kind: WorkerRequest, bytes: &[u8]) -> Result<Value, DecodeError> {
 				&value.capabilities;
 			json!({"protocol_version": value.protocol_version,
 				"capabilities": capabilities.iter().map(BoundedText::expose).collect::<Vec<_>>(),
+				"review_capabilities": value.review_capabilities,
 				"wait_seconds": value.wait_seconds})
 		},
 	})

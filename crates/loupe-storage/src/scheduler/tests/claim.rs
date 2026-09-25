@@ -95,6 +95,15 @@ fn public_claim_keeps_survey_and_drilldown_runtime_gated() {
 				}
 			)?
 			.is_none());
+			assert_eq!(
+				tx.query_row("SELECT seq FROM scheduler_clock", [], |row| row.get::<_, i64>(0))?,
+				0
+			);
+			assert_eq!(
+				tx.query_row("SELECT COUNT(*) FROM scheduler_repo_state", [], |row| row
+					.get::<_, i64>(0))?,
+				0
+			);
 			Ok(())
 		})
 	})

@@ -122,10 +122,13 @@ fn worker_expected(kind: usize, body: &[u8]) -> Option<Value> {
 				_ => return None,
 			}
 		},
-		_ => value["capabilities"]
-			.as_array()?
-			.iter()
-			.all(|v| v.as_str().is_some_and(|s| text_admitted(s, false))),
+		_ => {
+			value["capabilities"]
+				.as_array()?
+				.iter()
+				.all(|v| v.as_str().is_some_and(|s| text_admitted(s, false)))
+				&& value["review_capabilities"].as_array()?.len() <= 3
+		},
 	};
 	valid.then_some(value)
 }

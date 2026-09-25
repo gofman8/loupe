@@ -473,6 +473,9 @@ struct RawLease<'a> {
 	#[serde(borrow)]
 	capabilities: Vec<&'a RawValue>,
 	#[serde(default)]
+	review_capabilities:
+		loupe_proto::review_lease::LeaseList<loupe_proto::review_lease::ReviewCapability, 3>,
+	#[serde(default)]
 	wait_seconds: u32,
 }
 impl Validate<&[u8], Worker> for LeaseRequestDecoder {
@@ -489,6 +492,7 @@ impl Validate<&[u8], Worker> for LeaseRequestDecoder {
 				.into_iter()
 				.map(|token| json_text(&mark, token))
 				.collect::<Result<_, _>>()?,
+			review_capabilities: raw.review_capabilities,
 			wait_seconds: raw.wait_seconds,
 		})
 	}
@@ -510,6 +514,24 @@ mod tests {
 		#[allow(unsafe_code)]
 		let input = unsafe { Ingress::<Worker>::new() };
 		Untrusted::new(bytes, input)
+	}
+
+	#[test]
+	fn lease_review_advertisements_reach_the_typed_request() {
+		use loupe_proto::review_lease::ReviewCapability;
+		let body = br#"{"protocol_version":3,"capabilities":["verify:secrets"],"review_capabilities":["review:survey:v1","review:drilldown:v1","review:verify:v1"],"wait_seconds":7}"#;
+		let output = worker_fixture(body).validate(LeaseRequestDecoder).unwrap();
+		assert_eq!(
+			output.review_capabilities.as_slice(),
+			&[ReviewCapability::Survey, ReviewCapability::Drilldown, ReviewCapability::Verify],
+			"bounded review advertisements must survive worker ingress"
+		);
+		assert_eq!(output.capabilities[0].expose(), "verify:secrets");
+		assert_eq!(output.wait_seconds, 7);
+		let defaulted = worker_fixture(br#"{"protocol_version":3,"capabilities":[]}"#)
+			.validate(LeaseRequestDecoder)
+			.unwrap();
+		assert!(defaulted.review_capabilities.as_slice().is_empty());
 	}
 
 	#[test]

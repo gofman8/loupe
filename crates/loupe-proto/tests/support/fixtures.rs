@@ -36,3 +36,10 @@ pub fn path(raw: &str) -> RepoPath<Server> {
 pub fn scanner(value: serde_json::Value) -> ScannerDocument<Server> {
 	fixture("synthetic scanner fixture", |_, mark| ScannerDocument::leased(mark, value).unwrap())
 }
+
+/// Synthetic response bytes for exercising concrete carrying decoders.
+#[allow(unsafe_code)]
+pub fn server_response(bytes: &[u8]) -> Untrusted<&[u8], Server> {
+	// SAFETY: only test binaries call this with locally constructed fixtures.
+	Untrusted::new(bytes, unsafe { Ingress::<Server>::new() })
+}

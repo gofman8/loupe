@@ -1,5 +1,8 @@
 //! Fixed Server schema/output/field/carry oracles. Bytes 0/1 select operation
 //! and raw (0), ledger (1), field-boundary (2), or body-boundary (3) recipe.
+//! Lease differential/ledger coverage is Scan/Verify only. Recognized phase
+//! leases still exercise production and closed-error/log checks; an independent
+//! phase schema and original-byte carry oracle remains an S3b follow-up.
 pub(crate) mod oracle;
 
 use loupe_worker::client::fuzz_support::{self, HostCase, ResponseCase};
@@ -76,6 +79,79 @@ pub(crate) fn closed_error(error: &str) -> bool {
 		})
 }
 
+/// Phase-only error vocabulary; do not widen the legacy differential baseline.
+pub(crate) fn closed_phase_error(error: &str) -> bool {
+	if closed_error(error)
+		|| [
+			"invalid review lease JSON",
+			"invalid review payload JSON",
+			"invalid review lease: duplicate review unit assignment",
+			"invalid review lease: review collection outside its bounds",
+			"payload: missing required field",
+			"material_locations: line numbers must be positive",
+			"material_locations: expected 1 to 16 entries",
+			"line_end: requires line_start",
+			"line_end: precedes line_start",
+			"finding_evidence: canonical payload exceeds 131072 bytes",
+		]
+		.contains(&error)
+	{
+		return true;
+	}
+	let Some((field, rest)) = error.split_once(": ") else { return false };
+	if ![
+		"title",
+		"objective",
+		"reason",
+		"argument",
+		"symbol",
+		"identity_anchor",
+		"identity_instance_key",
+		"identity_family",
+		"description",
+		"attacker_source",
+		"control",
+		"sink",
+		"reachable_path",
+		"trust_boundary",
+		"counterevidence",
+		"assumptions_gaps",
+		"path",
+		"repo_path",
+		"commit_sha",
+		"digest",
+		"generated_profile",
+		"json_key",
+		"json_leaf",
+	]
+	.contains(&field)
+	{
+		return false;
+	}
+	let (rule, point) =
+		rest.split_once(" (U+").map_or((rest, None), |(rule, point)| (rule, Some(point)));
+	[
+		"Character",
+		"Chars",
+		"Bytes",
+		"Whitespace",
+		"Empty",
+		"Identifier",
+		"IdentityLocation",
+		"IdentityHash",
+		"IdentityTransientId",
+		"Path",
+		"JsonSyntax",
+		"JsonDepth",
+		"JsonNodes",
+		"JsonDuplicateKey",
+	]
+	.contains(&rule)
+		&& point.is_none_or(|point| {
+			point.strip_suffix(')').is_some_and(|digits| u32::from_str_radix(digits, 16).is_ok())
+		})
+}
+
 fn host(choice: u8) -> HostCase {
 	use CheckoutFailure::*;
 	if choice.is_multiple_of(14) {
@@ -138,8 +214,7 @@ fn check_host(choice: u8, expected: &Value, actual: &fuzz_support::Observation) 
 		};
 		(format!("original reviewed revision {revision} is unavailable after refreshing and re-cloning the repository: {detail}"),true)
 	};
-	let mut expected =
-		json!({"protocol_version":2,"verdict":{"outcome":"inconclusive","reason":reason}});
+	let mut expected = json!({"protocol_version":loupe_proto::PROTOCOL_VERSION,"verdict":{"outcome":"inconclusive","reason":reason}});
 	if terminal {
 		expected["verdict"]["terminal"] = json!(true);
 	}
@@ -170,12 +245,25 @@ fn exercise(data: &[u8]) {
 		_ => (payload.to_vec(), None),
 	};
 	let expected = oracle::client(kind, &body);
+	let phase = (kind == 0).then(|| oracle::phase_kind(&body)).flatten();
 	let observe = || fuzz_support::observe(case(kind), &body, host(choice));
 	let actual = if kind == 0 {
 		oracle::lease_logs(&body, expected.is_some(), observe).0
 	} else {
 		oracle::without_logs(observe)
 	};
+	if let Some(phase) = phase {
+		match &actual.result {
+			Ok(value) => {
+				assert_eq!(value["kind"], "lease");
+				assert_eq!(value["payload"]["kind"], phase);
+			},
+			Err(error) => {
+				assert!(closed_phase_error(error), "phase error is not closed metadata: {error}")
+			},
+		}
+		return;
+	}
 	assert_eq!(
 		actual.result.is_ok(),
 		expected.is_some(),
@@ -304,7 +392,30 @@ pub unsafe extern "C" fn worker_client_ingress_run(data: *const u8, len: usize) 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+	pub(crate) const PHASE_LEASE: &[u8] = br#"{"kind":"lease","protocol_version":3,"job_id":1,"job_capability":"fixture","repo_id":1,"repo":{"host":"h","owner":"o","repo":"r","clone_url":"c"},"head_branch":null,"lease_expires_at":1,"scanner_config":null,"payload":{"kind":"review_survey","provenance":{"workflow_contract_version":1,"campaign_id":1,"attempt":1,"limits":{"soft_deadline_at":1,"submit_by":1,"hard_deadline_at":2,"token_budget":null,"new_unit_limit":32,"lead_limit":16,"sibling_limit":4}},"context":{"recipe":"bootstrap","target":{"kind":"unresolved"}}}}"#;
+
+	#[test]
+	fn phase_lease_is_exercised_without_a_legacy_schema_claim() {
+		let body = PHASE_LEASE;
+		let actual = super::fuzz_support::observe(super::case(0), body, super::host(0));
+		assert!(actual.result.is_ok(), "phase production decoder must still be exercised");
+		assert_eq!(super::oracle::phase_kind(body), Some("review_survey"));
+		assert_eq!(super::oracle::phase_kind(&super::ledger_fixture(0, 0).bytes), None);
+		let mut input = vec![0, 0];
+		input.extend_from_slice(body);
+		super::do_test(&input);
+		let invalid = String::from_utf8_lossy(body)
+			.replace("\"recipe\":\"bootstrap\"", "\"recipe\":\"private_body_sentinel\"");
+		assert!(super::fuzz_support::observe(super::case(0), invalid.as_bytes(), super::host(0))
+			.result
+			.is_err());
+		input.truncate(2);
+		input.extend_from_slice(invalid.as_bytes());
+		super::do_test(&input);
+		assert!(!super::closed_phase_error("title: private_body_sentinel"));
+	}
+
 	fn log_case(record: &str, admitted: bool, warnings: usize) {
 		let expected = super::oracle::client(0, record.as_bytes());
 		assert_eq!(expected.is_some(), admitted, "independent fixture admission changed");

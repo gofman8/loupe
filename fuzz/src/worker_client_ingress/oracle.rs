@@ -1,5 +1,6 @@
 //! Harness-local specification: public wire schemas plus independent field rules.
 //! No production text constructor, decoder, token-range helper or source mint.
+use serde_json::value::RawValue;
 use serde_json::Value;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
@@ -57,38 +58,69 @@ struct ScannerPatch {
 	exclude_path_substrings: Option<Vec<String>>,
 }
 
-fn malformed_scanner_patch(body: &[u8]) -> bool {
-	use serde_json::value::RawValue;
-	// Preserve the real envelope's sequence positions and duplicate-field
-	// rejection while observing only the original scanner token. Do not parse
-	// the whole message as Value: later ignored overflow/depth errors may occur
-	// after the fixed warning. No production decoder participates in this oracle.
+// Preserve sequence positions and duplicate-field rejection while observing
+// original tokens. Parsing the whole message as Value would reject ignored
+// overflow/depth values before the operational scanner's fixed warning.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct Envelope<'a> {
+	#[serde(borrow)]
+	kind: &'a RawValue,
+	#[serde(borrow)]
+	protocol_version: &'a RawValue,
+	#[serde(borrow)]
+	job_id: &'a RawValue,
+	#[serde(borrow)]
+	job_capability: &'a RawValue,
+	#[serde(borrow)]
+	repo_id: &'a RawValue,
+	#[serde(borrow)]
+	repo: &'a RawValue,
+	#[serde(default, borrow)]
+	head_branch: Option<&'a RawValue>,
+	#[serde(borrow)]
+	lease_expires_at: &'a RawValue,
+	#[serde(borrow)]
+	scanner_config: &'a RawValue,
+	#[serde(default, borrow)]
+	github_pat: Option<&'a RawValue>,
+	#[serde(borrow)]
+	payload: &'a RawValue,
+}
+
+/// Scope only: recognized phase responses still exercise production, but do
+/// not claim the Scan/Verify differential schema or carry ledger as their own.
+/// An independent phase schema/carry oracle remains an S3b follow-up.
+pub(crate) fn phase_kind(body: &[u8]) -> Option<&'static str> {
+	if body.len() > BODY_LIMIT {
+		return None;
+	}
+	let envelope: Envelope<'_> = serde_json::from_slice(body).ok()?;
+	if serde_json::from_str::<String>(envelope.kind.get()).ok()?.as_str() != "lease" {
+		return None;
+	}
 	#[derive(serde::Deserialize)]
-	#[allow(dead_code)]
-	struct Envelope<'a> {
+	struct Tag<'a> {
 		#[serde(borrow)]
 		kind: &'a RawValue,
-		#[serde(borrow)]
-		protocol_version: &'a RawValue,
-		#[serde(borrow)]
-		job_id: &'a RawValue,
-		#[serde(borrow)]
-		job_capability: &'a RawValue,
-		#[serde(borrow)]
-		repo_id: &'a RawValue,
-		#[serde(borrow)]
-		repo: &'a RawValue,
-		#[serde(default, borrow)]
-		head_branch: Option<&'a RawValue>,
-		#[serde(borrow)]
-		lease_expires_at: &'a RawValue,
-		#[serde(borrow)]
-		scanner_config: &'a RawValue,
-		#[serde(default, borrow)]
-		github_pat: Option<&'a RawValue>,
-		#[serde(borrow)]
-		payload: &'a RawValue,
 	}
+	let raw = envelope.payload.get();
+	let kind = if raw.starts_with('[') {
+		let items: Vec<&RawValue> = serde_json::from_str(raw).ok()?;
+		serde_json::from_str::<String>(items.first()?.get()).ok()?
+	} else {
+		let tag: Tag<'_> = serde_json::from_str(raw).ok()?;
+		serde_json::from_str::<String>(tag.kind.get()).ok()?
+	};
+	match kind.as_str() {
+		"review_survey" => Some("review_survey"),
+		"review_drilldown" => Some("review_drilldown"),
+		"review_verify" => Some("review_verify"),
+		_ => None,
+	}
+}
+
+fn malformed_scanner_patch(body: &[u8]) -> bool {
 	if body.len() > BODY_LIMIT {
 		return false;
 	}

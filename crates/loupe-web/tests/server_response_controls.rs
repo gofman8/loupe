@@ -32,6 +32,9 @@ async fn call(status: &str, header: Option<&str>, body: &[u8]) -> (StatusCode, O
 }
 #[tokio::test]
 async fn successful_response_shapes_header_spellings_and_lossy_utf8_controls() {
+	let current = loupe_proto::PROTOCOL_VERSION.to_string();
+	let signed_current = format!("+{current}");
+	let unsupported = loupe_proto::PROTOCOL_VERSION.checked_add(1).unwrap().to_string();
 	for (body, expected) in [
 		(b"\"invalid\xff\"".as_slice(), Some(json!("invalid�"))),
 		(b" \t\r\n", None),
@@ -39,21 +42,21 @@ async fn successful_response_shapes_header_spellings_and_lossy_utf8_controls() {
 		(br#"{"x":1,"x":2}"#, Some(json!({"x":2}))),
 		(b"[1,true]", Some(json!([1, true]))),
 	] {
-		let (status, value) = call("201 Created", Some("+2"), body).await;
+		let (status, value) = call("201 Created", Some(&signed_current), body).await;
 		assert_eq!(status, StatusCode::CREATED);
 		assert_eq!(value, expected);
 	}
-	for header in [None, Some("wrong"), Some("3"), Some("65536")] {
+	for header in [None, Some("wrong"), Some(unsupported.as_str()), Some("65536")] {
 		let (status, body) = call("200 OK", header, b"{}").await;
 		assert_eq!(status, StatusCode::BAD_GATEWAY);
 		let expected = match header {
 			None => format!("server response missing {}", loupe_proto::PROTOCOL_VERSION_HEADER),
-			Some("3") => format!("server speaks protocol 3, this loupe-web build speaks {} — rebuild loupe-web against the running server", loupe_proto::PROTOCOL_VERSION),
+			Some(version) if version == unsupported => format!("server speaks protocol {unsupported}, this loupe-web build speaks {} — rebuild loupe-web against the running server", loupe_proto::PROTOCOL_VERSION),
 			_ => "server protocol header is not a u16".to_owned(),
 		};
 		assert_eq!(body.unwrap()["error"], expected);
 	}
-	let (status, body) = call("200 OK", Some("2"), b"[").await;
+	let (status, body) = call("200 OK", Some(&current), b"[").await;
 	assert_eq!(status, StatusCode::BAD_GATEWAY);
 	assert_eq!(body.unwrap()["error"], "upstream sent invalid JSON");
 }

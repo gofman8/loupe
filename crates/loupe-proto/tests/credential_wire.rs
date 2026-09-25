@@ -66,7 +66,7 @@ fn credential_requests_preserve_escaped_values_and_optional_fields() {
 		);
 		reporting.as_object_mut().unwrap().remove("protocol_version");
 		reporting["kind"] = "github_issue".into();
-		let repo = json!({"protocol_version": 2, "clone_url": "https://example.test/repo", "reporting": reporting});
+		let repo = json!({"protocol_version": PROTOCOL_VERSION, "clone_url": "https://example.test/repo", "reporting": reporting});
 		let request = RegisterRepoRequest::new(
 			text("https://example.test/repo"),
 			ReportingSetup::GithubIssue {
@@ -78,8 +78,7 @@ fn credential_requests_preserve_escaped_values_and_optional_fields() {
 		);
 		check(&request, &repo);
 	}
-	let manual =
-		json!({"protocol_version": 2, "clone_url": "local", "reporting": {"kind":"manual"}});
+	let manual = json!({"protocol_version": PROTOCOL_VERSION, "clone_url": "local", "reporting": {"kind":"manual"}});
 	check(&RegisterRepoRequest::new(text("local"), ReportingSetup::Manual, None), &manual);
 }
 

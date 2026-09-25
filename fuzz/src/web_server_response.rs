@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{HeaderValue, StatusCode};
+use loupe_proto::PROTOCOL_VERSION;
 use loupe_web::fuzz_support::{Entry, Observation, Session};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,7 +29,7 @@ impl Case {
 	fn new(mode: u8, bytes: &[u8]) -> Self {
 		let mut case = Self {
 			status: StatusCode::OK,
-			header: Some(b"2".to_vec()),
+			header: Some(PROTOCOL_VERSION.to_string().into_bytes()),
 			body: bytes.to_vec(),
 			padding: 0,
 			fill: b' ',
@@ -54,7 +55,7 @@ impl Case {
 					StatusCode::ACCEPTED,
 					StatusCode::from_u16(299).unwrap_or_else(|_| unreachable!()),
 				][usize::from(bytes.first().copied().unwrap_or(0)) % 3];
-				case.header = Some(b"+2".to_vec());
+				case.header = Some(format!("+{PROTOCOL_VERSION}").into_bytes());
 			},
 			5 => {
 				case.status = StatusCode::NO_CONTENT;
@@ -138,7 +139,7 @@ impl Case {
 		let Ok(version) = text.parse::<u16>() else {
 			return Some("server protocol header is not a u16".into());
 		};
-		(version != loupe_proto::PROTOCOL_VERSION).then(|| format!("server speaks protocol {version}, this loupe-web build speaks 2 — rebuild loupe-web against the running server"))
+		(version != PROTOCOL_VERSION).then(|| format!("server speaks protocol {version}, this loupe-web build speaks {PROTOCOL_VERSION} — rebuild loupe-web against the running server"))
 	}
 	fn expected(&self) -> (StatusCode, Option<Value>) {
 		if let Some(message) = self.protocol_error() {
@@ -206,7 +207,9 @@ async fn respond(
 	let request =
 		String::from_utf8(request).unwrap_or_else(|_| panic!("non-UTF8 upstream request"));
 	assert!(request.starts_with("GET /v1/health HTTP/1.1\r\n"));
-	assert!(request.to_ascii_lowercase().contains("x-loupe-protocol: 2\r\n"));
+	assert!(request
+		.to_ascii_lowercase()
+		.contains(&format!("x-loupe-protocol: {PROTOCOL_VERSION}\r\n")));
 	assert!(!request.to_ascii_lowercase().contains("x-loupe-capability"));
 	calls.fetch_add(1, Ordering::SeqCst);
 	let mut headers = format!("HTTP/1.1 {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nSet-Cookie: upstream=must-not-forward\r\n", case.status).into_bytes();
@@ -414,6 +417,11 @@ mod tests {
 	use super::*;
 	#[test]
 	fn actual_forward_matrix() {
+		for version in [format!("+{PROTOCOL_VERSION}"), (PROTOCOL_VERSION + 1).to_string()] {
+			let mut input = vec![3];
+			input.extend_from_slice(version.as_bytes());
+			do_test(&input);
+		}
 		for input in [
 			b"\0{}".as_slice(),
 			b"\x01  FAKE_SERVER_DIAGNOSTIC \"<script>\"\n",
