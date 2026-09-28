@@ -47,6 +47,21 @@ fn created(opened: Opened) -> (i64, i64) {
 	}
 }
 
+fn assert_campaign_allocations(
+	conn: &rusqlite::Connection, campaign: i64, expected_jobs: i64, expected_spent: i64,
+) -> loupe_storage::Result<()> {
+	let jobs: i64 =
+		conn.query_row("SELECT COUNT(*) FROM jobs WHERE campaign_id=?1", [campaign], |row| {
+			row.get(0)
+		})?;
+	let spent: i64 = conn.query_row(
+		"SELECT general_spent+urgent_spent+verification_spent FROM campaign_admission_spending WHERE campaign_id=?1",
+		[campaign], |row| row.get(0),
+	)?;
+	assert_eq!((jobs, spent), (expected_jobs, expected_spent), "campaign {campaign} allocations");
+	Ok(())
+}
+
 pub(crate) fn ready(tx: &rusqlite::Transaction<'_>, generation: i64) -> loupe_storage::Result<()> {
 	use loupe_core::inventory_manifest::{ManifestEntry, ManifestHasher};
 	use rusqlite::OptionalExtension;
@@ -509,10 +524,19 @@ fn pin_selects_active_continuation_or_matching_successor() {
 						Err(Error::Conflict(Conflict::GenerationPredecessor))
 					));
 					assert_eq!(
-						campaign::replenish(&crate::test_support::scope(tx, 1), campaign, 3)?,
-						None
+						generations::get(&crate::test_support::scope(tx, 1), generation)?
+							.unwrap()
+							.state,
+						generations::State::Building
+					);
+					assert_eq!(
+						generations::get(&crate::test_support::scope(tx, 1), active)?
+							.unwrap()
+							.state,
+						generations::State::Active
 					);
 				}
+				assert_campaign_allocations(tx, campaign, 1, 1)?;
 				Ok(())
 			})
 		})
@@ -576,7 +600,11 @@ fn first_claim_allocates_coverage_with_frozen_budget_after_activation() {
 				&[9; 32],
 				0,
 			)?;
-			assert_eq!(campaign::replenish(&crate::test_support::scope(tx, 1), campaign, 1)?, None);
+			assert_eq!(
+				campaign::try_finish(&crate::test_support::scope(tx, 1), campaign, 1)?,
+				None
+			);
+			assert_campaign_allocations(tx, campaign, 1, 1)?;
 			let req = loupe_storage::admission_candidates::Request {
 				worker_id: worker,
 				legacy_kinds: &[],
@@ -609,15 +637,7 @@ fn first_claim_allocates_coverage_with_frozen_budget_after_activation() {
 				serde_json::from_str(row.recipe.unwrap().expose()).unwrap();
 			assert_eq!(recipe["recipe"], "coverage");
 			assert_eq!(claimed.assigned_units.len(), 1);
-			assert_eq!(
-				loupe_storage::admission::get_spending(
-					&crate::test_support::scope(tx, 1),
-					campaign
-				)?
-				.unwrap()
-				.total()?,
-				2
-			);
+			assert_campaign_allocations(tx, campaign, 2, 2)?;
 			tx.execute("UPDATE jobs SET state='succeeded',finished_at=2 WHERE id=?1", [row.id])?;
 			assert_eq!(
 				campaign::try_finish(&crate::test_support::scope(tx, 1), campaign, 3)?,
@@ -661,13 +681,14 @@ fn cancellation_keeps_leased_children_and_records_a_summary() {
 }
 
 #[test]
-fn idle_campaign_replenishes_before_finishing_and_snapshots_terminal_counts() {
+fn idle_campaign_preserves_pending_work_or_snapshots_terminal_counts() {
 	for has_work in [true, false] {
 		let db = fixture();
 		db.with_conn(|c| {
 			transaction::immediate(c, |tx| {
 				let (id, _) = idle_campaign(tx, 1, &ReviewPolicy::default(), 0, has_work)?;
 				let finish = campaign::try_finish(&crate::test_support::scope(tx, 1), id, 1)?;
+				assert_campaign_allocations(tx, id, 1, 1)?;
 				let row = campaigns::get(&crate::test_support::scope(tx, 1), id)?.unwrap();
 				if has_work {
 					assert_eq!(finish, None);
@@ -725,6 +746,7 @@ fn deadline_cancels_only_queued_work_and_waits_for_the_leased_child() {
 				children.push(claimed.job.id);
 			}
 			let (leased,queued)=(children[0],children[1]);
+			assert_campaign_allocations(tx, id, 3, 3)?;
 			// A real execution retry retains its original charge and exact assignment.
 			tx.execute("UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,job_capability_hash=NULL,eligible_at=21600 WHERE id=?1",[queued])?;
 			assert_eq!(campaign::try_finish(&crate::test_support::scope(tx,1), id, 21599)?, None);
@@ -734,13 +756,14 @@ fn deadline_cancels_only_queued_work_and_waits_for_the_leased_child() {
 			assert_eq!(cancelled.state, JobState::Cancelled);
 			assert_eq!(cancelled.error.as_ref().map(|v| v.expose()), Some("campaign_deadline"));
 			assert_eq!(jobs::get(&crate::test_support::scope(tx,1), leased)?.unwrap().state, JobState::Leased);
-			assert_eq!(campaign::replenish(&crate::test_support::scope(tx,1), id, 21600)?, None);
+			assert_campaign_allocations(tx, id, 3, 3)?;
 			tx.execute("UPDATE jobs SET state='succeeded',finished_at=21601 WHERE id=?1", [leased])?;
 			assert_eq!(campaign::try_finish(&crate::test_support::scope(tx,1), id, 21601)?, Some(campaign::Finish::DeadlineReached));
 			let row = campaigns::get(&crate::test_support::scope(tx,1), id)?.unwrap();
 			assert_eq!(row.terminal_reason.unwrap().expose(), "deadline");
 			assert!(row.terminal_counts.is_some());
 			assert!(row.coverage_at_finish.is_some());
+			assert_campaign_allocations(tx, id, 3, 3)?;
 			Ok(())
 		})
 	}).unwrap();
@@ -784,9 +807,9 @@ fn tick_reports_budget_exhaustion_once_without_claiming_complete_coverage() {
 		.unwrap();
 	let report = campaign::tick(&db, 1).unwrap();
 	assert_eq!(report.completed, 1);
-	assert_eq!(report.enqueued, 0);
 	assert_eq!(report.budget_exhausted, 1);
 	db.with_conn(|c| {
+		assert_campaign_allocations(c, id, 1, 1)?;
 		let row = campaigns::get(&crate::test_support::scope(c, 1), id)?.unwrap();
 		assert_eq!(row.coverage_at_finish, Some(generations::Coverage::Unknown));
 		assert_eq!(row.state, campaigns::State::Finished);
@@ -794,32 +817,35 @@ fn tick_reports_budget_exhaustion_once_without_claiming_complete_coverage() {
 	})
 	.unwrap();
 	assert_eq!(campaign::tick(&db, 2).unwrap(), campaign::TickReport::default());
+	db.with_conn(|c| assert_campaign_allocations(c, id, 1, 1)).unwrap();
 }
 
 #[test]
 fn tick_rolls_back_a_failed_campaign_and_still_processes_other_repositories() {
 	let db = fixture();
-	let first = db.with_conn(|c| {
+	let (first, second) = db.with_conn(|c| {
 		transaction::immediate(c, |tx| {
 			let (first, _) = idle_campaign(tx, 1, &ReviewPolicy::default(), 0, false)?;
 			tx.execute("INSERT INTO registered_repos(id,clone_url,host,owner,repo,reporting,created_at) VALUES(2,'v','github.com','o','r2','{\"kind\":\"manual\"}',0)", [])?;
-			idle_campaign(tx, 2, &ReviewPolicy::default(), 0, false)?;
+			let (second, _) = idle_campaign(tx, 2, &ReviewPolicy::default(), 0, false)?;
 			tx.execute_batch("CREATE TEMP TRIGGER reject_first_campaign BEFORE UPDATE OF state ON review_campaigns WHEN NEW.repo_id=1 BEGIN SELECT RAISE(ABORT,'injected campaign failure'); END")?;
-			Ok(first)
+			Ok((first, second))
 		})
 	}).unwrap();
 	let report = campaign::tick(&db, 1).unwrap();
 	assert_eq!(report.failed, 1);
 	assert_eq!(report.completed, 1);
-	assert_eq!(report.enqueued, 0);
 	db.with_conn(|c| {
 		assert_eq!(
 			campaigns::get(&crate::test_support::scope(c, 1), first)?.unwrap().state,
 			campaigns::State::Active
 		);
-		let first_jobs: i64 =
-			c.query_row("SELECT COUNT(*) FROM jobs WHERE campaign_id=?1", [first], |r| r.get(0))?;
-		assert_eq!(first_jobs, 1);
+		assert_eq!(
+			campaigns::get(&crate::test_support::scope(c, 2), second)?.unwrap().state,
+			campaigns::State::Finished
+		);
+		assert_campaign_allocations(c, first, 1, 1)?;
+		assert_campaign_allocations(c, second, 1, 1)?;
 		c.execute_batch("DROP TRIGGER reject_first_campaign")?;
 		Ok(())
 	})
@@ -827,7 +853,15 @@ fn tick_rolls_back_a_failed_campaign_and_still_processes_other_repositories() {
 	let report = campaign::tick(&db, 2).unwrap();
 	assert_eq!(report.failed, 0);
 	assert_eq!(report.completed, 1);
-	assert_eq!(report.enqueued, 0);
+	db.with_conn(|c| {
+		assert_eq!(
+			campaigns::get(&crate::test_support::scope(c, 1), first)?.unwrap().state,
+			campaigns::State::Finished
+		);
+		assert_campaign_allocations(c, first, 1, 1)?;
+		assert_campaign_allocations(c, second, 1, 1)
+	})
+	.unwrap();
 }
 
 #[test]

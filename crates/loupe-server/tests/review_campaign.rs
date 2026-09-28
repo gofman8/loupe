@@ -27,8 +27,18 @@ fn request(
 	}
 }
 
+fn assert_campaign_allocations(db: &loupe_storage::Db, repo: i64, campaign: i64) {
+	let count =
+		common::jobs(db, repo).into_iter().filter(|job| job.campaign_id == Some(campaign)).count();
+	let spent = common::with_repo(db, repo, |scope| {
+		loupe_storage::admission::get_spending(scope, campaign)?.unwrap().total()
+	})
+	.unwrap();
+	assert_eq!((count, spent), (1, 1), "campaign {campaign} allocations");
+}
+
 #[tokio::test]
-async fn background_scheduler_keeps_pending_coverage_without_spurious_notifications() {
+async fn background_scheduler_does_not_allocate_or_notify_speculative_coverage() {
 	let mut fixture = common::offline::OfflineDatabase::new();
 	let db = fixture.open();
 	let repo = common::register_repo(&db, &common::new_repo(), None);
@@ -84,6 +94,7 @@ async fn background_scheduler_keeps_pending_coverage_without_spurious_notificati
 		Ok(())
 	})
 	.unwrap();
+	assert_campaign_allocations(&db, repo, campaign);
 	assert!(common::jobs(&db, repo).iter().all(|job| job.state != JobState::Queued));
 	let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
 	let cancelled = tokio_util::sync::CancellationToken::new();
@@ -96,6 +107,7 @@ async fn background_scheduler_keeps_pending_coverage_without_spurious_notificati
 	cancelled.cancel();
 	handle.await.unwrap();
 	assert!(notification.is_err(), "unchanged pending coverage is not a newly queued job");
+	assert_campaign_allocations(&db, repo, campaign);
 	let queued: Vec<_> =
 		common::jobs(&db, repo).into_iter().filter(|job| job.state == JobState::Queued).collect();
 	assert!(queued.is_empty(), "only a winning first claim may create coverage work");
