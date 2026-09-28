@@ -65,6 +65,10 @@ pub fn router(state: AppState) -> Router {
 		.route("/v1/jobs/{id}/llm-findings", post(routes::jobs::submit_llm_finding))
 		.route("/v1/jobs/{id}/verdict", post(routes::jobs::submit_verdict))
 		.route("/v1/jobs/{id}/complete", post(routes::jobs::complete))
+		.route("/v1/jobs/{id}/pin-target", post(routes::review_host::pin_target))
+		.route("/v1/jobs/{id}/inventory-batches", post(routes::review_host::inventory_batch))
+		.route("/v1/jobs/{id}/seal-inventory", post(routes::review_host::seal_inventory))
+		.route("/v1/jobs/{id}/publish-profile", post(routes::review_host::publish_profile))
 		.route_layer(axum::middleware::from_fn(auth::require_worker));
 
 	let authed = Router::new()
@@ -88,7 +92,10 @@ pub fn router(state: AppState) -> Router {
 		.with_state(state)
 		.layer(axum::middleware::from_fn(
 			|req: axum::extract::Request, next: axum::middleware::Next| async move {
-				let mut resp = next.run(req).await;
+				let phase = req.extensions().get::<axum::extract::MatchedPath>()
+					.is_some_and(|path| crate::review::http::is_phase_route(path.as_str()));
+				let resp = next.run(req).await;
+				let mut resp = if phase { crate::review::http::bound_phase_errors(resp).await } else { resp };
 				#[expect(clippy::expect_used, reason = "decimal formatting of the fixed u16 protocol version produces only ASCII header digits")]
 				let version = PROTOCOL_VERSION.to_string().parse().expect("u16 parses as header value");
 				resp.headers_mut().insert(
@@ -103,7 +110,15 @@ pub fn router(state: AppState) -> Router {
 async fn check_request_protocol(
 	req: axum::extract::Request, next: axum::middleware::Next,
 ) -> axum::response::Response {
-	if let Some(msg) = request_protocol_error(req.headers().get(PROTOCOL_VERSION_HEADER)) {
+	if req
+		.extensions()
+		.get::<axum::extract::MatchedPath>()
+		.is_some_and(|path| crate::review::http::is_phase_route(path.as_str()))
+	{
+		if let Err(error) = crate::review::http::require_version(req.headers()) {
+			return error.into_response();
+		}
+	} else if let Some(msg) = request_protocol_error(req.headers().get(PROTOCOL_VERSION_HEADER)) {
 		return (StatusCode::BAD_REQUEST, msg).into_response();
 	}
 	next.run(req).await

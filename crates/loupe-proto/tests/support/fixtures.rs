@@ -2,7 +2,7 @@
 
 use loupe_core::text::{BoundedText, RepoPath, TextPolicy};
 use loupe_core::ScannerDocument;
-use loupe_provenance::{Ingress, Mark, Server, Untrusted, Unvalidated, Validate};
+use loupe_provenance::{Ingress, Mark, Server, Untrusted, Unvalidated, Validate, Worker};
 
 struct Fixture<F>(F);
 impl<F, T> Validate<&str, Server> for Fixture<F>
@@ -42,4 +42,11 @@ pub fn scanner(value: serde_json::Value) -> ScannerDocument<Server> {
 pub fn server_response(bytes: &[u8]) -> Untrusted<&[u8], Server> {
 	// SAFETY: only test binaries call this with locally constructed fixtures.
 	Untrusted::new(bytes, unsafe { Ingress::<Server>::new() })
+}
+
+/// Synthetic original request bytes for the concrete preparation decoders.
+#[allow(unsafe_code)]
+pub fn worker_request(bytes: &[u8]) -> Untrusted<&[u8], Worker> {
+	// SAFETY: only test binaries call this with locally constructed fixtures.
+	Untrusted::new(bytes, unsafe { Ingress::<Worker>::new() })
 }

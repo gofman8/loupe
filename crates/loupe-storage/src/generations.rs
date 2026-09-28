@@ -1,7 +1,7 @@
 //! Rebuildable generations; all lifecycle writes are caller-transactional.
 use loupe_core::text::policy::{Payload, Reason, RevisionText};
 use loupe_core::text::{BoundedJson, BoundedText};
-use loupe_provenance::{Db, Source};
+use loupe_provenance::{Agent, Db, Source};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::review::{changed, classify, parsed, string_enum};
@@ -10,6 +10,15 @@ use crate::{inventory, ownership, Conflict, Entity, Error, Ownership, Result};
 string_enum!(State { Building => "building", Active => "active", Retired => "retired" });
 string_enum!(Coverage { Complete => "complete", Partial => "partial", Unknown => "unknown" });
 string_enum!(Corroboration { Pending => "pending", Sampled => "sampled", Satisfied => "satisfied", Contradicted => "contradicted" });
+/// A modern frozen profile admitted from durable Agent content, never a
+/// reclassification of a legacy operator/database payload.
+// debug-ok: profile and digest owners redact; version is a positive scalar.
+#[derive(Debug, Clone)]
+pub struct FrozenProfile {
+	pub version: std::num::NonZeroU32,
+	pub digest: loupe_core::review_metadata::ReviewDigest<Db>,
+	pub profile: loupe_core::review_payload::GeneratedProfile<Agent>,
+}
 pub struct NewGeneration<'a, S: Source> {
 	pub predecessor_generation_id: Option<i64>,
 	pub commit_sha: &'a BoundedText<RevisionText, S>,
@@ -48,8 +57,9 @@ impl CoverageRollup {
 	}
 }
 
-const COLUMNS: &str = "generation_id,repo_id,predecessor_generation_id,generation_commit_sha,state,workflow_contract_version,profile_version,generated_profile,inventory_digest,coverage,corroboration_state,pending_follow_up,created_at,activated_at,retired_at,retired_reason";
+const COLUMNS: &str = "generation_id,repo_id,predecessor_generation_id,generation_commit_sha,state,workflow_contract_version,profile_version,generated_profile,inventory_digest,coverage,corroboration_state,pending_follow_up,created_at,activated_at,retired_at,retired_reason,generated_profile_source";
 fn row(r: &Row<'_>) -> rusqlite::Result<Generation> {
+	crate::ingress::require_known_source(r, 16)?;
 	Ok(Generation {
 		generation_id: r.get(0)?,
 		repo_id: r.get(1)?,
@@ -190,7 +200,7 @@ pub fn set_profile<S: Source>(
 	if inventory::manifest_sealed(scope, id)?.is_some() {
 		return Err(Error::Conflict(Conflict::GenerationState));
 	}
-	changed(tx.execute("UPDATE review_generations SET profile_version=?2,generated_profile=?3,generated_profile_digest=?4 WHERE generation_id=?1 AND repo_id=?5 AND state IN ('building','active') AND ?2>0 AND (?2>profile_version OR generated_profile IS NULL)",params![id,version,profile.expose(),profile.digest().as_slice(),scope.repo_id])?,Conflict::GenerationState)
+	changed(tx.execute("UPDATE review_generations SET profile_version=?2,generated_profile=?3,generated_profile_digest=?4,generated_profile_source=?6 WHERE generation_id=?1 AND repo_id=?5 AND state IN ('building','active') AND ?2>0 AND (?2>profile_version OR generated_profile IS NULL)",params![id,version,profile.expose(),profile.digest().as_slice(),scope.repo_id,S::NAME])?,Conflict::GenerationState)
 }
 pub fn set_corroboration(
 	scope: &crate::scope::RepoScope<'_>, id: i64, state: Corroboration,

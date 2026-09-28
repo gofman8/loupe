@@ -47,6 +47,30 @@ pub(super) fn populated_v6(conn: &mut Connection) {
 	apply_migrations(conn, &MIGRATIONS[..6]).unwrap();
 }
 
+#[test]
+fn v7_classifies_historical_profiles_without_rewriting_them() {
+	let mut conn = Connection::open_in_memory().unwrap();
+	populated_v6(&mut conn);
+	let before = rows(&conn,"SELECT generation_id,generated_profile,generated_profile_digest,profile_version FROM review_generations ORDER BY generation_id");
+	apply_pending(&mut conn).unwrap();
+	let has_source:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('review_generations') WHERE name='generated_profile_source')",[],|row|row.get(0)).unwrap();
+	assert!(has_source, "profiles need durable content-source metadata");
+	assert_eq!(rows(&conn,"SELECT generation_id,generated_profile,generated_profile_digest,profile_version FROM review_generations ORDER BY generation_id"),before);
+	let wrong: i64 = conn
+		.query_row(
+			"SELECT COUNT(*) FROM review_generations WHERE generated_profile_source<>'agent'",
+			[],
+			|row| row.get(0),
+		)
+		.unwrap();
+	assert_eq!(
+		wrong, 0,
+		"historical source is a conservative content classification, not authorship"
+	);
+	apply_pending(&mut conn).unwrap();
+	assert_eq!(rows(&conn,"SELECT generation_id,generated_profile,generated_profile_digest,profile_version FROM review_generations ORDER BY generation_id"),before);
+}
+
 pub(super) struct Snapshot(Vec<(String, Vec<Vec<Value>>)>);
 
 impl Snapshot {

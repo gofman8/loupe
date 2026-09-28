@@ -31,6 +31,10 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::{jobs, review_units, Error, Result};
 
+mod envelope;
+mod host;
+pub use envelope::{AssignedUnit, ReviewPreparation};
+
 // debug-ok: phase, purpose and policy decisions contain only closed variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -262,8 +266,7 @@ impl PhaseTransaction<'_> {
 		let Some(generation) = &context.generation else { return Ok(false) };
 		let Some(head) = &context.head_sha else { return Ok(false) };
 		let head = head.expose();
-		if !matches!(head.len(), 40 | 64)
-			|| !head.bytes().all(|byte| matches!(byte,b'0'..=b'9'|b'a'..=b'f'))
+		if !loupe_core::inventory_manifest::is_git_oid(head)
 			|| head != context.target_commit.expose()
 			|| head != generation.commit.expose()
 		{
@@ -279,13 +282,13 @@ impl PhaseTransaction<'_> {
 		Ok(self
 			.conn
 			.query_row(
-				"SELECT g.generated_profile,g.generated_profile_digest FROM review_generations g
+				"SELECT g.profile_version,g.generated_profile,g.generated_profile_digest,g.generated_profile_source FROM review_generations g
 			 JOIN generation_manifests m ON m.generation_id=g.generation_id
 			 WHERE g.generation_id=?1 AND g.repo_id=?2 AND typeof(g.profile_version)='integer'
 			 AND g.profile_version BETWEEN 1 AND 4294967295 AND m.sealed_at IS NOT NULL
 			 AND m.received_entry_count=m.expected_entry_count",
 				params![generation.id, job.repo_id],
-				|row| crate::ingress::review_authority::canonical_profile_matches(row, 0, 1),
+				|row| Ok(crate::ingress::profile::frozen_profile(row, 0, 1, 2, 3).is_ok_and(|profile| profile.is_some())),
 			)
 			.optional()?
 			.unwrap_or(false))

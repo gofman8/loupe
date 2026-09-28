@@ -27,7 +27,10 @@ mod scanner;
 pub use pending_follow_up::{FollowUpTrigger, PendingFollowUp, ReviewIntent};
 pub use scanner::ScannerDocument;
 pub mod canonical;
+pub mod inventory_manifest;
+pub mod review_metadata;
 pub mod review_payload;
+pub mod unsupported_preparation;
 /// Immutable recipe/behavior contract recorded on review generations and jobs.
 pub const WORKFLOW_CONTRACT_VERSION: i64 = 2;
 mod error;

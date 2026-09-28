@@ -18,6 +18,96 @@ use super::*;
 
 const NOW: i64 = 100;
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[test]
+fn response_overflow_and_callback_error_roll_back_preparation() {
+	use crate::review::http::{self, ApiError};
+	for fail_callback in [false, true] {
+		let f = fixture();
+		let now =
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+				as i64;
+		f.database
+			.external_corruption(|conn| {
+				let policy=serde_json::to_string(&loupe_storage::scheduler::CampaignPolicy::default()).unwrap();
+				conn.execute("UPDATE review_campaigns SET effective_policy=?1",[policy])?;
+				conn.execute(
+					"UPDATE jobs SET lease_expires_at=?1,hard_deadline_at=?1,prepared_attempt=NULL,prepared_capability_hash=NULL,prepared_at=NULL WHERE id=101",
+					[now + 1000],
+				)?;
+				conn.execute("UPDATE review_campaigns SET deadline_at=?1", [now + 1000])?;
+				Ok(())
+			})
+			.unwrap();
+		let raw = serde_json::json!({"protocol_version":3,"commit_sha":SHA}).to_string();
+		let body = crate::test_support::worker_body(raw.as_bytes());
+		let request =
+			body.0.as_bytes().validate(loupe_proto::review_api::PinTargetRequestDecoder).unwrap();
+		let result = http::transaction(&f.db, &f.worker, &f.headers, 101, 4, |tx| {
+			assert!(matches!(
+				tx.pin_target(&request.commit_sha, &[1; 32], policy)
+					.expect("fixture pin must succeed before the injected response failure"),
+				loupe_storage::host_preparation::PinOutcome::Prepared(_)
+			));
+			if fail_callback {
+				return Err(ApiError::conflict("injected"));
+			}
+			Ok("too large")
+		});
+		assert!(result.is_err());
+		f.database
+			.external_corruption(|conn| {
+				assert_eq!(
+					conn.query_row("SELECT prepared_at FROM jobs WHERE id=101", [], |row| row
+						.get::<_, Option<
+						i64,
+					>>(
+						0
+					))?,
+					None,
+					"failed response must roll back preparation"
+				);
+				assert_eq!(
+					conn.query_row(
+						"SELECT COUNT(*) FROM job_checkpoints WHERE job_id=101",
+						[],
+						|row| row.get::<_, i64>(0)
+					)?,
+					0,
+					"failed response must roll back assignments"
+				);
+				Ok(())
+			})
+			.unwrap();
+		http::transaction(&f.db, &f.worker, &f.headers, 101, 100, |tx| {
+			assert!(matches!(
+				tx.pin_target(&request.commit_sha, &[1; 32], policy)?,
+				loupe_storage::host_preparation::PinOutcome::Prepared(_)
+			));
+			Ok("fits")
+		})
+		.unwrap();
+		f.database
+			.external_corruption(|conn| {
+				assert!(
+					conn.query_row("SELECT prepared_at FROM jobs WHERE id=101", [], |row| row
+						.get::<_, i64>(0))?
+						> 1
+				);
+				assert_eq!(
+					conn.query_row(
+						"SELECT COUNT(*) FROM job_checkpoints WHERE job_id=101",
+						[],
+						|row| row.get::<_, i64>(0)
+					)?,
+					1,
+					"successful response commits the same preparation and batch"
+				);
+				Ok(())
+			})
+			.unwrap();
+	}
+}
 struct Fixture {
 	database: crate::test_support::offline::OfflineDatabase,
 	db: Arc<Db>,

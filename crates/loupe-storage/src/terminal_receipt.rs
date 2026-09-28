@@ -107,6 +107,15 @@ pub fn get(scope: &crate::scope::RepoScope<'_>, job: i64) -> Result<Option<Recei
 		)
 		.optional()?)
 }
+pub(crate) fn get_raw(conn: &Connection, job: i64) -> Result<Option<Receipt>> {
+	Ok(conn
+		.query_row(
+			&format!("SELECT {COLUMNS} FROM job_terminal_receipts WHERE job_id=?1"),
+			[job],
+			row,
+		)
+		.optional()?)
+}
 const COLUMNS: &str = "job_terminal_receipt_id,job_id,phase,terminal_reason,subject_title,subject_digest,pinned_commit_sha,effective_recipe,result_digest,evidence_rung,result_counts,finishing_capability_hash,created_at";
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
 	// Keep the stored capability's SQL type checked without exposing it.

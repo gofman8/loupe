@@ -11,6 +11,7 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
+pub use loupe_core::review_metadata::{CommitPolicy, DigestPolicy, ReviewCommit, ReviewDigest};
 use loupe_core::review_payload::{FindingEvidenceV1, GeneratedProfile, Version1};
 use loupe_core::text::policy::{
 	AnchorText, Argument, Family, InstanceKey, Objective, Reason, ReviewFindingDescription,
@@ -59,32 +60,6 @@ impl From<ReviewId> for i64 {
 		value.0
 	}
 }
-
-// debug-ok: closed protocol scalars or collections delegate to redacted values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommitPolicy;
-impl IdentPolicy for CommitPolicy {
-	const FIELD: &'static str = "commit_sha";
-	const MAX_LEN: usize = 64;
-	fn accepts(value: &str) -> bool {
-		matches!(value.len(), 40 | 64) && lower_hex(value)
-	}
-}
-// debug-ok: closed protocol scalars or collections delegate to redacted values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DigestPolicy;
-impl IdentPolicy for DigestPolicy {
-	const FIELD: &'static str = "digest";
-	const MAX_LEN: usize = 64;
-	fn accepts(value: &str) -> bool {
-		value.len() == 64 && lower_hex(value)
-	}
-}
-fn lower_hex(value: &str) -> bool {
-	value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-pub type ReviewCommit<S> = Identifier<CommitPolicy, S>;
-pub type ReviewDigest<S> = Identifier<DigestPolicy, S>;
 
 /// Bounded collections reject the first excess element while decoding.
 // debug-ok: closed protocol scalars or collections delegate to redacted values.

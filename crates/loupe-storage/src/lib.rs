@@ -30,6 +30,7 @@ pub mod finding_details;
 pub mod findings;
 pub mod generations;
 pub mod github_app;
+pub mod host_preparation;
 pub mod identity;
 mod ingress;
 pub mod inventory;

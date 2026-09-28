@@ -323,6 +323,44 @@ fn campaign_and_generation_reject_each_foreign_parent() {
 }
 
 #[test]
+fn legacy_profile_setters_preserve_each_content_source() {
+	let db = fixture();
+	db.with_conn(|conn| {
+		let scope = crate::test_support::scope(conn, 1);
+		let operator = crate::test_support::operated("{\"owner\":\"operator\"}", |raw, mark| {
+			BoundedJson::<Payload, _>::new(mark, raw).unwrap()
+		});
+		crate::generations::set_profile(&scope, 11, 1, &operator)?;
+		let stored: String = conn.query_row(
+			"SELECT generated_profile_source FROM review_generations WHERE generation_id=11",
+			[],
+			|row| row.get(0),
+		)?;
+		assert_eq!(
+			stored, "operator",
+			"legacy publication must not relabel operator content as agent"
+		);
+		let database = crate::test_support::db_json::<Payload>("{\"owner\":\"db\"}").unwrap();
+		crate::generations::set_profile(&scope, 11, 2, &database)?;
+		let stored: String = conn.query_row(
+			"SELECT generated_profile_source FROM review_generations WHERE generation_id=11",
+			[],
+			|row| row.get(0),
+		)?;
+		assert_eq!(stored, "db", "legacy publication must retain Db content classification");
+		crate::generations::set_profile(&scope, 11, 3, &payload())?;
+		let stored: String = conn.query_row(
+			"SELECT generated_profile_source FROM review_generations WHERE generation_id=11",
+			[],
+			|row| row.get(0),
+		)?;
+		assert_eq!(stored, "agent", "Agent publication remains classified Agent");
+		Ok(())
+	})
+	.unwrap();
+}
+
+#[test]
 fn profiles_are_canonical_versioned_and_frozen_on_retirement() {
 	use crate::{generations as g, transaction};
 	let db = fixture();

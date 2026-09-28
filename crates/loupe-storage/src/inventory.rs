@@ -10,7 +10,7 @@ use crate::{ownership, Conflict, Error, Ownership, Result};
 string_enum!(EntryKind { Tracked => "tracked", Submodule => "submodule" });
 string_enum!(Disposition { Mapped => "mapped", Context => "context", Excluded => "excluded", Unresolved => "unresolved" });
 pub const MAX_ENTRIES: usize = 4096;
-pub const MAX_RAW_PATH_BYTES: usize = 64 * 1024;
+pub const MAX_RAW_PATH_BYTES: usize = loupe_core::inventory_manifest::MAX_PATH_BYTES;
 
 pub(crate) struct RawPath<S: Source>(Vec<u8>, std::marker::PhantomData<S>);
 impl<S: Source> RawPath<S> {
@@ -149,14 +149,16 @@ impl std::error::Error for UnknownPaths {}
 pub(crate) fn manifest_sealed(
 	scope: &crate::scope::RepoScope<'_>, generation: i64,
 ) -> Result<Option<bool>> {
-	ownership::generation(scope.conn, scope.repo_id, generation, Ownership::InventoryGeneration)?;
-	Ok(scope
-		.conn
+	manifest_sealed_raw(scope.conn, scope.repo_id, generation)
+}
+fn manifest_sealed_raw(conn: &Connection, repo: i64, generation: i64) -> Result<Option<bool>> {
+	ownership::generation(conn, repo, generation, Ownership::InventoryGeneration)?;
+	Ok(conn
 		.query_row(
 			"SELECT sealed_at IS NOT NULL FROM generation_manifests m
 		 JOIN review_generations g ON g.generation_id=m.generation_id
 		 WHERE m.generation_id=?1 AND g.repo_id=?2",
-			params![generation, scope.repo_id],
+			params![generation, repo],
 			|row| row.get(0),
 		)
 		.optional()?)
@@ -301,14 +303,18 @@ pub(crate) fn validate_stored_rows(conn: &Connection) -> Result<()> {
 pub fn verify_refs(
 	scope: &crate::scope::RepoScope<'_>, generation: i64, refs: &[SourceRef<Agent>],
 ) -> Result<()> {
-	let tx = scope.conn;
-	let managed = match manifest_sealed(scope, generation)? {
+	verify_refs_raw(scope.conn, scope.repo_id, generation, refs)
+}
+pub(crate) fn verify_refs_raw(
+	tx: &Connection, repo: i64, generation: i64, refs: &[SourceRef<Agent>],
+) -> Result<()> {
+	let managed = match manifest_sealed_raw(tx, repo, generation)? {
 		Some(false) => return Err(Error::Conflict(Conflict::GenerationState)),
 		Some(true) => true,
 		None => false,
 	};
 	if !managed {
-		let exists: bool = tx.query_row("SELECT inventory_digest IS NOT NULL OR EXISTS(SELECT 1 FROM generation_inventory WHERE generation_id=?1) FROM review_generations WHERE generation_id=?1 AND repo_id=?2",params![generation,scope.repo_id],|r|r.get(0))?;
+		let exists: bool = tx.query_row("SELECT inventory_digest IS NOT NULL OR EXISTS(SELECT 1 FROM generation_inventory WHERE generation_id=?1) FROM review_generations WHERE generation_id=?1 AND repo_id=?2",params![generation,repo],|r|r.get(0))?;
 		if !exists {
 			return Ok(());
 		}
@@ -320,10 +326,9 @@ pub fn verify_refs(
 		AND ((?4 AND source_path=?2 AND manifest_position IS NOT NULL)
 		 OR (NOT ?4 AND path=?2 AND (disposition_reason IS NULL OR disposition_reason<>'unrepresentable-path'))))")?;
 	for source in refs {
-		if !statement
-			.query_row(params![generation, source.path.expose(), scope.repo_id, managed], |r| {
-				r.get::<_, bool>(0)
-			})? {
+		if !statement.query_row(params![generation, source.path.expose(), repo, managed], |r| {
+			r.get::<_, bool>(0)
+		})? {
 			unknown.push(source.path.clone());
 		}
 	}

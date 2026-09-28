@@ -118,22 +118,25 @@ pub fn with_transaction<T, E: From<Error>>(
 pub fn authorize<'scope, 'tx>(
 	tx: &'scope mut stored::PhaseTransaction<'tx>, phase: Phase, access: Access,
 ) -> Result<Option<stored::PhaseScope<'scope, 'scope>>> {
-	tx.authorize(phase, access, |context| {
-		let Some(recipe) = context
-			.recipe
-			.as_ref()
-			.and_then(|raw| serde_json::from_str::<Recipe>(raw.expose()).ok())
-		else {
-			return Ok(None);
-		};
-		Ok((recipe.phase() == phase && recipe.supported(context, access)).then_some(
-			if recipe.bootstrap() {
-				stored::PolicyDecision::Bootstrap
-			} else {
-				stored::PolicyDecision::Ordinary
-			},
-		))
-	})
+	tx.authorize(phase, access, |context| policy(phase, access, context))
+}
+
+/// Checkout preparation re-runs this same policy after resolving its generation.
+pub fn policy(
+	phase: Phase, access: Access, context: &stored::Context,
+) -> Result<Option<stored::PolicyDecision>> {
+	let Some(recipe) =
+		context.recipe.as_ref().and_then(|raw| serde_json::from_str::<Recipe>(raw.expose()).ok())
+	else {
+		return Ok(None);
+	};
+	Ok((recipe.phase() == phase && recipe.supported(context, access)).then_some(
+		if recipe.bootstrap() {
+			stored::PolicyDecision::Bootstrap
+		} else {
+			stored::PolicyDecision::Ordinary
+		},
+	))
 }
 
 #[cfg(test)]

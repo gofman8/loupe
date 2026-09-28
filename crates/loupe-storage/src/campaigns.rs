@@ -252,11 +252,10 @@ pub fn list_for_repo(scope: &crate::scope::RepoScope<'_>) -> Result<Vec<Campaign
 	let tx = scope.conn;
 	Ok(tx.prepare(&format!("SELECT {COLUMNS} FROM review_campaigns WHERE repo_id=?1 ORDER BY created_at DESC,campaign_id DESC"))?.query_map([scope.repo_id],row)?.collect::<rusqlite::Result<_>>()?)
 }
-fn counts(scope: &crate::scope::RepoScope<'_>, sql: &str, id: Option<i64>) -> Result<CountGroup> {
-	let tx = scope.conn;
+fn counts(tx: &Connection, repo: i64, sql: &str, id: Option<i64>) -> Result<CountGroup> {
 	let mut object = Vec::new();
 	let mut statement = tx.prepare(sql)?;
-	for pair in statement.query_map(params![id, scope.repo_id], |r| {
+	for pair in statement.query_map(params![id, repo], |r| {
 		Ok((crate::ingress::count_json_key(r, 0)?, r.get::<_, i64>(1)?))
 	})? {
 		let (key, count) = pair?;
@@ -265,13 +264,24 @@ fn counts(scope: &crate::scope::RepoScope<'_>, sql: &str, id: Option<i64>) -> Re
 	Ok(object)
 }
 pub fn summarize(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<TerminalSummary> {
-	let tx = scope.conn;
-	let campaign = get(scope, id)?.ok_or(Error::NotFound(Entity::Campaign, id))?;
+	summarize_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn summarize_raw(tx: &Connection, repo: i64, id: i64) -> Result<TerminalSummary> {
+	let campaign = tx
+		.query_row(
+			&format!("SELECT {COLUMNS} FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2"),
+			params![id, repo],
+			row,
+		)
+		.optional()?
+		.ok_or(Error::NotFound(Entity::Campaign, id))?;
 	let coverage = if let Some(generation) = campaign.generation_id {
 		ownership::generation(tx, campaign.repo_id, generation, Ownership::CampaignGeneration)?;
-		crate::generations::get(scope, generation)?
-			.ok_or(Error::NotFound(Entity::Generation, generation))?
-			.coverage
+		tx.query_row(
+			"SELECT coverage FROM review_generations WHERE generation_id=?1 AND repo_id=?2",
+			params![generation, repo],
+			|row| parsed(row, 0),
+		)?
 	} else {
 		crate::generations::Coverage::Unknown
 	};
@@ -284,7 +294,7 @@ pub fn summarize(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Termina
 		"SELECT kind,state,COUNT(*) FROM jobs WHERE campaign_id=?1 AND repo_id=?2
 		 GROUP BY kind,state ORDER BY kind,state",
 	)?;
-	for record in statement.query_map(params![id, scope.repo_id], |r| {
+	for record in statement.query_map(params![id, repo], |r| {
 		Ok(JobCount {
 			kind: crate::ingress::job_kind_text(r, 0)?,
 			leaf: crate::ingress::count_json_leaf(r, 0)?,
@@ -296,10 +306,10 @@ pub fn summarize(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Termina
 	}
 	let generation = campaign.generation_id;
 	let counts = CampaignCounts { jobs,
-		lead_status: counts(scope,"SELECT status,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) GROUP BY status",generation)?,
-		lead_disposition: counts(scope,"SELECT disposition,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) AND disposition IS NOT NULL GROUP BY disposition",generation)?,
-		findings: counts(scope,"SELECT f.state,COUNT(*) FROM findings f JOIN finding_review_details d ON d.finding_id=f.id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND f.repo_id=?2 GROUP BY f.state",generation)?,
-		verdicts: counts(scope,"SELECT v.verdict,COUNT(*) FROM finding_verifications v JOIN finding_review_details d ON d.finding_id=v.finding_id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND EXISTS(SELECT 1 FROM findings f WHERE f.id=v.finding_id AND f.repo_id=?2) GROUP BY v.verdict",generation)?, canonical: String::new() }.finish()?;
+		lead_status: counts(tx,repo,"SELECT status,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) GROUP BY status",generation)?,
+		lead_disposition: counts(tx,repo,"SELECT disposition,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) AND disposition IS NOT NULL GROUP BY disposition",generation)?,
+		findings: counts(tx,repo,"SELECT f.state,COUNT(*) FROM findings f JOIN finding_review_details d ON d.finding_id=f.id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND f.repo_id=?2 GROUP BY f.state",generation)?,
+		verdicts: counts(tx,repo,"SELECT v.verdict,COUNT(*) FROM finding_verifications v JOIN finding_review_details d ON d.finding_id=v.finding_id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND EXISTS(SELECT 1 FROM findings f WHERE f.id=v.finding_id AND f.repo_id=?2) GROUP BY v.verdict",generation)?, canonical: String::new() }.finish()?;
 	Ok(TerminalSummary { campaign_id: id, coverage, counts })
 }
 pub fn finish<S: Source>(
@@ -309,6 +319,12 @@ pub fn finish<S: Source>(
 	scope.require_operator()?;
 	finish_with_reason(scope, id, summary, reason.expose(), now)
 }
+/// Closed phase-host outcome after cancelling the last live campaign job.
+pub(crate) fn finish_unsupported(tx: &Connection, repo: i64, id: i64, now: i64) -> Result<()> {
+	let summary = summarize_raw(tx, repo, id)?;
+	changed(tx.execute("UPDATE review_campaigns SET state='finished',terminal_reason='unsupported_recipe',coverage_at_finish=?2,terminal_counts=?3,finished_at=?4 WHERE campaign_id=?1 AND repo_id=?5 AND state='active'",params![id,summary.coverage.as_str(),summary.counts.expose(),now,repo])?,Conflict::CampaignState)
+}
+
 /// Scheduler outcomes are closed host facts, not attributed input text.
 // debug-ok: completion reasons are closed host scheduling outcomes.
 #[derive(Debug, Clone, Copy)]

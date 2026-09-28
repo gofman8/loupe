@@ -78,6 +78,7 @@ CREATE TABLE verification_attempt_details_new (
 "#;
 
 pub(super) const ADDITIONS: &str = r#"
+ALTER TABLE review_generations ADD COLUMN generated_profile_source TEXT NOT NULL DEFAULT 'agent';
 ALTER TABLE jobs ADD COLUMN prepared_attempt INTEGER CHECK (prepared_attempt IS NULL OR prepared_attempt > 0);
 ALTER TABLE jobs ADD COLUMN prepared_capability_hash BLOB
     CHECK (prepared_capability_hash IS NULL OR (typeof(prepared_capability_hash) = 'blob' AND length(prepared_capability_hash) = 32));

@@ -3,7 +3,7 @@ mod claim;
 mod policy;
 #[cfg(test)]
 use claim::claim_kinds;
-pub(crate) use claim::claim_raw;
+pub(crate) use claim::{claim_raw, initialize_ordinary_batch};
 pub use claim::{ClaimRequest, Claimed};
 use loupe_core::text::policy::{Payload, Reason};
 use loupe_core::text::{BoundedJson, BoundedText};

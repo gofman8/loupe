@@ -12,6 +12,8 @@ use rusqlite::types::{Type, ValueRef};
 use rusqlite::Row;
 
 mod app;
+pub(crate) mod host_preparation;
+pub(crate) mod profile;
 mod refs;
 mod reporting;
 pub(crate) mod review_authority;
@@ -286,6 +288,17 @@ agent_field!(StoredObjective, AgentObjective, objective, BoundedText, policy::Ob
 
 agent_field!(StoredArgument, AgentArgument, argument, BoundedText, policy::Argument, existing);
 optional_exit!(optional_argument, argument, BoundedText<policy::Argument, Agent>);
+
+// Frozen lease projection is deliberately stricter than historical storage.
+agent_field!(
+	StoredClosureCriteria,
+	AgentClosureCriteria,
+	closure_criteria,
+	BoundedText,
+	policy::Reason,
+	existing
+);
+optional_exit!(optional_closure_criteria, closure_criteria, BoundedText<policy::Reason, Agent>);
 
 agent_field!(
 	StoredAgentPayload,

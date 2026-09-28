@@ -10,6 +10,137 @@ use crate::secrets::MasterKey;
 const HASH: [u8; 32] = [7; 32];
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[test]
+fn ordinary_assignment_snapshot_requires_domain_readiness() {
+	let db = fixture();
+	mutate(&db,"UPDATE review_generations SET generated_profile=NULL,generated_profile_digest=NULL WHERE generation_id=11");
+	with_phase_transaction(
+		&db,
+		identity(),
+		|| 100,
+		|tx| {
+			let scope = tx
+				.authorize(Phase::Survey, Access::PreparedHost, |_| {
+					Ok(Some(PolicyDecision::Ordinary))
+				})?
+				.unwrap();
+			assert!(
+				scope.preparation_snapshot().is_err(),
+				"ordinary assignments require Domain readiness, not checkout preparation alone"
+			);
+			Ok::<_, Error>(())
+		},
+	)
+	.unwrap();
+}
+
+#[test]
+fn preparation_snapshot_requires_prepared_purpose_and_keeps_content_sources() {
+	let db = fixture();
+	mutate(&db, "INSERT INTO review_units(review_unit_id,generation_id,client_review_unit_key,title,objective,source_refs,closure_criteria,assignment_epoch,created_by_job_id,created_at) VALUES(31,11,'owned','title','objective','[]','closure',3,101,0); INSERT INTO job_assigned_review_units(job_id,review_unit_id,position,assignment_epoch) VALUES(101,31,0,3);");
+	for access in [Access::LeaseControl, Access::Checkout, Access::PreparedHost, Access::Domain] {
+		with_phase_transaction(
+			&db,
+			identity(),
+			|| 100,
+			|tx| {
+				let scope = tx
+					.authorize(Phase::Survey, access, |_| Ok(Some(PolicyDecision::Ordinary)))?
+					.unwrap();
+				let snapshot = scope.preparation_snapshot();
+				if access != Access::Domain {
+					assert!(snapshot.is_err());
+				} else {
+					let snapshot = snapshot?;
+					assert_eq!(snapshot.commit.expose(), SHA);
+					let _: loupe_core::review_payload::GeneratedProfile<loupe_provenance::Agent> =
+						snapshot.profile.unwrap().profile;
+					let units = snapshot.assignments.unwrap();
+					assert_eq!(units.len(), 1);
+					assert_eq!(units[0].id, 31);
+					assert_eq!(units[0].epoch, 3);
+					assert_eq!(units[0].closure_criteria.as_ref().unwrap().expose(), "closure");
+				}
+				Ok::<_, Error>(())
+			},
+		)
+		.unwrap();
+	}
+	with_phase_transaction(
+		&db,
+		identity(),
+		|| 100,
+		|tx| {
+			let scope = tx
+				.authorize(Phase::Survey, Access::PreparedHost, |_| {
+					Ok(Some(PolicyDecision::Bootstrap))
+				})?
+				.unwrap();
+			let snapshot = scope.preparation_snapshot()?;
+			assert_eq!(snapshot.commit.expose(), SHA);
+			assert!(
+				snapshot.assignments.is_none(),
+				"bootstrap preparation carries no ordinary assignments"
+			);
+			Ok::<_, Error>(())
+		},
+	)
+	.unwrap();
+}
+
+#[test]
+fn preparation_snapshot_refuses_foreign_stale_or_incompatible_assignments() {
+	for sql in [
+		"UPDATE job_assigned_review_units SET assignment_epoch=2",
+		"UPDATE review_units SET generation_id=21",
+		"UPDATE review_units SET source='db'",
+		"UPDATE review_units SET depends_on='[999]'",
+		"UPDATE review_units SET source_refs='[{\"path\":\"missing.rs\"}]'",
+		"UPDATE review_units SET closure_criteria=printf('%010000d',0)",
+	] {
+		let db = fixture();
+		mutate(&db,"INSERT INTO review_units(review_unit_id,generation_id,client_review_unit_key,title,objective,source_refs,assignment_epoch,created_by_job_id,created_at) VALUES(31,11,'owned','title','objective','[]',3,101,0); INSERT INTO job_assigned_review_units(job_id,review_unit_id,position,assignment_epoch) VALUES(101,31,0,3);");
+		mutate(&db, sql);
+		with_phase_transaction(
+			&db,
+			identity(),
+			|| 100,
+			|tx| {
+				let scope = tx
+					.authorize(Phase::Survey, Access::Domain, |_| {
+						Ok(Some(PolicyDecision::Ordinary))
+					})?
+					.unwrap();
+				assert!(scope.preparation_snapshot().is_err(), "{sql}");
+				Ok::<_, Error>(())
+			},
+		)
+		.unwrap();
+	}
+}
+
+#[test]
+fn domain_authority_requires_agent_profile_classification() {
+	for source in ["operator", "db", "worker", "unknown"] {
+		let db = fixture();
+		assert!(allowed(&db, identity(), Phase::Survey, Access::Domain, 100));
+		db.with_conn(|conn| {
+			conn.execute(
+				"UPDATE review_generations SET generated_profile_source=?1 WHERE generation_id=11",
+				[source],
+			)?;
+			Ok(())
+		})
+		.unwrap();
+		assert!(allowed(&db, identity(), Phase::Survey, Access::LeaseControl, 100));
+		assert!(allowed(&db, identity(), Phase::Survey, Access::PreparedHost, 100));
+		assert!(
+			!allowed(&db, identity(), Phase::Survey, Access::Domain, 100),
+			"non-Agent profile must not authorize domain work: {source}"
+		);
+	}
+}
+
 fn terminal_payload(notes: Option<&str>) -> crate::terminal_payloads::TerminalPayload {
 	let raw =
 		serde_json::json!({"version":1,"terminal_reason":"completed","security_model_notes":notes})
