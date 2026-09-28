@@ -1,4 +1,4 @@
-//! Direct leased-authority fixtures; public phase claim gates remain closed.
+//! Direct leased-authority fixtures; real-router flows live in review_public.rs.
 //! SQL here edits only an independently owned encrypted test database. Runtime
 //! authority is obtained through the real authentication middleware and storage
 //! facade, never a public SQL connection or a worker-as-operator adapter.

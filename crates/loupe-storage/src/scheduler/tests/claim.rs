@@ -71,7 +71,7 @@ fn units(db: &crate::Db) {
 }
 
 #[test]
-fn public_claim_keeps_survey_and_drilldown_runtime_gated() {
+fn legacy_claim_never_offers_survey_or_drilldown() {
 	let db = claim_fixture();
 	let id = queue(&db, Band::Normal, 0, 0);
 	db.with_conn(|conn| {
@@ -108,7 +108,78 @@ fn public_claim_keeps_survey_and_drilldown_runtime_gated() {
 		})
 	})
 	.unwrap();
+	assert!(super::super::claim(
+		&db,
+		&ClaimRequest {
+			worker_id: 1,
+			kinds: &[
+				JobKind::<loupe_provenance::Agent>::Survey,
+				JobKind::<loupe_provenance::Agent>::Drilldown,
+			],
+			now: 1,
+			capability_hash: &[2; 32],
+			legacy_lease_seconds: 600,
+			policy: &ClaimPolicy::default(),
+		},
+	)
+	.unwrap()
+	.is_none());
+	db.with_conn(|conn| {
+		let job = jobs::get_raw(conn, id)?.unwrap();
+		assert_eq!(job.state, JobState::Queued);
+		assert_eq!(job.attempts, 0);
+		assert_eq!(
+			conn.query_row("SELECT seq FROM scheduler_clock", [], |row| row.get::<_, i64>(0))?,
+			0
+		);
+		assert_eq!(
+			conn.query_row("SELECT COUNT(*) FROM scheduler_repo_state", [], |row| row
+				.get::<_, i64>(0))?,
+			0
+		);
+		Ok(())
+	})
+	.unwrap();
 	assert_eq!(take(&db, 1, &ClaimPolicy::default()).unwrap().job.id, id);
+}
+
+#[test]
+fn legacy_public_claim_rejects_unknown_variants_with_known_spellings() {
+	for kind in [JobKind::<loupe_provenance::Agent>::Scan, JobKind::Verify] {
+		let db = claim_fixture();
+		let id = db.with_conn(|conn| {
+			conn.execute_batch("INSERT INTO jobs(id,repo_id,kind,state,head_sha,enqueued_at) VALUES(1000,1,'scan','succeeded','base',0);
+			INSERT INTO findings(id,repo_id,job_id,scanner_id,severity,title,description,fingerprint,state,created_at,report_identity) VALUES(1000,1,1000,'test','high','t','d','legacy-target','validating',0,randomblob(16));")?;
+			conn.execute(
+				"INSERT INTO jobs(repo_id,kind,state,target_finding_id,parent_job_id,enqueued_at) VALUES(1,?1,'queued',?2,?2,0)",
+				params![kind.as_str(), (kind == JobKind::Verify).then_some(1000)],
+			)?;
+			Ok(conn.last_insert_rowid())
+		}).unwrap();
+		let unknown = JobKind::Unknown(crate::test_support::text(kind.as_str()).unwrap());
+		let policy = ClaimPolicy::default();
+		let request = ClaimRequest {
+			worker_id: 1,
+			kinds: std::slice::from_ref(&unknown),
+			now: 1,
+			capability_hash: &[3; 32],
+			legacy_lease_seconds: 600,
+			policy: &policy,
+		};
+		assert!(super::super::claim(&db, &request).unwrap().is_none());
+		db.with_conn(|conn| {
+			assert_eq!(jobs::get_raw(conn, id)?.unwrap().state, JobState::Queued);
+			assert_eq!(jobs::get_raw(conn, id)?.unwrap().attempts, 0);
+			assert_eq!(
+				conn.query_row("SELECT seq FROM scheduler_clock", [], |row| row.get::<_, i64>(0))?,
+				0
+			);
+			Ok(())
+		})
+		.unwrap();
+		let request = ClaimRequest { kinds: std::slice::from_ref(&kind), ..request };
+		assert_eq!(super::super::claim(&db, &request).unwrap().unwrap().claimed.job.id, id);
+	}
 }
 
 #[test]
@@ -561,9 +632,8 @@ fn legacy_claim_order_matches_recorded_base_sequence() {
 
 #[test]
 fn public_claim_never_offers_campaign_rows_to_legacy_kinds() {
-	// `verify` is a runtime kind for the legacy pipeline, but a campaign
-	// verify job has no phase handler. A protocol-2 worker advertising
-	// `verify:*` must never receive one.
+	// The legacy storage entry point cannot bypass validated phase admission,
+	// even though both pipelines support the verify kind.
 	let db = claim_fixture();
 	let verify = db
 		.with_conn(|conn| {
@@ -600,6 +670,35 @@ fn public_claim_never_offers_campaign_rows_to_legacy_kinds() {
 		})
 		.unwrap();
 	assert!(legacy.is_none(), "campaign verify leased to a legacy worker: {legacy:?}");
+	assert!(super::super::claim(
+		&db,
+		&ClaimRequest {
+			worker_id: 1,
+			kinds: &[JobKind::<loupe_provenance::Agent>::Scan, JobKind::Verify],
+			now: 100,
+			capability_hash: &[0xc2; 32],
+			legacy_lease_seconds: 600,
+			policy: &ClaimPolicy::default(),
+		},
+	)
+	.unwrap()
+	.is_none());
+	db.with_conn(|conn| {
+		let job = jobs::get_raw(conn, verify)?.unwrap();
+		assert_eq!(job.state, JobState::Queued);
+		assert_eq!(job.attempts, 0);
+		assert_eq!(
+			conn.query_row("SELECT seq FROM scheduler_clock", [], |row| row.get::<_, i64>(0))?,
+			0
+		);
+		assert_eq!(
+			conn.query_row("SELECT COUNT(*) FROM scheduler_repo_state", [], |row| row
+				.get::<_, i64>(0))?,
+			0
+		);
+		Ok(())
+	})
+	.unwrap();
 	let phase = take(&db, 100, &ClaimPolicy::default()).unwrap();
 	assert_eq!(phase.job.id, verify);
 }

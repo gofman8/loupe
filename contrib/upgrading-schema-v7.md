@@ -1,10 +1,10 @@
-# Upgrading to schema v7 (B4 storage foundation)
+# Upgrading to schema v7
 
 Schema v7 adds lossless inventory identity, retained typed review evidence and
-the storage layout for preparation and admission. It does **not** activate the
-v2 harness. Public survey, drilldown and campaign-verification claim gates stay
-closed; production triggers and workers continue using the legacy pipeline.
-Schema presence alone is not an implemented host or admission API.
+the storage layout for preparation and admission. The B4 server implements
+the pre-proof phase API, but production triggers and current workers still
+use the legacy pipeline. Explicit phase advertisements are separate from
+legacy verification tags; schema migration does not enable worker execution.
 
 The new server applies pending migrations automatically when opening the
 database. This branch also requires the coordinated
@@ -46,7 +46,7 @@ compatibility, report identity and source metadata. See the
 Historical inventory IDs and display paths are preserved. Unknown raw Git
 path bytes are not guessed from display strings, and old inventory digests do
 not certify a managed manifest. Trusted pinned-checkout reconstruction and
-sealing belong to the later host implementation.
+sealing require the authenticated host-preparation API.
 
 Findings, verification details, proofs, identities and source metadata remain
 intact. Absent typed payloads remain explicitly historical, not fabricated
@@ -81,3 +81,26 @@ Rollback requires restoring the verified pre-upgrade backup, matching key and
 original coordinated binary set. Restoration loses writes accepted since that
 backup: make that an explicit operator decision, and prefer a forward fix
 when possible. Binary-only rollback is not supported.
+
+## Incompatible derived review state
+
+Do not truncate closure criteria or rewrite a frozen profile to fit a newer
+lease. An authenticated administrator may POST
+`/v1/review-generations/{generation_id}/reset` with the exact protocol-3 header
+and `{"protocol_version":3}`. This discards that generation's rebuildable
+inventory, units, leads and derived scheduling state; back up first if those
+details are needed. It is not an automatic migration or background GC.
+
+Reset refuses active repository campaigns, nonterminal referencing jobs or
+assignments, and competing active/building generations. Settle that work first;
+never edit database states to bypass the guards. Findings, canonical evidence,
+reports, attempts, job audits and replay receipts survive. Unfinished mandatory
+verification intent remains visible as blocked `requires_successor`, with its
+original source/profile/provenance preserved; B8 owns later revalidation and
+re-admission. Reset does not discard those obligations or fabricate a verdict.
+
+The next normal campaign open starts a fresh bootstrap with incomplete coverage
+and a new immutable profile. A minimal retired identity stub prevents a delayed
+reset request from naming the replacement generation within the same repository
+lifetime. Do not delete those stubs independently. Explicit repository deletion
+is a separate operation and is outside that nonreuse guarantee.

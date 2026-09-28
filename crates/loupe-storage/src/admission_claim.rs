@@ -112,7 +112,7 @@ pub fn claim_with_delivery<T, E: From<Error>>(
 				.legacy_kinds
 				.iter()
 				.filter(|kind| {
-					jobs::RUNTIME_KINDS
+					jobs::LEGACY_RUNTIME_KINDS
 						.iter()
 						.any(|allowed| kind.is_known() && kind.as_str() == allowed.as_str())
 				})

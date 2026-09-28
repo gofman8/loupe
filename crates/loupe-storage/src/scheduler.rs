@@ -284,10 +284,10 @@ pub(crate) fn cancel_queued_for_reason(
 mod tests;
 pub use crate::review_units::Priority as Band;
 
-/// Campaign job kinds this binary can lease *and finish through the phase
-/// endpoints*. Empty because those endpoints are unavailable. Keep this list
-/// aligned with `jobs::RUNTIME_KINDS` and the handlers.
-pub const PHASE_RUNTIME_KINDS: &[JobKind<Db>] = &[];
+/// Campaign kinds supported by the pre-proof review endpoints. Recipe and
+/// evidence eligibility remain the validated admission owner's responsibility.
+pub const PHASE_RUNTIME_KINDS: &[JobKind<Db>] =
+	&[JobKind::Survey, JobKind::Drilldown, JobKind::Verify];
 
 pub const PRIORITY_MAX: u32 = 1000;
 

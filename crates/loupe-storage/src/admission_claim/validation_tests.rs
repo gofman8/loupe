@@ -1,4 +1,5 @@
-//! New consumer feature tests use explicit phase kinds while public gates remain closed.
+//! Admission consumer tests select explicit phase kinds; public capability
+//! negotiation is covered separately through the real router.
 use loupe_core::review_payload::{GeneratedProfile, LeadEvidenceV1, UnitResultPayloadV1};
 use rusqlite::params;
 use serde_json::json;

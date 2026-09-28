@@ -52,10 +52,14 @@ fn fixture_with_scanner(scanner: &str) -> Fixture {
 }
 
 async fn lease(f: &Fixture) -> (StatusCode, Value, usize) {
+	lease_with_reviews(f, &[]).await
+}
+
+async fn lease_with_reviews(f: &Fixture, reviews: &[&str]) -> (StatusCode, Value, usize) {
 	let mut req = Request::post("/v1/jobs/lease")
 		.header("content-type", "application/json")
 		.body(Body::from(
-			json!({"protocol_version":PROTOCOL_VERSION,"capabilities":["verify:llm"],"wait_seconds":0})
+			json!({"protocol_version":PROTOCOL_VERSION,"capabilities":["verify:llm"],"review_capabilities":reviews,"wait_seconds":0})
 				.to_string(),
 		))
 		.unwrap();
@@ -285,6 +289,53 @@ async fn expanded_legacy_scan_uses_client_ceiling_and_commits_once() {
 	assert_eq!(accepted.state, loupe_core::JobState::Leased);
 	assert_eq!(accepted.attempts, 1);
 	assert!(accepted.worker_id.is_some() && accepted.lease_expires_at.is_some());
+}
+
+#[tokio::test]
+async fn phase_delivery_retains_the_smaller_ceiling() {
+	use loupe_server::review::campaign;
+	for scanner in ["null".to_owned(), expanded_scanner()] {
+		let oversized = scanner != "null";
+		let f = fixture_with_scanner(&scanner);
+		let now =
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+				as i64;
+		let job = common::with_repo(&f.state.db, 1, |scope| {
+			let campaign::Opened::Created { job_id, .. } = campaign::open(
+				scope,
+				&campaign::OpenCampaign {
+					trigger: loupe_storage::campaigns::Trigger::Manual,
+					requested_ref: campaign::RequestedRef::Branch(&common::marked::operator::text(
+						"main",
+					)),
+					base_sha: None,
+					kind_hint: campaign::KindHint::Incremental,
+				},
+				&f.state.review_policy,
+				now,
+			)?
+			else {
+				panic!("created")
+			};
+			Ok(job_id)
+		})
+		.unwrap();
+		let (status, response, bytes) = lease_with_reviews(&f, &["review:survey:v1"]).await;
+		assert_eq!(status, StatusCode::OK);
+		assert!(bytes <= 4 * 1024 * 1024);
+		let stored = common::job(&f.state.db, 1, job);
+		if oversized {
+			assert!(response.get("job_id").is_none());
+			assert_eq!(stored.state, loupe_core::JobState::Failed);
+			assert_eq!(stored.attempts, 0);
+			assert!(stored.worker_id.is_none() && stored.lease_expires_at.is_none());
+		} else {
+			assert_eq!(response["job_id"], job);
+			assert_eq!(response["payload"]["kind"], "review_survey");
+			assert_eq!(stored.state, loupe_core::JobState::Leased);
+			assert_eq!(stored.attempts, 1);
+		}
+	}
 }
 
 #[tokio::test]

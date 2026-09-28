@@ -8,11 +8,14 @@
 - Reject unknown persisted job kinds at startup and explain incompatible schema versions ([#61]).
 - Add typed, transactional review-harness storage with bounded text, semantic identities, replay records, and project-scoped proof metadata; keep unsupported job kinds readable but inert ([#62]).
 - Log the database schema version and runtime image revision at server startup ([#62]).
-- Add campaign-aware review scheduling with frozen budgets, resumable survey batches, bounded fair claims, and deadline handling; preserve legacy leasing and keep survey/drilldown runtime-gated.
+- Add campaign-aware review scheduling with frozen budgets, resumable survey batches, bounded fair claims, and deadline handling while preserving legacy leasing.
 - File GitHub issues through a server-wide GitHub App by default, with repo-scoped short-lived installation tokens, an optional tracker-owner allowlist, and a schema v4 bump; keep per-repo PATs as a fallback.
-- Add guarded schema v7 with lossless inventory paths and retained typed review evidence; preserve historical records and source metadata and keep phase execution disabled (see the [offline upgrade runbook](contrib/upgrading-schema-v7.md)).
-- Isolate campaign capabilities from legacy routes and add transaction-bound review authority, assignment epochs and finishing-worker receipt replay; keep public phase execution disabled.
-- Add attempt-bound checkout preparation, resumable lossless manifests and immutable review-profile publication; return durable deferrals for unsupported successor work while public phase claims remain closed.
+- Add guarded schema v7 with lossless inventory paths and retained typed review evidence; preserve historical records and source metadata (see the [offline upgrade runbook](contrib/upgrading-schema-v7.md)).
+- Expose authenticated pre-proof survey, drilldown and verification APIs with transaction-bound authority, independent checkpoints, bounded context and finishing-worker receipt replay. Current workers advertise no phase capabilities and production triggers remain legacy.
+- Add attempt-bound checkout preparation, resumable lossless manifests and immutable review-profile publication; retain durable deferrals for unsupported successor work.
+- Admit pending work by risk at claim time, protect urgent and mandatory verification capacity, and commit validated lease responses with their assignments and one-time charges. Preserve unfinished evidence through retries, cancellation and exhausted budgets.
+- Retain canonical verification evidence and render phase reports literally after commit; preserve operator delivery recovery without redispatching terminal replay.
+- Allow explicit quiescent reset of incompatible derived generations without dropping canonical findings, mandatory verification intent or replay history.
 
 ## v0.1 — 2026-09-07
 

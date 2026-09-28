@@ -1,10 +1,11 @@
-//! One transactional claim for legacy and campaign queues.
+//! Legacy transactional claims. Production review claims are validated and
+//! serialized through storage's delivery-before-commit admission owner.
 use loupe_core::JobKind;
 use loupe_provenance::Source;
 use rusqlite::{named_params, params, Connection, OptionalExtension, Transaction};
 
-use super::{invalid, CampaignPolicy, ClaimPolicy, PHASE_RUNTIME_KINDS};
-use crate::jobs::{self, JobRow, JOB_COLUMNS, RUNTIME_KINDS};
+use super::{invalid, CampaignPolicy, ClaimPolicy};
+use crate::jobs::{self, JobRow, JOB_COLUMNS, LEGACY_RUNTIME_KINDS};
 use crate::{campaigns, checkpoints, review_units, Entity, Error, Result};
 
 pub struct ClaimRequest<'a, S: Source> {
@@ -30,10 +31,9 @@ const PROMOTED: &str =
 	"j.campaign_id IS NOT NULL AND j.kind='survey' AND COALESCE(s.burst,0)>=:burst_length";
 const ANTI_AFFINITY: &str = "CASE WHEN j.kind='verify' AND j.campaign_id IS NOT NULL AND EXISTS(SELECT 1 FROM finding_review_details d JOIN jobs p ON p.assigned_lead_id=d.origin_lead_id AND p.kind='drilldown' WHERE d.finding_id=j.target_finding_id AND p.worker_id=:worker) THEN 1 ELSE 0 END";
 
-/// Runtime gating is mandatory, even when callers request unsupported kinds.
-/// Legacy rows follow `RUNTIME_KINDS`; campaign rows additionally need a
-/// phase handler for their kind (`PHASE_RUNTIME_KINDS`), because `verify`
-/// has a legacy runtime handler but no campaign phase endpoint.
+/// This legacy entry point never claims campaign work. Review claims must use
+/// the owner that validates and serializes the full envelope in the same
+/// transaction as admission; widening runtime support cannot bypass that owner.
 pub(crate) fn claim_raw<S: Source>(
 	tx: &Transaction<'_>, req: &ClaimRequest<'_, S>,
 ) -> Result<Option<Claimed>> {
@@ -41,24 +41,17 @@ pub(crate) fn claim_raw<S: Source>(
 		.kinds
 		.iter()
 		.filter(|kind| {
-			RUNTIME_KINDS.iter().any(|allowed| kind.is_known() && allowed.as_str() == kind.as_str())
-		})
-		.cloned()
-		.collect();
-	let campaign_kinds: Vec<_> = kinds
-		.iter()
-		.filter(|kind| {
-			PHASE_RUNTIME_KINDS
+			LEGACY_RUNTIME_KINDS
 				.iter()
 				.any(|allowed| kind.is_known() && allowed.as_str() == kind.as_str())
 		})
 		.cloned()
 		.collect();
-	claim_filtered(tx, req, &kinds, &campaign_kinds)
+	claim_filtered(tx, req, &kinds, &[])
 }
 
-/// Private fixture entry point bypassing the absent runtime phase handlers.
-/// Campaign rows are offered for every requested kind.
+/// Private queue-policy fixture entry point. Production phase claims must use
+/// validated admission; these tests offer campaign rows for every requested kind.
 #[cfg(test)]
 pub(super) fn claim_kinds<S: Source>(
 	tx: &Transaction<'_>, req: &ClaimRequest<'_, S>, kinds: &[JobKind<S>],
