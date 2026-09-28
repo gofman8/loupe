@@ -40,6 +40,7 @@ pub enum Conflict {
 	GenerationPredecessor,
 	Coverage,
 	InventoryPath,
+	InventoryRevision(i64),
 	InventoryLimit,
 	UnitKey,
 	UnitState,

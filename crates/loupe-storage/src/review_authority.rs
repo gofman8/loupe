@@ -34,6 +34,7 @@ use crate::{jobs, review_units, Error, Result};
 mod context;
 mod envelope;
 mod host;
+mod inventory;
 pub use context::{CapacitySnapshot, LimitsSnapshot};
 pub use envelope::{AssignedUnit, ReviewPreparation};
 

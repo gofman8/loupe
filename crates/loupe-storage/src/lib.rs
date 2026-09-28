@@ -37,6 +37,7 @@ pub mod host_preparation;
 pub mod identity;
 mod ingress;
 pub mod inventory;
+pub mod inventory_disposition;
 pub mod jobs;
 pub mod lead_observations;
 pub mod leads;

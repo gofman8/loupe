@@ -30,6 +30,7 @@ mod job_io;
 mod lease;
 mod registry;
 pub mod review_api;
+pub mod review_inventory;
 pub mod review_lease;
 mod scan;
 mod secret_serde;

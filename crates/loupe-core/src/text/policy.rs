@@ -71,6 +71,7 @@ texts! {
 	Title, "title", 200, false;
 	Objective, "objective", 2000, true;
 	Reason, "reason", 1000, false;
+	InventoryReason, "reason", 500, false;
 	Argument, "argument", 4000, true;
 	Symbol, "symbol", 256, false;
 	MediaType, "media_type", 100, false;

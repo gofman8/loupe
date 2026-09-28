@@ -25,6 +25,9 @@ const NEXT_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 #[path = "review_context/mod.rs"]
 mod context;
 
+#[path = "review_inventory/mod.rs"]
+mod inventory;
+
 struct Fixture {
 	state: AppState,
 	offline: common::offline::OfflineDatabase,
