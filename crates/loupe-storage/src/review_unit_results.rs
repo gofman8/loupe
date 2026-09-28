@@ -140,10 +140,14 @@ pub fn insert_evidence<RevisionS: Source>(
 	scope: &crate::scope::RepoScope<'_>, new: &NewResultEvidence<'_, RevisionS>, now: i64,
 ) -> Result<i64> {
 	scope.require_operator()?;
+	insert_evidence_raw(scope.conn, scope.repo_id, new, now)
+}
+pub(crate) fn insert_evidence_raw<RevisionS: Source>(
+	tx: &Connection, repo: i64, new: &NewResultEvidence<'_, RevisionS>, now: i64,
+) -> Result<i64> {
 	let bytes = new.payload.canonical_bytes()?;
 	let payload = new.payload;
-	let tx = scope.conn;
-	ownership::generation(tx, scope.repo_id, new.generation_id, Ownership::ResultUnit)?;
+	ownership::generation(tx, repo, new.generation_id, Ownership::ResultUnit)?;
 	ownership::unit_in_generation(
 		tx,
 		payload.review_unit_id,
@@ -159,11 +163,11 @@ pub fn insert_evidence<RevisionS: Source>(
 	for lead in &payload.created_lead_ids {
 		ownership::lead_in_generation(tx, *lead, new.generation_id, Ownership::LeadUnit)?;
 	}
-	inventory::verify_refs(scope, new.generation_id, &payload.inspected_refs)?;
+	inventory::verify_refs_raw(tx, repo, new.generation_id, &payload.inspected_refs)?;
 	let refs = crate::review::checkpoint_refs(&payload.inspected_refs)?;
 	let raw =
 		std::str::from_utf8(&bytes).map_err(|_| Error::Conflict(Conflict::CheckpointEvidence))?;
-	tx.execute("INSERT INTO review_unit_results(review_unit_id,produced_by_job_id,commit_sha,profile_version,disposition,inspected_refs,result_payload,result_digest,created_at,source) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,'agent' WHERE EXISTS(SELECT 1 FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1 AND g.repo_id=?10)",params![payload.review_unit_id,new.produced_by_job,new.commit_sha.expose(),new.profile_version,payload.disposition.as_str(),refs,raw,crate::canonical::digest(&bytes).as_slice(),now,scope.repo_id])?;
+	tx.execute("INSERT INTO review_unit_results(review_unit_id,produced_by_job_id,commit_sha,profile_version,disposition,inspected_refs,result_payload,result_digest,created_at,source) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,'agent' WHERE EXISTS(SELECT 1 FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1 AND g.repo_id=?10)",params![payload.review_unit_id,new.produced_by_job,new.commit_sha.expose(),new.profile_version,payload.disposition.as_str(),refs,raw,crate::canonical::digest(&bytes).as_slice(),now,repo])?;
 	Ok(tx.last_insert_rowid())
 }
 fn evidence_row(r: &rusqlite::Row<'_>) -> Result<EvidenceResult> {

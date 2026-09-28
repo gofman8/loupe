@@ -55,6 +55,10 @@ impl From<loupe_storage::Error> for ApiError {
 			Error::ScopeDenied | Error::Ownership(_) | Error::NotFound(_, _) => Self::denied(),
 			Error::Conflict(Conflict::Checkpoint) => Self::conflict("checkpoint_conflict"),
 			Error::Conflict(Conflict::CheckpointLimit) => Self::conflict("checkpoint_limit"),
+			Error::Conflict(Conflict::UnitResultExists) => Self::conflict("unit_result_exists"),
+			Error::Conflict(Conflict::IncompatibleReviewState) => {
+				Self::conflict("incompatible_review_state")
+			},
 			Error::Conflict(Conflict::Limits) => Self::conflict("invalid_limits"),
 			Error::Conflict(Conflict::CompatibilityPolicy) => {
 				Self::conflict("compatibility_policy")
@@ -118,6 +122,9 @@ pub fn is_phase_route(path: &str) -> bool {
 			| "/v1/jobs/{id}/publish-profile"
 			| "/v1/jobs/{id}/inventory-dispositions"
 			| "/v1/jobs/{id}/review-units"
+			| "/v1/jobs/{id}/leads"
+			| "/v1/jobs/{id}/sibling-leads"
+			| "/v1/jobs/{id}/review-unit-results"
 			| "/v1/jobs/{id}/finalize-survey"
 			| "/v1/jobs/{id}/limits"
 			| "/v1/jobs/{id}/lead-candidates"

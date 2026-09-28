@@ -21,7 +21,7 @@ pub enum Entity {
 	Execution,
 	Proof,
 }
-// debug-ok: conflicts retain only a closed category and an optional integer finding ID.
+// debug-ok: closed categories and numeric identity/revision metadata only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conflict {
 	ActiveCampaign,
@@ -50,6 +50,8 @@ pub enum Conflict {
 	Checkpoint,
 	CheckpointEvidence,
 	CheckpointLimit,
+	UnitResultExists,
+	IncompatibleReviewState,
 	Candidate,
 	TerminalReceipt,
 	FindingIdentity(i64),

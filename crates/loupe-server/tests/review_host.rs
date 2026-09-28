@@ -34,6 +34,9 @@ mod unit_proposals;
 #[path = "review_survey/mod.rs"]
 mod survey_terminal;
 
+#[path = "review_evidence/mod.rs"]
+mod evidence_checkpoints;
+
 struct Fixture {
 	state: AppState,
 	offline: common::offline::OfflineDatabase,

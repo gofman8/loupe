@@ -54,6 +54,20 @@ macro_rules! source_fixture {
 					loupe_storage::source_refs::SourceRefs::new(mark, vec![]).unwrap()
 				})
 			}
+			pub fn single_ref<const MAX: usize>(
+				path: &str,
+			) -> loupe_storage::source_refs::SourceRefs<MAX, $source> {
+				fixture(path, |raw, mark| {
+					loupe_storage::source_refs::SourceRefs::new(
+						mark,
+						vec![loupe_core::text::SourceRef {
+							path: loupe_core::text::RepoPath::new(mark, raw).unwrap(),
+							symbol: None,
+						}],
+					)
+					.unwrap()
+				})
+			}
 			pub fn try_text<P: TextPolicy>(
 				raw: &str,
 			) -> Result<BoundedText<P, $source>, loupe_core::text::Error> {
@@ -65,6 +79,15 @@ macro_rules! source_fixture {
 source_fixture!(agent, loupe_provenance::Agent);
 source_fixture!(repo, loupe_provenance::Repo);
 source_fixture!(operator, loupe_provenance::Operator);
+
+/// Fixed Agent evidence for comparing a typed stored row with authored fixtures.
+pub fn lead_evidence(
+	raw: &str,
+) -> loupe_core::review_payload::LeadEvidenceV1<loupe_provenance::Agent> {
+	agent::fixture(raw, |raw, mark| {
+		loupe_core::review_payload::LeadEvidenceV1::from_json(mark, raw).unwrap()
+	})
+}
 
 /// Synthetic authenticated Operator authority for direct integration fixtures.
 #[allow(unsafe_code)]

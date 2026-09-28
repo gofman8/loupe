@@ -94,7 +94,8 @@ pub fn submit<RevisionS: Source>(
 	scope.require_operator()?;
 	crate::review::require_historical_payload(new.payload.expose())?;
 	submit_inner(
-		scope,
+		scope.conn,
+		scope.repo_id,
 		&LeadInput {
 			generation_id: new.generation_id,
 			unit_id: new.unit_id,
@@ -114,11 +115,17 @@ pub fn submit_evidence<RevisionS: Source>(
 	scope: &crate::scope::RepoScope<'_>, new: &NewLeadEvidence<'_, RevisionS>, now: i64,
 ) -> Result<Submitted> {
 	scope.require_operator()?;
+	submit_evidence_raw(scope.conn, scope.repo_id, new, now)
+}
+pub(crate) fn submit_evidence_raw<RevisionS: Source>(
+	conn: &Connection, repo: i64, new: &NewLeadEvidence<'_, RevisionS>, now: i64,
+) -> Result<Submitted> {
 	let bytes = new.payload.canonical_bytes()?;
-	validate_evidence_scope(scope, new.generation_id, new.payload)?;
+	validate_evidence_scope_raw(conn, repo, new.generation_id, new.payload)?;
 	let identity = evidence_identity(new.payload);
 	submit_inner(
-		scope,
+		conn,
+		repo,
 		&LeadInput {
 			generation_id: new.generation_id,
 			unit_id: new.payload.review_unit_id,
@@ -145,16 +152,21 @@ pub(crate) fn evidence_identity(payload: &LeadEvidenceV1<Agent>) -> Identity<Age
 pub(crate) fn validate_evidence_scope(
 	scope: &crate::scope::RepoScope<'_>, generation: i64, payload: &LeadEvidenceV1<Agent>,
 ) -> Result<()> {
-	ownership::generation(scope.conn, scope.repo_id, generation, Ownership::LeadUnit)?;
+	validate_evidence_scope_raw(scope.conn, scope.repo_id, generation, payload)
+}
+pub(crate) fn validate_evidence_scope_raw(
+	conn: &Connection, repo: i64, generation: i64, payload: &LeadEvidenceV1<Agent>,
+) -> Result<()> {
+	ownership::generation(conn, repo, generation, Ownership::LeadUnit)?;
 	if let Some(unit) = payload.review_unit_id {
-		ownership::unit_in_generation(scope.conn, unit, generation, Ownership::LeadUnit)?;
+		ownership::unit_in_generation(conn, unit, generation, Ownership::LeadUnit)?;
 	}
-	inventory::verify_refs(scope, generation, &payload.source_refs)?;
+	inventory::verify_refs_raw(conn, repo, generation, &payload.source_refs)?;
 	if let Some(proposal) = &payload.priority_proposal {
-		inventory::verify_refs(scope, generation, &proposal.boundary_refs)?;
+		inventory::verify_refs_raw(conn, repo, generation, &proposal.boundary_refs)?;
 	}
 	if let Some(hint) = &payload.duplicate_hint {
-		ownership::lead_in_repo(scope.conn, hint.lead_id, scope.repo_id, Ownership::DuplicateLead)?;
+		ownership::lead_in_repo(conn, hint.lead_id, repo, Ownership::DuplicateLead)?;
 	}
 	Ok(())
 }
@@ -170,11 +182,8 @@ struct LeadInput<'a> {
 	supersedes: Option<i64>,
 	created_by_job: Option<i64>,
 }
-fn submit_inner(
-	scope: &crate::scope::RepoScope<'_>, new: &LeadInput<'_>, now: i64,
-) -> Result<Submitted> {
-	let tx = scope.conn;
-	ownership::generation(tx, scope.repo_id, new.generation_id, Ownership::LeadUnit)?;
+fn submit_inner(tx: &Connection, repo: i64, new: &LeadInput<'_>, now: i64) -> Result<Submitted> {
+	ownership::generation(tx, repo, new.generation_id, Ownership::LeadUnit)?;
 	if let Some(unit) = new.unit_id {
 		ownership::unit_in_generation(tx, unit, new.generation_id, Ownership::LeadUnit)?;
 	}
@@ -187,7 +196,7 @@ fn submit_inner(
 		// other lead state would fabricate that history.
 		let stale: bool = tx.query_row(
 			"SELECT EXISTS(SELECT 1 FROM leads WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) AND status='closed' AND disposition='stale')",
-			params![parent,scope.repo_id],
+			params![parent,repo],
 			|r| r.get(0),
 		)?;
 		if !stale {
@@ -197,21 +206,24 @@ fn submit_inner(
 	let fingerprint = new.identity.fingerprint();
 	let supersedes=match new.supersedes{
   Some(id)=>Some(id),
-  None=>tx.query_row("SELECT lead_id FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?3) AND identity_fingerprint=?2 AND status='closed' AND disposition='stale' ORDER BY lead_id DESC LIMIT 1",params![new.generation_id,fingerprint.as_slice(),scope.repo_id],|r|r.get(0)).optional()?
+  None=>tx.query_row("SELECT lead_id FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?3) AND identity_fingerprint=?2 AND status='closed' AND disposition='stale' ORDER BY lead_id DESC LIMIT 1",params![new.generation_id,fingerprint.as_slice(),repo],|r|r.get(0)).optional()?
  };
 	let result=tx.execute("INSERT INTO leads (generation_id,review_unit_id,priority_band,priority_proposal,identity_family,identity_anchor,identity_instance_key,identity_fingerprint,anchored_payload,anchored_digest,commit_sha,supersedes_lead_id,created_by_job_id,created_at,source)
- SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'agent' WHERE EXISTS(SELECT 1 FROM review_generations WHERE generation_id=?1 AND repo_id=?15)",params![new.generation_id,new.unit_id,new.priority.as_str(),new.priority_proposal,new.identity.family.expose(),new.identity.anchor.expose(),new.identity.instance.as_ref().map(|v|v.expose()),fingerprint.as_slice(),new.payload,new.digest.as_slice(),new.commit_sha,supersedes,new.created_by_job,now,scope.repo_id]);
+ SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'agent' WHERE EXISTS(SELECT 1 FROM review_generations WHERE generation_id=?1 AND repo_id=?15)",params![new.generation_id,new.unit_id,new.priority.as_str(),new.priority_proposal,new.identity.family.expose(),new.identity.anchor.expose(),new.identity.instance.as_ref().map(|v|v.expose()),fingerprint.as_slice(),new.payload,new.digest.as_slice(),new.commit_sha,supersedes,new.created_by_job,now,repo]);
 	match result {
 		Ok(_) => Ok(Submitted::Created(tx.last_insert_rowid())),
 		Err(error) if is_unique(&error, "leads.generation_id, leads.identity_fingerprint") => {
-			let existing=tx.query_row(&format!("SELECT {COLUMNS} FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?3) AND identity_fingerprint=?2 AND (status<>'closed' OR disposition<>'stale')"),params![new.generation_id,fingerprint.as_slice(),scope.repo_id],metadata_row)?;
+			let existing=tx.query_row(&format!("SELECT {COLUMNS} FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?3) AND identity_fingerprint=?2 AND (status<>'closed' OR disposition<>'stale')"),params![new.generation_id,fingerprint.as_slice(),repo],metadata_row)?;
 			lead_observations::insert_raw(
-				scope,
-				existing.lead_id,
-				new.created_by_job,
-				new.payload,
-				&new.digest,
-				new.commit_sha,
+				tx,
+				repo,
+				&lead_observations::ObservationInput {
+					lead_id: existing.lead_id,
+					submitted_by_job: new.created_by_job,
+					payload: new.payload,
+					digest: &new.digest,
+					commit_sha: new.commit_sha,
+				},
 				now,
 			)?;
 			match existing.status {
@@ -370,7 +382,10 @@ fn metadata_row(r: &Row<'_>) -> rusqlite::Result<Metadata> {
 	})
 }
 pub fn get_metadata(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Option<Metadata>> {
-	Ok(scope.conn.query_row(&format!("SELECT {COLUMNS} FROM leads WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2)"),params![id,scope.repo_id],metadata_row).optional()?)
+	get_metadata_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_metadata_raw(conn: &Connection, repo: i64, id: i64) -> Result<Option<Metadata>> {
+	Ok(conn.query_row(&format!("SELECT {COLUMNS} FROM leads WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2)"),params![id,repo],metadata_row).optional()?)
 }
 fn evidence_row(r: &Row<'_>) -> Result<StoredEvidence<LeadEvidenceV1<Agent>>> {
 	crate::ingress::require_agent_source(r, 23)?;
@@ -391,8 +406,13 @@ fn evidence_row(r: &Row<'_>) -> Result<StoredEvidence<LeadEvidenceV1<Agent>>> {
 pub fn get_evidence(
 	scope: &crate::scope::RepoScope<'_>, id: i64,
 ) -> Result<StoredEvidence<LeadEvidenceV1<Agent>>> {
-	let mut statement=scope.conn.prepare(&format!("SELECT {COLUMNS} FROM leads WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2)"))?;
-	let mut rows = statement.query(params![id, scope.repo_id])?;
+	get_evidence_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_evidence_raw(
+	conn: &Connection, repo: i64, id: i64,
+) -> Result<StoredEvidence<LeadEvidenceV1<Agent>>> {
+	let mut statement=conn.prepare(&format!("SELECT {COLUMNS} FROM leads WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2)"))?;
+	let mut rows = statement.query(params![id, repo])?;
 	match rows.next()? {
 		Some(row) => evidence_row(row),
 		None => Ok(StoredEvidence::Missing),

@@ -33,6 +33,7 @@ use crate::{jobs, review_units, Error, Result};
 
 mod context;
 mod envelope;
+mod evidence;
 mod host;
 mod inventory;
 mod survey;
@@ -40,6 +41,10 @@ mod terminal;
 mod units;
 pub use context::{CapacitySnapshot, LimitsSnapshot};
 pub use envelope::{AssignedUnit, ReviewPreparation};
+pub use evidence::{
+	LeadCheckpoint, LeadCheckpointOutcome, LeadCheckpointReceipt, UnitResultCheckpoint,
+	UnitResultCheckpointReceipt,
+};
 pub use terminal::{SurveyCoverage, SurveyFinalization, SurveySummary};
 pub use units::{UnitProposal, UnitProposalReceipt};
 

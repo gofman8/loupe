@@ -45,12 +45,15 @@ pub fn insert<RevisionS: Source>(
 	scope.require_operator()?;
 	crate::review::require_historical_payload(new.payload.expose())?;
 	insert_raw(
-		scope,
-		new.lead_id,
-		new.submitted_by_job,
-		new.payload.expose(),
-		new.payload.digest(),
-		new.commit_sha.expose(),
+		scope.conn,
+		scope.repo_id,
+		&ObservationInput {
+			lead_id: new.lead_id,
+			submitted_by_job: new.submitted_by_job,
+			payload: new.payload.expose(),
+			digest: new.payload.digest(),
+			commit_sha: new.commit_sha.expose(),
+		},
 		now,
 	)
 }
@@ -66,27 +69,36 @@ pub fn insert_evidence<RevisionS: Source>(
 	}
 	leads::validate_evidence_scope(scope, lead.generation_id, new.payload)?;
 	insert_raw(
-		scope,
-		new.lead_id,
-		Some(new.submitted_by_job),
-		std::str::from_utf8(&bytes).map_err(|_| Error::Conflict(Conflict::CheckpointEvidence))?,
-		&crate::canonical::digest(&bytes),
-		new.commit_sha.expose(),
+		scope.conn,
+		scope.repo_id,
+		&ObservationInput {
+			lead_id: new.lead_id,
+			submitted_by_job: Some(new.submitted_by_job),
+			payload: std::str::from_utf8(&bytes)
+				.map_err(|_| Error::Conflict(Conflict::CheckpointEvidence))?,
+			digest: &crate::canonical::digest(&bytes),
+			commit_sha: new.commit_sha.expose(),
+		},
 		now,
 	)
 }
+pub(crate) struct ObservationInput<'a> {
+	pub lead_id: i64,
+	pub submitted_by_job: Option<i64>,
+	pub payload: &'a str,
+	pub digest: &'a [u8; 32],
+	pub commit_sha: &'a str,
+}
 pub(crate) fn insert_raw(
-	scope: &crate::scope::RepoScope<'_>, lead_id: i64, submitted_by_job: Option<i64>,
-	payload: &str, digest: &[u8; 32], commit_sha: &str, now: i64,
+	tx: &Connection, repo: i64, new: &ObservationInput<'_>, now: i64,
 ) -> Result<i64> {
-	scope.require_operator()?;
-	let tx = scope.conn;
-	let lead =
-		leads::get_metadata(scope, lead_id)?.ok_or(Error::NotFound(Entity::Lead, lead_id))?;
+	let ObservationInput { lead_id, submitted_by_job, payload, digest, commit_sha } = *new;
+	let lead = leads::get_metadata_raw(tx, repo, lead_id)?
+		.ok_or(Error::NotFound(Entity::Lead, lead_id))?;
 	if let Some(job) = submitted_by_job {
 		ownership::job_for_generation(tx, job, lead.generation_id, Ownership::ObservationJob)?;
 	}
-	tx.execute("INSERT INTO lead_observations (lead_id,submitted_by_job_id,observation_payload,observation_digest,commit_sha,created_at,source) SELECT ?1,?2,?3,?4,?5,?6,'agent' WHERE EXISTS(SELECT 1 FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id WHERE l.lead_id=?1 AND g.repo_id=?7)",params![lead_id,submitted_by_job,payload,digest.as_slice(),commit_sha,now,scope.repo_id])?;
+	tx.execute("INSERT INTO lead_observations (lead_id,submitted_by_job_id,observation_payload,observation_digest,commit_sha,created_at,source) SELECT ?1,?2,?3,?4,?5,?6,'agent' WHERE EXISTS(SELECT 1 FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id WHERE l.lead_id=?1 AND g.repo_id=?7)",params![lead_id,submitted_by_job,payload,digest.as_slice(),commit_sha,now,repo])?;
 	Ok(tx.last_insert_rowid())
 }
 pub fn list(scope: &crate::scope::RepoScope<'_>, lead: i64) -> Result<Vec<Observation>> {
@@ -144,6 +156,41 @@ pub fn list_evidence(
 		result.push(evidence_row(row)?);
 	}
 	Ok(result)
+}
+/// Fresh attachment lookup is bounded to the exact repository and producer.
+pub(crate) fn latest_evidence_for_job(
+	conn: &Connection, repo: i64, lead: i64, job: i64,
+) -> Result<Option<EvidenceObservation>> {
+	let mut statement = conn.prepare(&format!(
+		"SELECT {COLUMNS} FROM lead_observations
+ WHERE lead_id=?1 AND submitted_by_job_id=?2 AND EXISTS(SELECT 1 FROM leads l
+ JOIN review_generations g ON g.generation_id=l.generation_id
+ WHERE l.lead_id=lead_observations.lead_id AND g.repo_id=?3)
+ ORDER BY lead_observation_id DESC LIMIT 1"
+	))?;
+	let mut rows = statement.query(params![lead, job, repo])?;
+	rows.next()?.map(evidence_row).transpose()
+}
+
+/// An accepted receipt precedes even JSON association inspection. Corrupt
+/// accepted evidence remains an integrity error, never an apparently missing row.
+pub(crate) fn accepted_evidence_for_unit(
+	conn: &Connection, repo: i64, lead: i64, job: i64, generation: i64, unit: i64, epoch: i64,
+) -> Result<Option<EvidenceObservation>> {
+	let mut statement=conn.prepare(&format!("SELECT {COLUMNS} FROM lead_observations
+ WHERE lead_id=?1 AND submitted_by_job_id=?2
+ AND EXISTS(SELECT 1 FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id
+ WHERE l.lead_id=lead_observations.lead_id AND l.generation_id=?3 AND g.repo_id=?6)
+ AND CASE WHEN EXISTS(SELECT 1 FROM job_checkpoints c JOIN jobs j ON j.id=c.job_id
+ WHERE c.job_id=?2 AND j.repo_id=?6 AND c.operation='submit_lead'
+ AND json_extract(c.response,'$.lead_id')=?1
+ AND json_extract(c.response,'$.observation_id')=lead_observations.lead_observation_id)
+ THEN CASE WHEN json_valid(observation_payload) THEN
+ json_extract(observation_payload,'$.review_unit_id')=?4 AND json_extract(observation_payload,'$.assignment_epoch')=?5
+ ELSE 1 END ELSE 0 END
+ ORDER BY lead_observation_id DESC LIMIT 1"))?;
+	let mut rows = statement.query(params![lead, job, generation, unit, epoch, repo])?;
+	rows.next()?.map(evidence_row).transpose()
 }
 pub(crate) fn validate_stored_rows(conn: &Connection) -> Result<()> {
 	crate::migrations::admission::scan(conn, "lead_observations", COLUMNS, |r| {
