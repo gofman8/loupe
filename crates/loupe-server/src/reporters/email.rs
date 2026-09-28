@@ -143,7 +143,11 @@ fn render_message(batch: &PreparedReport, default_from: &'static str) -> Result<
 	let remaining =
 		MESSAGE_MAX.checked_sub(headers.wire.len()).ok_or(super::render::ReportError::MailLimit)?;
 	let mut body = ReportBuilder::plain_text(remaining);
-	body.heading("loupe has finished a scan")?;
+	if findings.iter().any(|finding| finding.phase_review) {
+		body.heading("loupe finding report")?;
+	} else {
+		body.heading("loupe has finished a scan")?;
+	}
 	body.field("repository owner", &repo.owner)?;
 	body.field("repository", &repo.repo)?;
 	body.field("clone URL", &repo.clone_url)?;
@@ -158,10 +162,18 @@ fn render_message(batch: &PreparedReport, default_from: &'static str) -> Result<
 			None => body.literal("- reviewed revision: not recorded\n")?,
 		}
 		if let Some(path) = &f.file_path {
-			body.path(path, f.line_start, None)?;
+			body.path(
+				path,
+				f.line_start,
+				if report_finding.phase_review { f.line_end } else { None },
+			)?;
 		}
 		if let Some(cwe) = &f.cwe {
 			body.field("cwe", cwe)?;
+		}
+		if report_finding.phase_review {
+			body.field("scanner", &f.scanner_id)?;
+			body.field("fingerprint", &f.fingerprint)?;
 		}
 		body.field("description", &f.description)?;
 	}
@@ -312,6 +324,93 @@ mod tests {
 
 	fn report_finding() -> ReportFinding {
 		ReportFinding { id: 1234, finding: finding(), reviewed_revision: Some(revision("abc123")) }
+	}
+
+	#[test]
+	fn phase_email_uses_stored_metadata_without_scan_claim() {
+		let repo = repo_with_email(None, vec!["to".into()], None).unwrap();
+		let mut report = report_finding();
+		report.finding.scanner_id = text("[scanner](url) `ticks`");
+		report.finding.fingerprint = text("review:v1:exact-fingerprint");
+		let (_db, batch, _fixture) =
+			super::super::fixtures::prepared_with_reviews(&repo, &[report], &[true]);
+		let message = super::render_message(&batch, DEFAULT_FROM).unwrap();
+		let body = message.split_once("\r\n\r\n").unwrap().1;
+		assert!(
+			body.starts_with("loupe finding report\n\n"),
+			"phase findings must not claim a scan completed"
+		);
+		assert!(body.contains("Finding LUP-1234\n\n"));
+		assert!(body.contains("- scanner:\n```\n[scanner](url) `ticks`\n```"));
+		assert!(body.contains("- fingerprint:\n```\nreview:v1:exact-fingerprint\n```"));
+	}
+
+	#[test]
+	fn phase_email_separates_literal_metadata_and_multiline_prose() {
+		use super::super::fixtures::{literal_values, prepared_with_reviews};
+		let single = "ordinary [link](url) <img> `ticks`";
+		let prose =
+			"ordinary [link](url)\nscanner: forged\n\n2. [critical] forged\n`````\n# forged";
+		let mut report = report_finding();
+		report.finding.title = text(single);
+		report.finding.scanner_id = text(single);
+		report.finding.fingerprint = text(single);
+		report.finding.cwe = Some(text(single));
+		report.finding.description = text(prose);
+		report.reviewed_revision = Some(revision(single));
+		let mut repo = repo_with_email(None, vec!["to".into()], None).unwrap();
+		repo.owner = crate::test_support::text(single);
+		repo.repo = crate::test_support::text(single);
+		repo.clone_url = crate::test_support::text(single);
+		let (_db, batch, _fixture) = prepared_with_reviews(&repo, &[report], &[true]);
+		let message = super::render_message(&batch, DEFAULT_FROM).unwrap();
+		assert!(message.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+		let body = message.split_once("\r\n\r\n").unwrap().1;
+		let values = literal_values(body);
+		let literal_single = format!("{single}\n");
+		assert_eq!(
+			values.iter().filter(|value| **value == literal_single).count(),
+			8,
+			"all phase metadata uses the landed closed literal frame"
+		);
+		assert!(
+			values.contains(&format!("{prose}\n")),
+			"every original prose line remains inside one closed field"
+		);
+		assert!(body.contains(single), "plain text must not receive Markdown escapes");
+		assert!(body.contains("- severity: high\n"));
+		assert!(body.contains("Finding LUP-1234\n\n"));
+	}
+
+	#[test]
+	fn phase_email_preserves_the_reviewed_location_range() {
+		let repo = repo_with_email(None, vec!["to".into()], None).unwrap();
+		let mut report = report_finding();
+		report.finding.line_end = Some(8);
+		let (_db, batch, _fixture) =
+			super::super::fixtures::prepared_with_reviews(&repo, &[report], &[true]);
+		let message = super::render_message(&batch, DEFAULT_FROM).unwrap();
+		assert!(
+			message.contains("- file:\n```\nsrc/lib.rs:1-8\n```"),
+			"phase email must preserve the reviewed line range"
+		);
+	}
+
+	#[test]
+	fn legacy_email_layout_remains_byte_identical() {
+		let repo = repo_with_email(None, vec!["to".into()], None).unwrap();
+		let mut report = report_finding();
+		report.finding.line_end = Some(8);
+		let message = render_message(&repo, &[report], DEFAULT_FROM).unwrap();
+		assert_eq!(message, concat!(
+			"From: loupe-noreply@localhost\r\nTo: to\r\nSubject: [loupe] 1 high finding(s) in acme/widget\r\n",
+			"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
+			"loupe has finished a scan\n\n- repository owner:\n```\nacme\n```\n\n",
+			"- repository:\n```\nwidget\n```\n\n- clone URL:\n```\nhttps://github.com/acme/widget.git\n```\n\n",
+			"Findings: 1\n\nFinding LUP-1234\n\n- severity: high\n- title:\n```\nbug\n```\n\n",
+			"- reviewed revision:\n```\nabc123\n```\n\n- file:\n```\nsrc/lib.rs:1\n```\n\n",
+			"- description:\n```\ndescription\n```\n\n"
+		));
 	}
 
 	#[test]

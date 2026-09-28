@@ -401,6 +401,9 @@ fn layout(
 	if let Some(cwe) = &finding.cwe {
 		out.field("cwe", cwe)?;
 	}
+	if view.phase_review {
+		out.field("scanner", &finding.scanner_id)?;
+	}
 	out.field("fingerprint", &finding.fingerprint)?;
 	out.heading("Description")?;
 	out.field("description", &finding.description)?;
@@ -497,62 +500,245 @@ mod tests {
 	async fn oversized_issue_is_rejected_before_any_github_request() {
 		use std::sync::atomic::{AtomicUsize, Ordering};
 		use std::sync::Arc;
-		let requests = Arc::new(AtomicUsize::new(0));
-		let count = requests.clone();
-		let app = axum::Router::new().fallback(move || {
-			let count = count.clone();
-			async move {
-				count.fetch_add(1, Ordering::SeqCst);
-				axum::Json(serde_json::json!({"number": 7}))
-			}
-		});
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let reporter =
-			GithubReporter::with_base(&format!("http://{}", listener.local_addr().unwrap()))
-				.unwrap();
-		let stub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+		for phase_review in [false, true] {
+			let requests = Arc::new(AtomicUsize::new(0));
+			let count = requests.clone();
+			let app = axum::Router::new().fallback(move || {
+				let count = count.clone();
+				async move {
+					count.fetch_add(1, Ordering::SeqCst);
+					axum::Json(serde_json::json!({"number": 7}))
+				}
+			});
+			let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let reporter =
+				GithubReporter::with_base(&format!("http://{}", listener.local_addr().unwrap()))
+					.unwrap();
+			let stub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+			let mut report = ReportFinding {
+				id: 1234,
+				finding: finding(),
+				reviewed_revision: Some(revision(&"a".repeat(40))),
+			};
+			report.finding.description = text("");
+			let selected = |report: &ReportFinding| {
+				super::super::fixtures::prepared_with_reviews(
+					&repo(),
+					std::slice::from_ref(report),
+					&[phase_review],
+				)
+				.1
+			};
+			let initial = selected(&report);
+			let overhead = super::render_view(
+				initial.repository(),
+				ReportView::selected(initial.entries()[0].content().unwrap()),
+			)
+			.unwrap()
+			.as_str()
+			.chars()
+			.count();
+			report.finding.description = text(&"é".repeat(65_536 - overhead));
+			let exact = selected(&report);
+			assert!(
+				super::render_view(
+					exact.repository(),
+					ReportView::selected(exact.entries()[0].content().unwrap())
+				)
+				.unwrap()
+				.as_str()
+				.len()
+					> 65_536,
+				"Unicode bytes must not set the limit"
+			);
+			Reporter::dispatch(&reporter, &exact).await.expect("exact character limit is accepted");
+			assert_eq!(requests.load(Ordering::SeqCst), 2);
+			report.finding.description = text(&format!("{}é", report.finding.description.expose()));
+			let oversized = selected(&report);
+			let error = Reporter::dispatch(&reporter, &oversized).await.unwrap_err();
+			assert!(error.to_string().contains("65536"), "local size rejection: {error:#}");
+			assert!(error.to_string().contains("retry"), "actionable error: {error:#}");
+			assert_eq!(
+				requests.load(Ordering::SeqCst),
+				2,
+				"oversize must cause no GitHub requests"
+			);
+			let credential = app_credential();
+			let error = reporter
+				.deliver(
+					oversized.repository(),
+					&[ReportView::selected(oversized.entries()[0].content().unwrap())],
+					&credential,
+				)
+				.await
+				.unwrap_err();
+			assert!(
+				error.to_string().contains("65536"),
+				"app-mode local size rejection: {error:#}"
+			);
+			assert_eq!(
+				requests.load(Ordering::SeqCst),
+				2,
+				"oversize must not request an installation token"
+			);
+			stub.abort();
+		}
+	}
+
+	#[test]
+	fn phase_metadata_uses_stored_provenance_and_literal_fields() {
 		let mut report = ReportFinding {
 			id: 1234,
 			finding: finding(),
-			reviewed_revision: Some(revision(&"a".repeat(40))),
+			reviewed_revision: Some(revision("retained-review")),
 		};
-		report.finding.description = text("");
-		let overhead = render_body(&repo(), &report).unwrap().as_str().chars().count();
-		report.finding.description = text(&"é".repeat(65_536 - overhead));
+		report.finding.scanner_id = text("[scanner](https://evil.invalid) <img> `ticks`");
+		report.finding.fingerprint = text("review:v1:[fingerprint](https://evil.invalid)");
+		let (_db, batch, _fixture) =
+			super::super::fixtures::prepared_with_reviews(&repo(), &[report], &[true]);
+		let finding = batch.entries()[0].content().unwrap();
+		assert!(finding.is_phase_review());
+		let body = super::render_view(batch.repository(), ReportView::selected(finding)).unwrap();
 		assert!(
-			render_body(&repo(), &report).unwrap().as_str().len() > 65_536,
-			"Unicode bytes must not set the limit"
+			body.as_str()
+				.contains("- scanner:\n```\n[scanner](https://evil.invalid) <img> `ticks`\n```"),
+			"phase scanner metadata must be present as literal evidence"
 		);
-		reporter
-			.dispatch(
-				&repo(),
-				&[report.clone()],
-				&ReporterCredential::GithubPat(&loupe_provenance::Secret::new(b"pat".to_vec())),
-			)
-			.await
-			.expect("exact character limit is accepted");
-		assert_eq!(requests.load(Ordering::SeqCst), 2);
-		report.finding.description = text(&format!("{}é", report.finding.description.expose()));
-		let error = reporter
-			.dispatch(
-				&repo(),
-				&[report.clone()],
-				&ReporterCredential::GithubPat(&loupe_provenance::Secret::new(b"pat".to_vec())),
-			)
-			.await
-			.unwrap_err();
-		assert!(error.to_string().contains("65536"), "local size rejection: {error:#}");
-		assert!(error.to_string().contains("retry"), "actionable error: {error:#}");
-		assert_eq!(requests.load(Ordering::SeqCst), 2, "oversize must cause no GitHub requests");
-		let credential = app_credential();
-		let error = reporter.dispatch(&repo(), &[report], &credential).await.unwrap_err();
-		assert!(error.to_string().contains("65536"), "app-mode local size rejection: {error:#}");
+		assert!(body
+			.as_str()
+			.contains("- fingerprint:\n```\nreview:v1:[fingerprint](https://evil.invalid)\n```"));
+		assert!(body.as_str().contains("- reviewed revision:\n```\nretained-review\n```"));
+	}
+
+	#[test]
+	fn phase_report_cannot_inject_markdown_structure() {
+		use pulldown_cmark::{Event, Parser, Tag};
+
+		use super::super::fixtures::{literal_values, prepared_with_reviews};
+		// Repository components reject slashes at storage ingress, so use an
+		// active relative-link attack that is admitted by every metadata owner.
+		let single = "[link](evil) <img src=x> `edge` ![image](evil)";
+		let multiline = "````\n# injected\n- list\n> quote\n---\n<script>bad</script>\n[link](https://evil.invalid)\n";
+		let mut finding = finding();
+		finding.title = text(single);
+		finding.scanner_id = text(single);
+		finding.fingerprint = text(single);
+		finding.cwe = Some(text(single));
+		finding.description = text(multiline);
+		finding.poc_unified = Some(text(multiline));
+		finding.patch_unified = Some(text(multiline));
+		let mut repo = repo();
+		repo.owner = crate::test_support::text(single);
+		repo.repo = crate::test_support::text(single);
+		repo.clone_url = crate::test_support::text(single);
+		let report = ReportFinding {
+			id: 1234,
+			finding: finding.clone(),
+			reviewed_revision: Some(revision(single)),
+		};
+		let (_db, batch, _fixture) = prepared_with_reviews(&repo, &[report], &[true]);
+		let selected = batch.entries()[0].content().unwrap();
+		let body = super::render_view(batch.repository(), ReportView::selected(selected)).unwrap();
+		let mut links = Vec::new();
+		let mut headings = 0;
+		let mut lists = 0;
+		for event in Parser::new(body.as_str()) {
+			match event {
+				Event::Start(Tag::Link { dest_url, .. }) => links.push(dest_url.to_string()),
+				Event::Start(Tag::Heading { .. }) => headings += 1,
+				Event::Start(Tag::List(_)) => lists += 1,
+				Event::Start(Tag::Image { .. } | Tag::BlockQuote(_))
+				| Event::Rule
+				| Event::Html(_)
+				| Event::InlineHtml(_) => panic!("phase data became active markup: {event:?}"),
+				_ => {},
+			}
+		}
+		assert_eq!(links, ["https://github.com/project-loupe/loupe"]);
+		assert_eq!(headings, 4, "only trusted report headings are present");
+		// Landed rendering uses trusted list markers for fields. Compare those
+		// to a benign control instead of banning the renderer's own structure.
+		let benign = ReportFinding {
+			id: 1234,
+			finding: self::finding(),
+			reviewed_revision: Some(revision("retained")),
+		};
+		let (_db, control, _fixture) = prepared_with_reviews(&repo, &[benign], &[true]);
+		let control_body = super::render_view(
+			control.repository(),
+			ReportView::selected(control.entries()[0].content().unwrap()),
+		)
+		.unwrap();
 		assert_eq!(
-			requests.load(Ordering::SeqCst),
-			2,
-			"oversize must not request an installation token"
+			lists,
+			Parser::new(control_body.as_str())
+				.filter(|event| matches!(event, Event::Start(Tag::List(_))))
+				.count(),
+			"data must not add list structure"
 		);
-		stub.abort();
+		let literals = literal_values(body.as_str());
+		let literal_single = format!("{single}\n");
+		let literal_multiline = format!("{multiline}\n");
+		assert_eq!(
+			literals.iter().filter(|value| **value == literal_single).count(),
+			8,
+			"every stored metadata field is literal"
+		);
+		assert_eq!(
+			literals.iter().filter(|value| **value == literal_multiline).count(),
+			3,
+			"description and both attachments preserve their complete text"
+		);
+		assert!(body.as_str().starts_with("## Finding LUP-1234\n\n"));
+		assert_eq!(selected.finding(), &finding, "rendering does not rewrite evidence");
+	}
+
+	#[test]
+	fn phase_location_preserves_delimiters_and_exact_path_bytes() {
+		use super::super::fixtures::{literal_values, prepared_with_reviews, try_path};
+		for raw in [
+			"src/lib.rs",
+			"src/`one``two.rs",
+			"`surrounded`",
+			" leading and trailing ",
+			"src/cafe\u{301}.rs",
+		] {
+			let mut finding = finding();
+			finding.file_path = Some(path(raw));
+			finding.description = text("```\n``````\n~~~\n# literal\n");
+			let report = ReportFinding { id: 1234, finding, reviewed_revision: None };
+			let (_db, batch, _fixture) = prepared_with_reviews(&repo(), &[report], &[true]);
+			let selected = batch.entries()[0].content().unwrap();
+			let body =
+				super::render_view(batch.repository(), ReportView::selected(selected)).unwrap();
+			let values = literal_values(body.as_str());
+			assert!(
+				values.contains(&format!("{raw}:4-6")),
+				"exact path and line range must survive: {raw:?}"
+			);
+			assert!(values.contains(&format!("{}\n", selected.finding().description.expose())));
+			assert_eq!(selected.finding().file_path.as_ref().unwrap().expose(), raw);
+		}
+		for raw in ["src/line\n# heading.rs", "src/tab\tfile.rs"] {
+			assert!(
+				try_path(raw).is_err(),
+				"landed source admission rejects controls before rendering"
+			);
+		}
+	}
+
+	#[test]
+	fn phase_issue_title_uses_plain_compaction_not_markdown_encoding() {
+		let mut finding = finding();
+		finding.title = text(" [title](url)  <img> `ticks` ");
+		assert_eq!(render_title(&finding).as_str(), "[title](url) <img> `ticks`");
+		assert!(
+			super::super::fixtures::try_text::<loupe_core::text::policy::FindingTitle>(
+				" [title](url)\n<img> `ticks` "
+			)
+			.is_err(),
+			"single-line title policy is enforced before the sink"
+		);
 	}
 
 	#[test]

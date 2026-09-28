@@ -681,8 +681,9 @@ references are distinct from GitHub issue numbers such as `#1234`.
 The number is unique across repositories within one Loupe database.
 `get_finding_by_id` accepts `"LUP-1234"` and legacy numeric IDs such as
 `1234`; database IDs, HTTP endpoints, and CLI arguments remain numeric.
-New GitHub and email reports include the prefixed ID and omit the
-scanner metadata. Existing published reports are not rewritten.
+New GitHub and email reports include the prefixed ID. Legacy reports omit
+scanner metadata; phase-review reports retain it as literal provenance.
+Existing published reports are not rewritten.
 
 #### Continuous scans
 

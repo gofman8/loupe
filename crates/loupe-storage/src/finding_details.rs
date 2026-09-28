@@ -405,6 +405,14 @@ pub fn get_review_evidence(
 	scope: &crate::scope::RepoScope<'_>, finding: i64,
 ) -> Result<StoredEvidence<ReviewEvidence>> {
 	scope.require_operator()?;
+	read_review_evidence(scope, finding)
+}
+
+/// Internal projections must first select their exact finding under their own
+/// access policy. The original repository filter and row validation stay here.
+pub(crate) fn read_review_evidence(
+	scope: &crate::scope::RepoScope<'_>, finding: i64,
+) -> Result<StoredEvidence<ReviewEvidence>> {
 	let conn = scope.conn;
 	let value = conn.query_row(&format!("SELECT {REVIEW_COLUMNS} FROM finding_review_details WHERE finding_id=?1 AND repo_id=?2 AND EXISTS(SELECT 1 FROM findings WHERE id=?1 AND repo_id=?2)"), params![finding,scope.repo_id], review_row).optional()?.unwrap_or(StoredEvidence::Missing);
 	validate_review_provenance(conn, &value)?;

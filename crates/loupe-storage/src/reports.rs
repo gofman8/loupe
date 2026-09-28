@@ -3,7 +3,7 @@
 //! Selected settings, content and completion rights have no public constructors.
 //! ```compile_fail,E0451
 //! use loupe_storage::reports::ReportFinding;
-//! let _ = ReportFinding { id: 1, finding: todo!(), reviewed_revision: None };
+//! let _ = ReportFinding { id: 1, finding: todo!(), reviewed_revision: None, phase_review: false };
 //! ```
 //! ```compile_fail,E0599
 //! use loupe_storage::reports::StoredMailSettings;
@@ -30,7 +30,7 @@ use loupe_core::text::policy::{
 use loupe_core::text::BoundedText;
 use loupe_core::{Finding, FindingState, JobKind, JobState, ReportingDestination, Verdict};
 use loupe_provenance::{Agent, Db as DbSource, Secret, Source};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, TransactionBehavior};
 
 use crate::findings::{FindingIdentity, FindingRow};
 use crate::scope::{AssignmentScope, RepoScope};
@@ -101,6 +101,7 @@ pub struct ReportFinding {
 	id: i64,
 	finding: Finding<Agent>,
 	reviewed_revision: Option<BoundedText<RevisionText, DbSource>>,
+	phase_review: bool,
 }
 impl ReportFinding {
 	pub fn id(&self) -> i64 {
@@ -111,6 +112,41 @@ impl ReportFinding {
 	}
 	pub fn reviewed_revision(&self) -> Option<&BoundedText<RevisionText, DbSource>> {
 		self.reviewed_revision.as_ref()
+	}
+	/// Retained review details, not scanner names or fingerprints, select this layout.
+	pub fn is_phase_review(&self) -> bool {
+		self.phase_review
+	}
+
+	fn selected(scope: &RepoScope<'_>, row: FindingRow) -> std::result::Result<Self, Unavailable> {
+		let evidence = crate::finding_details::read_review_evidence(scope, row.id)
+			.map_err(|_| Unavailable::StoredInput)?;
+		let (phase_review, reviewed_revision) = match evidence {
+			crate::StoredEvidence::Missing => {
+				let (revision, campaign): (_, Option<i64>) = scope
+					.conn
+					.query_row(
+						"SELECT head_sha,campaign_id FROM jobs WHERE id=?1 AND repo_id=?2",
+						params![row.job_id, scope.repo_id],
+						|row| Ok((crate::ingress::optional_revision(row, 0)?, row.get(1)?)),
+					)
+					.map_err(|_| Unavailable::Revision)?;
+				if campaign.is_some() {
+					return Err(Unavailable::StoredInput);
+				}
+				(false, revision)
+			},
+			crate::StoredEvidence::Historical => {
+				let revision = scope.conn.query_row(
+					"SELECT reviewed_commit_sha FROM finding_review_details WHERE finding_id=?1 AND repo_id=?2",
+					params![row.id, scope.repo_id],
+					|row| crate::ingress::revision(row, 0),
+				).map_err(|_| Unavailable::Revision)?;
+				(true, Some(revision))
+			},
+			crate::StoredEvidence::Recorded(evidence) => (true, Some(evidence.reviewed_commit_sha)),
+		};
+		Ok(Self { id: row.id, finding: row.into_finding(), reviewed_revision, phase_review })
 	}
 }
 impl std::fmt::Debug for ReportFinding {
@@ -452,22 +488,7 @@ fn select(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
 	for row in rows {
 		let id = row.id;
 		members.push(Member { id, identity: row.report_identity(), completed: false });
-		let revision = scope
-			.conn
-			.query_row(
-				"SELECT head_sha FROM jobs WHERE id=?1 AND repo_id=?2",
-				params![row.job_id, scope.repo_id],
-				|row| crate::ingress::optional_revision(row, 0),
-			)
-			.optional();
-		let content = match revision {
-			Ok(revision) => Ok(ReportFinding {
-				id,
-				finding: row.into_finding(),
-				reviewed_revision: revision.flatten(),
-			}),
-			Err(_) => Err(Unavailable::Revision),
-		};
+		let content = ReportFinding::selected(scope, row);
 		entries.push(ReportEntry { id, content });
 	}
 	Ok(Preparation::Ready(Box::new(PreparedReport {
@@ -484,6 +505,9 @@ fn select(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
 		},
 	})))
 }
+
+#[cfg(test)]
+mod review_tests;
 
 #[cfg(test)]
 mod tests {
