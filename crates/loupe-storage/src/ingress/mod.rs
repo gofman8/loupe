@@ -11,6 +11,7 @@ use loupe_provenance::{
 use rusqlite::types::{Type, ValueRef};
 use rusqlite::Row;
 
+pub(crate) mod admission_policy;
 mod app;
 pub(crate) mod host_preparation;
 pub(crate) mod profile;

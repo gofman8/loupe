@@ -187,15 +187,21 @@ pub(crate) fn validate_stored_rows(conn: &Connection) -> Result<()> {
 				)?;
 			}
 		}
-		crate::scheduler::CampaignPolicy::from_snapshot(&campaign.effective_policy).map_err(
-			|_| {
+		// Preserve historical v1 admission. V2 validates the original SQL TEXT
+		// and digest through its separate strict reader, never normalized JSON.
+		crate::scheduler::CampaignPolicy::from_snapshot(&campaign.effective_policy)
+			.map(|_| ())
+			.or_else(|_| {
+				crate::admission::load_policy_raw(conn, campaign.repo_id, campaign.campaign_id)
+					.map(|_| ())
+			})
+			.map_err(|_| {
 				crate::migrations::MigrationFailure::new(
 					crate::migrations::MigrationStage::Admission,
 					crate::migrations::MigrationReason::CampaignPolicy,
 				)
 				.at("review_campaigns", "effective_policy", None)
-			},
-		)?;
+			})?;
 		Ok(())
 	})?;
 	crate::migrations::admission::scan(conn, "review_campaigns", "effective_policy_digest", |_| {

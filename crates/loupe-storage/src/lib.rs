@@ -22,6 +22,8 @@
 //! `Db::open_in_memory` so the migration code path is exercised on every
 //! run.
 
+pub mod admission;
+pub mod admission_policy;
 pub mod campaign_workflow;
 pub mod campaigns;
 pub mod checkpoints;

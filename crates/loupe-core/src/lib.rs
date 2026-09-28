@@ -30,6 +30,7 @@ pub mod canonical;
 pub mod inventory_manifest;
 pub mod review_metadata;
 pub mod review_payload;
+pub mod review_priority;
 pub mod unsupported_preparation;
 /// Immutable recipe/behavior contract recorded on review generations and jobs.
 pub const WORKFLOW_CONTRACT_VERSION: i64 = 2;
