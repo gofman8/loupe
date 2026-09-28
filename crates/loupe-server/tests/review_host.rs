@@ -46,6 +46,9 @@ mod survey_terminal;
 #[path = "review_evidence/mod.rs"]
 mod evidence_checkpoints;
 
+#[path = "review_compatibility/mod.rs"]
+mod compatibility;
+
 struct Fixture {
 	state: AppState,
 	offline: common::offline::OfflineDatabase,

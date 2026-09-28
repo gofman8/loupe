@@ -34,6 +34,7 @@ impl std::fmt::Debug for PeerCert {
 /// integration tests can mount it without spinning up TLS.
 pub fn router(state: AppState) -> Router {
 	let admin_only = Router::new()
+		.route("/v1/review-generations/{id}/reset", post(routes::review_compatibility::reset))
 		.route("/v1/repos", post(routes::repos::create).get(routes::repos::list))
 		.route("/v1/repos/{id}", delete(routes::repos::delete).patch(routes::repos::update))
 		.route("/v1/repos/{id}/reporting/github-pat", post(routes::repos::rotate_github_pat))

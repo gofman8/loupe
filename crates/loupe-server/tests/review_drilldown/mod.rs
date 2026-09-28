@@ -889,3 +889,56 @@ async fn carried_evidence_keeps_old_producer_provenance_without_requiring_its_ge
 	})
 	.unwrap();
 }
+
+#[tokio::test]
+async fn reset_preserves_promotion_evidence_receipts_and_pending_verification_on_disk() {
+	let (mut f, generation, _) = ready().await;
+	let input = promote();
+	let receipt = post(&f, "finalize-drilldown", input.clone()).await;
+	let peer = super::compatibility::admin(&f.state, &f.offline);
+	let before = f.offline.external_corruption(|conn| {
+		conn.execute("UPDATE jobs SET state='cancelled' WHERE state IN('queued','leased')", [])?;
+		conn.execute("UPDATE review_campaigns SET state='cancelled'", [])?;
+		// Oversized derived closure criteria motivate rebuilding, not truncation.
+		conn.execute("INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,source_refs,closure_criteria,created_at) VALUES(?1,'historical','unit','objective','[]',?2,0)",params![generation,"x".repeat(3000)])?;
+		Ok((reset_snapshot(conn,"SELECT * FROM findings"), reset_snapshot(conn,"SELECT evidence_payload,reviewed_commit_sha,profile_version,profile_digest,source FROM finding_review_details"), reset_snapshot(conn,"SELECT originating_job_id,originating_campaign_id,admission_campaign_id,source_commit_sha,profile_version,profile_digest,intent_revision,intent_kind,continuation_class,logical_sequence,accepted_band,accepted_score,priority_policy_version,created_at FROM finding_verification_intents")))
+	}).unwrap();
+	let (status, reply) = super::compatibility::reset(&f.state, generation, &peer).await;
+	assert_eq!(status, StatusCode::OK, "{reply}");
+	assert_eq!(reply["verification_intents_blocked"], 1);
+	assert_eq!(reply["review_units_removed"], 1);
+	assert_eq!(
+		request(&f, f.job, "finalize-drilldown", input.clone()).await,
+		(StatusCode::OK, receipt.clone())
+	);
+	drop(std::mem::replace(
+		&mut f.state.db,
+		Arc::new(
+			loupe_storage::Db::open_in_memory(&loupe_storage::secrets::MasterKey::for_tests())
+				.unwrap(),
+		),
+	));
+	let offline = Arc::get_mut(&mut f.offline).unwrap();
+	offline.edit(|_| Ok(()));
+	f.state.db = offline.open();
+	f.offline.external_corruption(|conn| {
+		assert_eq!(reset_snapshot(conn,"SELECT * FROM findings"),before.0);
+		assert_eq!(reset_snapshot(conn,"SELECT evidence_payload,reviewed_commit_sha,profile_version,profile_digest,source FROM finding_review_details"),before.1);
+		assert_eq!(reset_snapshot(conn,"SELECT originating_job_id,originating_campaign_id,admission_campaign_id,source_commit_sha,profile_version,profile_digest,intent_revision,intent_kind,continuation_class,logical_sequence,accepted_band,accepted_score,priority_policy_version,created_at FROM finding_verification_intents"),before.2);
+		assert_eq!(conn.query_row("SELECT state,block_reason,generation_id FROM finding_verification_intents",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?,("blocked".into(),"requires_successor".into(),None));
+		assert_eq!(conn.query_row("SELECT COUNT(*) FROM review_units",[],|r|r.get::<_,i64>(0))?,0);
+		assert!(reset_snapshot(conn,"PRAGMA foreign_key_check").is_empty());
+		Ok(())
+	}).unwrap();
+	assert_eq!(request(&f, f.job, "finalize-drilldown", input).await, (StatusCode::OK, receipt));
+}
+
+fn reset_snapshot(conn: &rusqlite::Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+	let mut statement = conn.prepare(sql).unwrap();
+	let count = statement.column_count();
+	statement
+		.query_map([], |row| (0..count).map(|i| row.get(i)).collect())
+		.unwrap()
+		.collect::<rusqlite::Result<_>>()
+		.unwrap()
+}

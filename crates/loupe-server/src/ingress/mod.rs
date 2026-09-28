@@ -15,6 +15,7 @@ pub(crate) mod error;
 pub(crate) mod jobs;
 pub(crate) mod query;
 pub(crate) mod registry;
+pub(crate) mod review_compatibility;
 pub(crate) mod review_context;
 #[cfg(test)]
 mod tests;
@@ -163,11 +164,20 @@ impl<S: Send + Sync> FromRequest<S> for OperatorJson {
 }
 
 async fn collect_operator_body(
-	body: axum::body::Body, mut buffered: RequestBuffer,
+	body: axum::body::Body, buffered: RequestBuffer,
+) -> Result<Bytes, (StatusCode, String)> {
+	collect_operator_body_limited(body, buffered, BODY_CAP).await
+}
+
+async fn collect_operator_body_limited(
+	body: axum::body::Body, mut buffered: RequestBuffer, limit: usize,
 ) -> Result<Bytes, (StatusCode, String)> {
 	let mut stream = body.into_data_stream();
 	while let Some(chunk) = stream.next().await {
 		let chunk = chunk.map_err(|_| (StatusCode::BAD_REQUEST, "reading request body".into()))?;
+		if limit < BODY_CAP && chunk.len() > limit.saturating_sub(buffered.used) {
+			return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body exceeds its limit".into()));
+		}
 		buffered
 			.append(&chunk)
 			.map_err(|status| (status, "request body exceeds 2097152 bytes".into()))?;

@@ -71,3 +71,20 @@ async fn completed_collection_keeps_bytes_until_last_owner() {
 	drop(bytes);
 	assert_eq!(*audit.lock().unwrap(), [(4, true)]);
 }
+
+#[tokio::test]
+async fn smaller_operator_cap_rejects_before_copy_and_wipes_partial_storage() {
+	let (buffer, audit) = observed();
+	let body = Body::from_stream(stream::iter([
+		Ok::<_, std::io::Error>(Bytes::from_static(b"ABC")),
+		Ok(Bytes::from_static(b"DEFGHI")),
+	]));
+	let error = collect_operator_body_limited(body, buffer, 8).await.unwrap_err();
+	assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+	assert_eq!(*audit.lock().unwrap(), [(4, true)], "oversized chunk must not grow the buffer");
+	let (buffer, audit) = observed();
+	let bytes = collect_operator_body_limited(Body::from("ABCDEFGH"), buffer, 8).await.unwrap();
+	assert_eq!(bytes.as_ref(), b"ABCDEFGH");
+	drop(bytes);
+	assert_eq!(*audit.lock().unwrap(), [(8, true)]);
+}
