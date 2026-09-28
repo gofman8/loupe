@@ -9,22 +9,24 @@ use loupe_storage::{
 use super::*;
 
 // Children share this test's encrypted database, not a production connection.
-struct Fixture {
-	state: AppState,
-	offline: Arc<common::offline::OfflineDatabase>,
-	peer: PeerCert,
-	other_peer: PeerCert,
-	worker: i64,
-	job: i64,
-	campaign: i64,
-	token: String,
+pub(super) struct Fixture {
+	pub(super) state: AppState,
+	pub(super) offline: Arc<common::offline::OfflineDatabase>,
+	pub(super) peer: PeerCert,
+	pub(super) other_peer: PeerCert,
+	pub(super) worker: i64,
+	pub(super) job: i64,
+	pub(super) campaign: i64,
+	pub(super) token: String,
 }
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
 	let super::Fixture { state, offline, peer, other_peer, worker, job, campaign, token } =
 		super::fixture();
 	Fixture { state, offline: Arc::new(offline), peer, other_peer, worker, job, campaign, token }
 }
-async fn request(f: &Fixture, job: i64, route: &str, payload: Value) -> (StatusCode, Value) {
+pub(super) async fn request(
+	f: &Fixture, job: i64, route: &str, payload: Value,
+) -> (StatusCode, Value) {
 	let mut req = Request::post(format!("/v1/jobs/{job}/{route}"))
 		.header(PROTOCOL_VERSION_HEADER, "3")
 		.header(JOB_CAPABILITY_HEADER, &f.token)
@@ -44,7 +46,7 @@ async fn response(f: &Fixture, req: Request<Body>) -> (StatusCode, Value) {
 			.unwrap_or_else(|_| json!({"raw":String::from_utf8_lossy(&bytes)})),
 	)
 }
-async fn post(f: &Fixture, route: &str, payload: Value) -> Value {
+pub(super) async fn post(f: &Fixture, route: &str, payload: Value) -> Value {
 	let (status, value) = request(f, f.job, route, payload).await;
 	assert_eq!(status, StatusCode::OK, "{route}: {value}");
 	value
@@ -63,7 +65,7 @@ async fn ready() -> (Fixture, i64, i64) {
 	ready_fixture(fixture()).await
 }
 
-async fn ready_fixture(f: Fixture) -> (Fixture, i64, i64) {
+pub(super) async fn ready_fixture(f: Fixture) -> (Fixture, i64, i64) {
 	let pin = post(&f, "pin-target", json!({"protocol_version":3,"commit_sha":SHA})).await;
 	let generation = pin["generation"]["generation_id"].as_i64().unwrap();
 	let entries = vec!["a%FF", "cafe\u{301}.rs", "café.rs", "z.rs"]
@@ -217,7 +219,7 @@ async fn defer_preserves_multiline_prose_and_creates_only_a_typed_pending_intent
 	assert_eq!(scalar(&f, "SELECT general_spent FROM campaign_admission_spending"), 1);
 }
 
-fn promote() -> Value {
+pub(super) fn promote() -> Value {
 	body(json!({"version":1,"disposition":"promote","promotion":{
 		"version":1,"severity":"high","title":"Untrusted allocation control",
 		"description":"Attacker-controlled length reaches the allocator.\nCanonical details remain literal.",

@@ -6,6 +6,7 @@ use loupe_provenance::Db as DbSource;
 use super::*;
 use crate::review_authority::with_phase_transaction;
 use crate::review_intents::tests::{child, NORMAL, SHA};
+use crate::review_intents::State as IntentState;
 use crate::test_support::{self as input, scope};
 use crate::{jobs, transaction, Db};
 
@@ -13,7 +14,7 @@ const HASH: [u8; 32] = [9; 32];
 fn identity() -> jobs::LeaseIdentity<'static> {
 	jobs::LeaseIdentity { job_id: 110, worker_id: 1, capability_hash: &HASH }
 }
-fn payload(promote: bool) -> DrilldownTerminalV1<Agent> {
+pub(in crate::review_authority) fn payload(promote: bool) -> DrilldownTerminalV1<Agent> {
 	let value = if promote {
 		serde_json::json!({"version":1,"disposition":"promote","promotion":{
    "version":1,"severity":"high","title":"Retained boundary","description":"Attacker controls allocation",
@@ -25,7 +26,7 @@ fn payload(promote: bool) -> DrilldownTerminalV1<Agent> {
 	};
 	input::agent(&value.to_string(), |raw, mark| DrilldownTerminalV1::from_json(mark, raw)).unwrap()
 }
-fn fixture() -> (Db, i64) {
+pub(in crate::review_authority) fn fixture() -> (Db, i64) {
 	let db = crate::review_intents::tests::fixture();
 	let lead = db.with_conn(|conn| {
 		transaction::immediate(conn, |tx| {
@@ -53,7 +54,9 @@ fn fixture() -> (Db, i64) {
 	}).unwrap();
 	(db, lead)
 }
-fn finish(db: &Db, value: &DrilldownTerminalV1<Agent>) -> Result<DrilldownFinalization> {
+pub(in crate::review_authority) fn finish(
+	db: &Db, value: &DrilldownTerminalV1<Agent>,
+) -> Result<DrilldownFinalization> {
 	with_phase_transaction(
 		db,
 		identity(),

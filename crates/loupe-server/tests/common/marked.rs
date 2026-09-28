@@ -98,6 +98,15 @@ pub fn drilldown_terminal(
 	})
 }
 
+/// Fixed Agent verification evidence for assertions against authored fixtures.
+pub fn verification_terminal(
+	raw: &str,
+) -> loupe_core::review_payload::VerificationTerminalV1<loupe_provenance::Agent> {
+	agent::fixture(raw, |raw, mark| {
+		loupe_core::review_payload::VerificationTerminalV1::from_json(mark, raw).unwrap()
+	})
+}
+
 /// Synthetic authenticated Operator authority for direct integration fixtures.
 #[allow(unsafe_code)]
 pub fn operator_ingress() -> Ingress<loupe_provenance::Operator> {

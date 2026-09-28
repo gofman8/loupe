@@ -12,5 +12,6 @@ pub mod review_inventory;
 pub mod review_lifecycle;
 pub mod review_survey;
 pub mod review_units;
+pub mod review_verification;
 pub mod whoami;
 pub mod workers;

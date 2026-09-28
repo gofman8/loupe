@@ -23,6 +23,9 @@
 //! use loupe_storage::review_authority::PhaseScope;
 //! fn sql(scope: &PhaseScope<'_, '_>) { scope.execute_batch("DELETE FROM jobs"); }
 //! ```
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use loupe_core::text::policy::RevisionText;
 use loupe_core::text::{BoundedText, Normalization, TextPolicy, Whitespace};
 use loupe_core::{JobKind, WORKFLOW_CONTRACT_VERSION};
@@ -41,18 +44,21 @@ mod lifecycle;
 mod survey;
 mod terminal;
 mod units;
+mod verification;
 pub use context::{CapacitySnapshot, LimitsSnapshot};
-pub use drilldown::{
-	ContinuationBlockReason, ContinuationSummary, DrilldownDisposition, DrilldownFinalization,
-	DrilldownSummary,
-};
+pub use drilldown::{DrilldownDisposition, DrilldownFinalization, DrilldownSummary};
 pub use envelope::{AssignedUnit, ReviewPreparation};
 pub use evidence::{
 	LeadCheckpoint, LeadCheckpointOutcome, LeadCheckpointReceipt, UnitResultCheckpoint,
 	UnitResultCheckpointReceipt,
 };
-pub use terminal::{SurveyCoverage, SurveyFinalization, SurveySummary};
+pub use terminal::{
+	ContinuationBlockReason, ContinuationSummary, SurveyCoverage, SurveyFinalization, SurveySummary,
+};
 pub use units::{UnitProposal, UnitProposalReceipt};
+pub use verification::{
+	VerificationFinalization, VerificationReceipt, VerificationSummary, VerificationVerdict,
+};
 
 // debug-ok: phase, purpose and policy decisions contain only closed variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +134,8 @@ pub struct Generation {
 /// No SQL access, repository authority, clone or identity retargeting exists.
 pub struct PhaseTransaction<'tx> {
 	conn: &'tx Connection,
+	identity: &'tx Arc<crate::db::DbIdentity>,
+	committed: &'tx Arc<AtomicBool>,
 	job_id: i64,
 	worker_id: i64,
 	capability_hash: Option<[u8; 32]>,
@@ -149,8 +157,11 @@ pub fn with_phase_transaction<T, E: From<Error>>(
 ) -> std::result::Result<T, E> {
 	db.with_conn(|conn| {
 		let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+		let committed = Arc::new(AtomicBool::new(false));
 		let mut facade = PhaseTransaction {
 			conn: &tx,
+			identity: &db.identity,
+			committed: &committed,
 			job_id: identity.job_id,
 			worker_id: identity.worker_id,
 			capability_hash: identity.capability_hash.try_into().ok(),
@@ -161,6 +172,7 @@ pub fn with_phase_transaction<T, E: From<Error>>(
 			Err(error) => return Ok(Err(error)),
 		};
 		tx.commit()?;
+		committed.store(true, Ordering::Release);
 		Ok(Ok(value))
 	})
 	.map_err(E::from)?

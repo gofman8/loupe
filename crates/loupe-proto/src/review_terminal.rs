@@ -12,7 +12,7 @@
 //! ```
 use loupe_core::review_metadata::{ReviewCommit, ReviewDigest};
 use loupe_core::review_payload::{
-	SurveyTerminalReason, SurveyTerminalV1, SurveyTerminalV1Decoder, Version1,
+	ContinuationClass, SurveyTerminalReason, SurveyTerminalV1, SurveyTerminalV1Decoder, Version1,
 };
 use loupe_provenance::{Agent, Source, Unvalidated, ValidateCarrying, Worker};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,33 @@ use serde_json::value::RawValue;
 
 use crate::review_api::ReviewProtocol;
 use crate::review_lease::ReviewId;
+
+// debug-ok: closed protocol summary with numeric identifiers only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationBlockReason {
+	AwaitingProofInfrastructure,
+	ExternalDependency,
+	RequiresSuccessor,
+}
+
+// debug-ok: closed protocol summary with numeric identifiers only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContinuationSummary {
+	Pending {
+		class: ContinuationClass,
+		revision: u64,
+		logical_sequence: u64,
+		not_before: i64,
+	},
+	Blocked {
+		class: ContinuationClass,
+		revision: u64,
+		logical_sequence: u64,
+		reason: ContinuationBlockReason,
+	},
+}
 
 #[derive(Serialize)]
 #[serde(bound(serialize = ""))]

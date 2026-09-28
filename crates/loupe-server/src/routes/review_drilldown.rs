@@ -16,29 +16,7 @@ use crate::AppState;
 
 fn reply(value: DrilldownFinalization) -> Result<wire::DrilldownTerminalResponse<Db>> {
 	let summary = value.summary;
-	let continuation = summary.continuation.map(|value| match value {
-		stored::ContinuationSummary::Pending { class, revision, logical_sequence, not_before } => {
-			wire::ContinuationSummary::Pending { class, revision, logical_sequence, not_before }
-		},
-		stored::ContinuationSummary::Blocked { class, revision, logical_sequence, reason } => {
-			wire::ContinuationSummary::Blocked {
-				class,
-				revision,
-				logical_sequence,
-				reason: match reason {
-					stored::ContinuationBlockReason::AwaitingProofInfrastructure => {
-						wire::ContinuationBlockReason::AwaitingProofInfrastructure
-					},
-					stored::ContinuationBlockReason::ExternalDependency => {
-						wire::ContinuationBlockReason::ExternalDependency
-					},
-					stored::ContinuationBlockReason::RequiresSuccessor => {
-						wire::ContinuationBlockReason::RequiresSuccessor
-					},
-				},
-			}
-		},
-	});
+	let continuation = summary.continuation.map(crate::review::terminal::continuation);
 	Ok(wire::DrilldownTerminalResponse {
 		protocol_version: ReviewProtocol,
 		receipt: wire::DrilldownReceipt {

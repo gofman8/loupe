@@ -118,9 +118,12 @@ impl ReportFinding {
 		self.phase_review
 	}
 
-	fn selected(scope: &RepoScope<'_>, row: FindingRow) -> std::result::Result<Self, Unavailable> {
-		let evidence = crate::finding_details::read_review_evidence(scope, row.id)
-			.map_err(|_| Unavailable::StoredInput)?;
+	fn selected(
+		scope: &SelectionContext<'_>, row: FindingRow,
+	) -> std::result::Result<Self, Unavailable> {
+		let evidence =
+			crate::finding_details::read_review_evidence_raw(scope.conn, scope.repo_id, row.id)
+				.map_err(|_| Unavailable::StoredInput)?;
 		let (phase_review, reviewed_revision) = match evidence {
 			crate::StoredEvidence::Missing => {
 				let (revision, campaign): (_, Option<i64>) = scope
@@ -262,6 +265,34 @@ impl ReportReceipt {
 		}
 		Ok(changed)
 	}
+}
+
+// Private report-selection facts; neither repository nor operator authority.
+struct SelectionContext<'a> {
+	conn: &'a rusqlite::Connection,
+	repo_id: i64,
+	identity: &'a Arc<crate::db::DbIdentity>,
+	committed: &'a Arc<AtomicBool>,
+}
+impl<'a> SelectionContext<'a> {
+	fn from_scope(scope: &'a RepoScope<'_>) -> Self {
+		Self {
+			conn: scope.conn,
+			repo_id: scope.repo_id,
+			identity: scope.identity,
+			committed: scope.committed,
+		}
+	}
+}
+
+pub(crate) fn prepare_verification(
+	conn: &rusqlite::Connection, repo_id: i64, finding_id: i64,
+	identity: &Arc<crate::db::DbIdentity>, committed: &Arc<AtomicBool>,
+) -> Result<Preparation> {
+	prepare(
+		&SelectionContext { conn, repo_id, identity, committed },
+		Selection::Finding(finding_id),
+	)
 }
 
 enum Selection {
@@ -408,15 +439,15 @@ pub fn prepare_assignment(scope: &AssignmentScope<'_>) -> Result<Preparation> {
 		},
 		_ => return Err(Error::ScopeDenied),
 	};
-	prepare(&scope.repo, selection)
+	prepare(&SelectionContext::from_scope(&scope.repo), selection)
 }
 
 pub fn prepare_operator(scope: &RepoScope<'_>, finding_id: i64) -> Result<Preparation> {
 	scope.require_operator()?;
-	prepare(scope, Selection::Finding(finding_id))
+	prepare(&SelectionContext::from_scope(scope), Selection::Finding(finding_id))
 }
 
-fn prepare(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
+fn prepare(scope: &SelectionContext<'_>, selection: Selection) -> Result<Preparation> {
 	// Read failures in this report-only projection must not undo an otherwise
 	// completed domain mutation. Its caller still propagates domain SQL errors.
 	match select(scope, selection) {
@@ -431,7 +462,7 @@ fn prepare(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
 	}
 }
 
-fn select(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
+fn select(scope: &SelectionContext<'_>, selection: Selection) -> Result<Preparation> {
 	let repo = crate::repos::get_raw(scope.conn, scope.repo_id)?.ok_or(Error::ScopeDenied)?;
 	if matches!(repo.reporting, ReportingDestination::Manual) {
 		return Ok(Preparation::NoReport);
@@ -799,7 +830,7 @@ mod tests {
 			&db,
 			&crate::test_support::operator_ingress(),
 			OperatorTarget::Repository(repo),
-			|scope| prepare(scope, Selection::Job(job)),
+			|scope| prepare(&SelectionContext::from_scope(scope), Selection::Job(job)),
 		)
 		.unwrap();
 		let Preparation::Ready(ref mut batch) = batch else { panic!("batch") };

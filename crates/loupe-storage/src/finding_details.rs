@@ -217,12 +217,16 @@ pub fn insert_attempt_evidence<RevisionS: Source>(
 	scope: &crate::scope::RepoScope<'_>, new: &NewAttemptEvidence<'_, RevisionS>, now: i64,
 ) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
+	insert_attempt_evidence_raw(scope.conn, scope.repo_id, new, now)
+}
+pub(crate) fn insert_attempt_evidence_raw<RevisionS: Source>(
+	tx: &Connection, repo: i64, new: &NewAttemptEvidence<'_, RevisionS>, now: i64,
+) -> Result<()> {
 	let bytes = new.evidence.canonical_bytes()?;
 	attempt_provenance(
 		tx,
 		new.verification_id,
-		scope.repo_id,
+		repo,
 		new.checkout_commit_sha.expose(),
 		new.workflow_contract_version,
 		new.evidence,

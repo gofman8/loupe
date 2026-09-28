@@ -5,9 +5,7 @@
 //! ```compile_fail,E0277
 //! let _:loupe_proto::review_drilldown::DrilldownReceipt<loupe_provenance::Db>=serde_json::from_str("{}").unwrap();
 //! ```
-use loupe_core::review_payload::{
-	ContinuationClass, DrilldownTerminalV1, DrilldownTerminalV1Decoder, Version1,
-};
+use loupe_core::review_payload::{DrilldownTerminalV1, DrilldownTerminalV1Decoder, Version1};
 use loupe_provenance::{Agent, Source, Unvalidated, ValidateCarrying, Worker};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -46,32 +44,7 @@ impl DrilldownDisposition {
 	}
 }
 
-// debug-ok: closed protocol summary with numeric identifiers only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContinuationBlockReason {
-	AwaitingProofInfrastructure,
-	ExternalDependency,
-	RequiresSuccessor,
-}
-
-// debug-ok: closed protocol summary with numeric identifiers only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ContinuationSummary {
-	Pending {
-		class: ContinuationClass,
-		revision: u64,
-		logical_sequence: u64,
-		not_before: i64,
-	},
-	Blocked {
-		class: ContinuationClass,
-		revision: u64,
-		logical_sequence: u64,
-		reason: ContinuationBlockReason,
-	},
-}
+pub use crate::review_terminal::{ContinuationBlockReason, ContinuationSummary};
 
 // debug-ok: closed protocol summary with numeric identifiers only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

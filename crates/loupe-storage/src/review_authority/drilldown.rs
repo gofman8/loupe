@@ -7,17 +7,17 @@
 //! ```
 use loupe_core::review_candidates::CandidateKind;
 use loupe_core::review_metadata::{ReviewCommit, ReviewDigest};
-use loupe_core::review_payload::{
-	ContinuationClass, DrilldownTerminalV1, DuplicateTarget, Version1,
-};
+use loupe_core::review_payload::{DrilldownTerminalV1, DuplicateTarget, Version1};
 use loupe_core::text::SourceRef;
 use loupe_provenance::{Agent, Db};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use super::terminal::{self, stored_error};
-use super::{Access, Context, Phase, PhaseScope, PhaseTransaction, PolicyDecision};
-use crate::review_intents::{BlockReason, Intent, IntentKind, State as IntentState, Subject};
+use super::{
+	Access, Context, ContinuationSummary, Phase, PhaseScope, PhaseTransaction, PolicyDecision,
+};
+use crate::review_intents::Subject;
 use crate::terminal_payloads::TerminalPayload;
 use crate::terminal_receipt::{Reject, Replayed};
 use crate::{
@@ -45,31 +45,6 @@ impl DrilldownDisposition {
 		}
 	}
 }
-// debug-ok: closed continuation blocker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContinuationBlockReason {
-	AwaitingProofInfrastructure,
-	ExternalDependency,
-	RequiresSuccessor,
-}
-// debug-ok: closed decisions and numeric metadata only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ContinuationSummary {
-	Pending {
-		class: ContinuationClass,
-		revision: u64,
-		logical_sequence: u64,
-		not_before: i64,
-	},
-	Blocked {
-		class: ContinuationClass,
-		revision: u64,
-		logical_sequence: u64,
-		reason: ContinuationBlockReason,
-	},
-}
 // debug-ok: closed terminal decisions and numeric identifiers only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,33 +68,7 @@ impl DrilldownSummary {
 			return Err(incompatible());
 		}
 		if let Some(value) = &self.continuation {
-			let (revision, sequence, valid) = match value {
-				ContinuationSummary::Pending { class, revision, logical_sequence, not_before } => (
-					*revision,
-					*logical_sequence,
-					*class == ContinuationClass::SourceAnalysisRemaining && *not_before >= 0,
-				),
-				ContinuationSummary::Blocked { class, revision, logical_sequence, reason } => (
-					*revision,
-					*logical_sequence,
-					matches!(
-						(class, reason),
-						(
-							ContinuationClass::AwaitingProofInfrastructure,
-							ContinuationBlockReason::AwaitingProofInfrastructure
-						) | (
-							ContinuationClass::ExternalDependency,
-							ContinuationBlockReason::ExternalDependency
-						) | (
-							ContinuationClass::RequiresSuccessor,
-							ContinuationBlockReason::RequiresSuccessor
-						)
-					),
-				),
-			};
-			if revision == 0 || revision > i64::MAX as u64 || sequence > i64::MAX as u64 || !valid {
-				return Err(incompatible());
-			}
+			terminal::validate_continuation(value)?;
 		}
 		Ok(())
 	}
@@ -182,37 +131,6 @@ fn original_digest(scope: &PhaseScope<'_, '_>, lead: &leads::Metadata) -> Result
 	};
 	payload.digest().map_err(|_| incompatible())
 }
-fn admitted_intent(
-	scope: &PhaseScope<'_, '_>, lead: i64, audit: &terminal::Audit,
-) -> Result<(Intent, review_intents::JobContext)> {
-	let conn = scope.transaction.conn;
-	let intent = review_intents::get_subject_raw(conn, scope.job.repo_id, Subject::Lead(lead))?
-		.ok_or_else(incompatible)?;
-	let context = review_intents::producer(conn, scope.job.repo_id, scope.job.id)?;
-	let job = &context.job;
-	if intent.state != IntentState::Admitted
-		|| intent.admitted_job_id != Some(job.id)
-		|| intent.repo_id != job.repo_id
-		|| intent.generation_id != job.generation_id
-		|| Some(intent.admission_campaign_id) != job.campaign_id
-		|| intent.source_commit_sha != audit.commit
-		|| context.sha != audit.commit
-		|| intent.profile_version != i64::from(context.profile.version.get())
-		|| intent.profile_digest != context.profile.digest
-		|| intent.revision <= 0
-		|| intent.logical_sequence < 0
-		|| intent.priority.score > 550
-		|| job.parent_job_id != Some(intent.originating_job_id)
-		|| job.scheduling_band != Some(intent.priority.band)
-		|| job.continuation_of_job_id
-			!= match intent.kind {
-				IntentKind::InitialHandoff => None,
-				IntentKind::LogicalContinuation => Some(intent.originating_job_id),
-			} {
-		return Err(incompatible());
-	}
-	Ok((intent, context))
-}
 fn validate_sources(
 	scope: &PhaseScope<'_, '_>, generation: i64, lead: &leads::Metadata, sha: &ReviewCommit<Db>,
 	payload: &DrilldownTerminalV1<Agent>,
@@ -251,41 +169,6 @@ fn validate_sources(
 	}
 	Ok(())
 }
-fn continuation(intent: &Intent) -> Result<ContinuationSummary> {
-	let class = intent.continuation_class.ok_or_else(incompatible)?;
-	let revision = intent.revision.try_into().map_err(|_| incompatible())?;
-	let logical_sequence = intent.logical_sequence.try_into().map_err(|_| incompatible())?;
-	match intent.state {
-		IntentState::Pending
-			if class == ContinuationClass::SourceAnalysisRemaining
-				&& intent.block_reason.is_none() =>
-		{
-			Ok(ContinuationSummary::Pending {
-				class,
-				revision,
-				logical_sequence,
-				not_before: intent.not_before.ok_or_else(incompatible)?,
-			})
-		},
-		IntentState::Blocked if intent.not_before.is_none() => {
-			let reason = match (class, intent.block_reason) {
-				(
-					ContinuationClass::AwaitingProofInfrastructure,
-					Some(BlockReason::AwaitingProofInfrastructure),
-				) => ContinuationBlockReason::AwaitingProofInfrastructure,
-				(ContinuationClass::ExternalDependency, Some(BlockReason::ExternalDependency)) => {
-					ContinuationBlockReason::ExternalDependency
-				},
-				(ContinuationClass::RequiresSuccessor, Some(BlockReason::RequiresSuccessor)) => {
-					ContinuationBlockReason::RequiresSuccessor
-				},
-				_ => return Err(incompatible()),
-			};
-			Ok(ContinuationSummary::Blocked { class, revision, logical_sequence, reason })
-		},
-		_ => Err(incompatible()),
-	}
-}
 fn finalize(
 	scope: &PhaseScope<'_, '_>, payload: &TerminalPayload,
 ) -> Result<DrilldownFinalization> {
@@ -307,7 +190,7 @@ fn finalize(
 	}
 	let original = original_digest(scope, &lead)?;
 	let audit = terminal::audit(scope)?;
-	let (intent, context) = admitted_intent(scope, lead_id, &audit)?;
+	let (intent, context) = terminal::admitted_subject(scope, Subject::Lead(lead_id), &audit)?;
 	validate_sources(scope, generation, &lead, &audit.commit, terminal_payload)?;
 	let mut summary = DrilldownSummary {
 		version: Version1,
@@ -378,14 +261,15 @@ fn finalize(
 	}
 	terminal::succeed(scope)?;
 	if let DrilldownTerminalV1::Defer { continuation: class, .. } = terminal_payload {
-		summary.continuation = Some(continuation(&review_intents::continue_subject_raw(
-			conn,
-			repo,
-			Subject::Lead(lead_id),
-			job,
-			*class,
-			now,
-		)?)?);
+		summary.continuation =
+			Some(terminal::continuation(&review_intents::continue_subject_raw(
+				conn,
+				repo,
+				Subject::Lead(lead_id),
+				job,
+				*class,
+				now,
+			)?)?);
 	} else {
 		review_intents::finish_subject_intent_raw(conn, repo, Subject::Lead(lead_id), job, now)?;
 	}
@@ -394,4 +278,4 @@ fn finalize(
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::review_authority) mod tests;

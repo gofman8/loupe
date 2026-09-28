@@ -2,10 +2,59 @@
 //! never acquires a fabricated mark; required receipt readback admits the actual
 //! SQL TEXT through the existing Payload policy before the transaction commits.
 use loupe_core::review_metadata::{ReviewCommit, ReviewDigest};
-use loupe_core::review_payload::{SurveyTerminalReason, Version1};
+use loupe_core::review_payload::{ContinuationClass, SurveyTerminalReason, Version1};
 use loupe_provenance::Db;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+
+use crate::review_intents::{self, BlockReason, Intent, IntentKind, State as IntentState, Subject};
+
+pub(super) fn seal_verification(
+	scope: &PhaseScope<'_, '_>, audit: &Audit, payload: &terminal_payloads::TerminalPayload,
+	summary: &super::VerificationSummary, subject_digest: &[u8; 32],
+) -> Result<super::VerificationReceipt> {
+	if !matches!(payload, terminal_payloads::TerminalPayload::Verification(_)) {
+		return Err(incompatible());
+	}
+	write_receipt(
+		scope,
+		audit,
+		payload,
+		summary,
+		Some(subject_digest),
+		(summary.verdict == super::VerificationVerdict::Verified).then_some(EvidenceRung::L2),
+		summary.verdict.as_str(),
+	)?;
+	verification_snapshot(scope.transaction)
+}
+pub(super) fn verification_snapshot(
+	tx: &PhaseTransaction<'_>,
+) -> Result<super::VerificationReceipt> {
+	tx.conn.query_row(
+        "SELECT job_terminal_receipt_id,job_id,pinned_commit_sha,result_digest,terminal_reason,result_counts,effective_recipe,evidence_rung,subject_digest
+         FROM job_terminal_receipts WHERE job_id=?1 AND phase='verify'",[tx.job_id],|row|{
+            let _audit=crate::ingress::db_payload(row,6)?;
+            let counts=crate::ingress::db_payload(row,5)?;
+            let summary:super::VerificationSummary=serde_json::from_str(counts.expose())
+                .map_err(|_|crate::review::invalid_scalar(5))?;
+            summary.validate().map_err(|_|crate::review::invalid_scalar(5))?;
+            if row.get_ref(4)?.as_str()? != summary.verdict.as_str() {
+                return Err(crate::review::invalid_scalar(4));
+            }
+            let expected_rung=if summary.verdict == super::VerificationVerdict::Verified {
+                rusqlite::types::ValueRef::Text(b"L2")
+            } else { rusqlite::types::ValueRef::Null };
+            if row.get_ref(7)? != expected_rung || row.get_ref(8)?.as_blob()?.len() != 32 {
+                return Err(crate::review::invalid_scalar(7));
+            }
+            let receipt_id:i64=row.get(0)?;
+            let job_id:i64=row.get(1)?;
+            if receipt_id<=0 || job_id<=0 {return Err(crate::review::invalid_scalar(0));}
+            Ok(super::VerificationReceipt{receipt_id,job_id,
+                commit:crate::ingress::profile::commit(row,2)?,
+                result_digest:crate::ingress::profile::digest(row,3)?,summary})
+        }).optional()?.ok_or_else(incompatible)
+}
 
 use super::{
 	DrilldownDisposition, DrilldownFinalization, DrilldownSummary, PhaseScope, PhaseTransaction,
@@ -257,4 +306,142 @@ pub(super) fn drilldown_snapshot(tx: &PhaseTransaction<'_>) -> Result<DrilldownF
 			})
 		},
 	).optional()?.ok_or_else(incompatible)
+}
+
+fn incompatible_review() -> Error {
+	Error::Conflict(Conflict::IncompatibleReviewState)
+}
+// debug-ok: closed continuation blocker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationBlockReason {
+	AwaitingProofInfrastructure,
+	ExternalDependency,
+	RequiresSuccessor,
+}
+// debug-ok: closed decisions and numeric metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContinuationSummary {
+	Pending {
+		class: ContinuationClass,
+		revision: u64,
+		logical_sequence: u64,
+		not_before: i64,
+	},
+	Blocked {
+		class: ContinuationClass,
+		revision: u64,
+		logical_sequence: u64,
+		reason: ContinuationBlockReason,
+	},
+}
+pub(super) fn validate_continuation(value: &ContinuationSummary) -> Result<()> {
+	let (revision, sequence, valid) = match value {
+		ContinuationSummary::Pending { class, revision, logical_sequence, not_before } => (
+			*revision,
+			*logical_sequence,
+			*class == ContinuationClass::SourceAnalysisRemaining && *not_before >= 0,
+		),
+		ContinuationSummary::Blocked { class, revision, logical_sequence, reason } => (
+			*revision,
+			*logical_sequence,
+			matches!(
+				(class, reason),
+				(
+					ContinuationClass::AwaitingProofInfrastructure,
+					ContinuationBlockReason::AwaitingProofInfrastructure
+				) | (
+					ContinuationClass::ExternalDependency,
+					ContinuationBlockReason::ExternalDependency
+				) | (
+					ContinuationClass::RequiresSuccessor,
+					ContinuationBlockReason::RequiresSuccessor
+				)
+			),
+		),
+	};
+	if revision == 0 || revision > i64::MAX as u64 || sequence > i64::MAX as u64 || !valid {
+		return Err(incompatible_review());
+	}
+	Ok(())
+}
+pub(super) fn admitted_subject(
+	scope: &PhaseScope<'_, '_>, subject: Subject, audit: &Audit,
+) -> Result<(Intent, review_intents::JobContext)> {
+	let conn = scope.transaction.conn;
+	let intent = review_intents::get_subject_raw(conn, scope.job.repo_id, subject)?
+		.ok_or_else(incompatible_review)?;
+	let context = review_intents::producer(conn, scope.job.repo_id, scope.job.id)?;
+	let job = &context.job;
+	let assignment = match subject {
+		Subject::Lead(id) => {
+			scope.job.phase == super::Phase::Drilldown
+				&& job.kind == loupe_core::JobKind::Drilldown
+				&& job.assigned_lead_id == Some(id)
+		},
+		Subject::Finding(id) => {
+			scope.job.phase == super::Phase::Verify
+				&& job.kind == loupe_core::JobKind::Verify
+				&& job.target_finding_id == Some(id)
+		},
+	};
+	if !assignment
+		|| intent.state != IntentState::Admitted
+		|| intent.admitted_job_id != Some(job.id)
+		|| intent.repo_id != job.repo_id
+		|| intent.generation_id != job.generation_id
+		|| Some(intent.admission_campaign_id) != job.campaign_id
+		|| intent.source_commit_sha != audit.commit
+		|| context.sha != audit.commit
+		|| intent.profile_version != i64::from(context.profile.version.get())
+		|| intent.profile_digest != context.profile.digest
+		|| intent.revision <= 0
+		|| intent.logical_sequence < 0
+		|| intent.priority.score > 550
+		|| job.parent_job_id != Some(intent.originating_job_id)
+		|| job.scheduling_band != Some(intent.priority.band)
+		|| job.continuation_of_job_id
+			!= match intent.kind {
+				IntentKind::InitialHandoff => None,
+				IntentKind::LogicalContinuation => Some(intent.originating_job_id),
+			} {
+		return Err(incompatible_review());
+	}
+	Ok((intent, context))
+}
+pub(super) fn continuation(intent: &Intent) -> Result<ContinuationSummary> {
+	let class = intent.continuation_class.ok_or_else(incompatible_review)?;
+	let revision = intent.revision.try_into().map_err(|_| incompatible_review())?;
+	let logical_sequence = intent.logical_sequence.try_into().map_err(|_| incompatible_review())?;
+	match intent.state {
+		IntentState::Pending
+			if class == ContinuationClass::SourceAnalysisRemaining
+				&& intent.block_reason.is_none() =>
+		{
+			Ok(ContinuationSummary::Pending {
+				class,
+				revision,
+				logical_sequence,
+				not_before: intent.not_before.ok_or_else(incompatible_review)?,
+			})
+		},
+		IntentState::Blocked if intent.not_before.is_none() => {
+			let reason = match (class, intent.block_reason) {
+				(
+					ContinuationClass::AwaitingProofInfrastructure,
+					Some(BlockReason::AwaitingProofInfrastructure),
+				) => ContinuationBlockReason::AwaitingProofInfrastructure,
+				(ContinuationClass::ExternalDependency, Some(BlockReason::ExternalDependency)) => {
+					ContinuationBlockReason::ExternalDependency
+				},
+				(ContinuationClass::RequiresSuccessor, Some(BlockReason::RequiresSuccessor)) => {
+					ContinuationBlockReason::RequiresSuccessor
+				},
+				_ => return Err(incompatible_review()),
+			};
+			Ok(ContinuationSummary::Blocked { class, revision, logical_sequence, reason })
+		},
+		_ => Err(incompatible_review()),
+	}
 }
