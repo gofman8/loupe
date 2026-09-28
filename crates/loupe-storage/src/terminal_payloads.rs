@@ -46,14 +46,18 @@ pub fn insert(
 	scope: &crate::scope::RepoScope<'_>, job_id: i64, payload: &TerminalPayload,
 ) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
+	insert_raw(scope.conn, scope.repo_id, job_id, payload)
+}
+pub(crate) fn insert_raw(
+	tx: &rusqlite::Connection, repo: i64, job_id: i64, payload: &TerminalPayload,
+) -> Result<()> {
 	let bytes = payload.canonical_bytes()?;
 	let digest = loupe_core::canonical::digest(&bytes);
 	let matches: bool = tx.query_row(
 		"SELECT EXISTS(SELECT 1 FROM job_terminal_receipts r JOIN jobs j ON j.id=r.job_id
 		 WHERE r.job_id=?1 AND r.phase=?2 AND j.kind=?2 AND j.campaign_id IS NOT NULL
 		 AND r.result_digest=?3 AND j.repo_id=?4)",
-		params![job_id, payload.phase().as_str(), digest.as_slice(), scope.repo_id],
+		params![job_id, payload.phase().as_str(), digest.as_slice(), repo],
 		|r| r.get(0),
 	)?;
 	if !matches {

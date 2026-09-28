@@ -7,6 +7,7 @@ pub mod repos;
 pub mod review_context;
 pub mod review_host;
 pub mod review_inventory;
+pub mod review_survey;
 pub mod review_units;
 pub mod whoami;
 pub mod workers;

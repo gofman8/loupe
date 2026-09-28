@@ -31,6 +31,9 @@ mod inventory;
 #[path = "review_units/mod.rs"]
 mod unit_proposals;
 
+#[path = "review_survey/mod.rs"]
+mod survey_terminal;
+
 struct Fixture {
 	state: AppState,
 	offline: common::offline::OfflineDatabase,

@@ -67,6 +67,278 @@ fn hold_units(tx: &Transaction<'_>, count: i64) -> Result<()> {
 	Ok(())
 }
 
+#[test]
+fn partial_continuation_carries_untouched_members_across_two_handoffs() {
+	fixture()
+		.with_conn(|conn| {
+			transaction::immediate(conn, |tx| {
+				hold_units(tx, 3)?;
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=101", [])?;
+				let first = freeze_survey_batches(&scope(tx, 1), 101, 0)?.remove(0);
+				child(tx, 110, None, 101, true)?;
+				let original_assignment =
+					admit_exact_batch(&scope(tx, 1), first.batch_id, 110, 60)?;
+				let original_hold = get_hold(&scope(tx, 1), 3)?.unwrap();
+				let closed = result(tx, 1, 110, false)?;
+				release_conclusive(&scope(tx, 1), 1, closed, 110, 1, 61)?;
+				let renewed = result(tx, 2, 110, true)?;
+				record_follow_up(
+					&scope(tx, 1),
+					2,
+					renewed,
+					110,
+					1,
+					ContinuationClass::SourceAnalysisRemaining,
+					61,
+				)?;
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=110", [])?;
+				let second = freeze_survey_batches(&scope(tx, 1), 110, 62)?;
+				assert_eq!(second.len(), 1);
+				let members = batch_holds(&scope(tx, 1), second[0].batch_id)?;
+				assert_eq!(
+					members.iter().map(|h| h.unit_id).collect::<Vec<_>>(),
+					vec![2, 3],
+					"partial finalization must retain the untouched held member"
+				);
+				assert_eq!(members[1].producing_job_id, original_hold.producing_job_id);
+				assert_eq!(members[1].producing_result_id, original_hold.producing_result_id);
+				assert_eq!(members[1].source_assignment_epoch, 0);
+				assert_eq!(
+					get_batch(&scope(tx, 1), first.batch_id)?.unwrap().state,
+					State::Complete
+				);
+				assert_eq!(
+					assigned_units(tx, 110)?[2],
+					original_assignment[2],
+					"carrying must not invent completion or change the original assignment"
+				);
+				assert_eq!(
+					freeze_survey_batches(&scope(tx, 1), 110, 1000)?,
+					second,
+					"replay freezes the original handoff"
+				);
+				child(tx, 111, None, 110, true)?;
+				let assigned = admit_exact_batch(
+					&scope(tx, 1),
+					second[0].batch_id,
+					111,
+					second[0].not_before.unwrap(),
+				)?;
+				assert_eq!(
+					assigned.iter().map(|a| (a.unit_id, a.assignment_epoch)).collect::<Vec<_>>(),
+					vec![(2, 2), (3, 2)]
+				);
+				assert_eq!(
+					admit_exact_batch(&scope(tx, 1), second[0].batch_id, 111, 999)?,
+					assigned,
+					"execution retry must not increment epochs"
+				);
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=111", [])?;
+				let third = freeze_survey_batches(&scope(tx, 1), 111, 200)?;
+				assert_eq!(third.len(), 1, "zero-progress terminalization still needs a handoff");
+				assert_eq!(third[0].logical_sequence, 3);
+				child(tx, 112, None, 111, true)?;
+				let assigned = admit_exact_batch(
+					&scope(tx, 1),
+					third[0].batch_id,
+					112,
+					third[0].not_before.unwrap(),
+				)?;
+				assert_eq!(
+					assigned.iter().map(|a| (a.unit_id, a.assignment_epoch)).collect::<Vec<_>>(),
+					vec![(2, 3), (3, 3)]
+				);
+				assert_eq!(
+					get_hold(&scope(tx, 1), 3)?.unwrap().producing_result_id,
+					original_hold.producing_result_id
+				);
+				Ok(())
+			})
+		})
+		.unwrap();
+}
+
+#[test]
+fn carry_handoff_rejects_broken_original_evidence_or_reservation_and_rolls_back() {
+	for damage in [
+		"epoch",
+		"missing_assignment",
+		"missing_hold",
+		"position",
+		"completed",
+		"digest",
+		"historical",
+		"conflicting_owner",
+	] {
+		let db = fixture();
+		db.with_conn(|conn| {
+			let first=transaction::immediate(conn,|tx| {
+				hold_units(tx,2)?;
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=101",[])?;
+				let first=freeze_survey_batches(&scope(tx, 1),101,0)?.remove(0);
+				child(tx,110,None,101,true)?;
+				admit_exact_batch(&scope(tx, 1),first.batch_id,110,60)?;
+				match damage {
+					"epoch"=>{tx.execute("UPDATE review_units SET assignment_epoch=99 WHERE review_unit_id=2",[])?;},
+					"missing_assignment"=>{tx.execute("DELETE FROM job_assigned_review_units WHERE job_id=110 AND review_unit_id=2",[])?;},
+					"missing_hold"=>{tx.execute("DELETE FROM review_unit_holds WHERE review_unit_id=2",[])?;},
+					"position"=>{tx.execute("UPDATE review_unit_holds SET batch_position=9 WHERE review_unit_id=2",[])?;},
+					"completed"=>{tx.execute("UPDATE job_assigned_review_units SET completed=1 WHERE job_id=110 AND review_unit_id=2",[])?;},
+					"digest"|"historical"=>damage_result(tx,get_hold(&scope(tx, 1),2)?.unwrap().producing_result_id,damage)?,
+					"conflicting_owner"=>{child(tx,111,None,101,true)?;tx.execute("INSERT INTO job_assigned_review_units(job_id,review_unit_id,position,assignment_epoch) VALUES(111,2,0,1)",[])?;},
+					_=>unreachable!()
+				}
+				Ok(first)
+			})?;
+			let outcome=transaction::immediate(conn,|tx| {
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=110",[])?;
+				freeze_survey_batches(&scope(tx, 1),110,61)
+			});
+			assert!(outcome.is_err(),"carry handoff accepted damaged {damage}");
+			assert_eq!(crate::jobs::get(&scope(conn, 1),110)?.unwrap().state,JobState::Leased);
+			assert_eq!(get_batch(&scope(conn, 1),first.batch_id)?.unwrap().state,State::Admitted);
+			assert_eq!(get_hold(&scope(conn, 1),1)?.unwrap().pending_batch_id,Some(first.batch_id),"earlier movements roll back with later validation failure");
+			assert_eq!(list_batches(&scope(conn, 1),1,0,256)?.len(),1);
+			Ok(())
+		}).unwrap();
+	}
+}
+
+#[test]
+fn carried_handoff_survives_restart_and_failure_after_movement() {
+	let directory = tempfile::tempdir().unwrap();
+	let path = directory.path().join("carried.db");
+	let key = crate::secrets::MasterKey::for_tests();
+	let db = Db::open(&path, &key).unwrap();
+	review_tests::seed(&db);
+	crate::review_intents::tests::ready(&db);
+	let first = db
+		.with_conn(|conn| {
+			transaction::immediate(conn, |tx| {
+				hold_units(tx, 1)?;
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=101", [])?;
+				let first = freeze_survey_batches(&scope(tx, 1), 101, 0)?.remove(0);
+				child(tx, 110, None, 101, true)?;
+				admit_exact_batch(&scope(tx, 1), first.batch_id, 110, 60)?;
+				Ok(first)
+			})
+		})
+		.unwrap();
+	db.with_conn(|conn| {
+		let failed: Result<()> = transaction::immediate(conn, |tx| {
+			tx.execute("UPDATE jobs SET state='succeeded' WHERE id=110", [])?;
+			let next = freeze_survey_batches(&scope(tx, 1), 110, 61)?;
+			assert_eq!(next.len(), 1);
+			assert_eq!(
+				get_hold(&scope(tx, 1), 1)?.unwrap().pending_batch_id,
+				Some(next[0].batch_id)
+			);
+			Err(Error::Conflict(Conflict::TerminalReceipt))
+		});
+		assert!(failed.is_err());
+		assert_eq!(get_hold(&scope(conn, 1), 1)?.unwrap().pending_batch_id, Some(first.batch_id));
+		assert_eq!(get_batch(&scope(conn, 1), first.batch_id)?.unwrap().state, State::Admitted);
+		assert_eq!(crate::jobs::get(&scope(conn, 1), 110)?.unwrap().state, JobState::Leased);
+		Ok(())
+	})
+	.unwrap();
+	let second = db
+		.with_conn(|conn| {
+			transaction::immediate(conn, |tx| {
+				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=110", [])?;
+				Ok(freeze_survey_batches(&scope(tx, 1), 110, 61)?.remove(0))
+			})
+		})
+		.unwrap();
+	drop(db);
+	let db = Db::open(&path, &key).unwrap();
+	db.with_conn(|conn| {
+		transaction::immediate(conn, |tx| {
+			assert_eq!(freeze_survey_batches(&scope(tx, 1), 110, 1000)?, vec![second.clone()]);
+			assert_eq!(get_hold(&scope(tx, 1), 1)?.unwrap().producing_job_id, 101);
+			assert_eq!(get_hold(&scope(tx, 1), 1)?.unwrap().source_assignment_epoch, 0);
+			child(tx, 111, None, 110, true)?;
+			let assignment =
+				admit_exact_batch(&scope(tx, 1), second.batch_id, 111, second.not_before.unwrap())?;
+			assert_eq!(assignment[0].assignment_epoch, 2);
+			assert_eq!(assignment[0].unit_id, 1);
+			assert_eq!(admit_exact_batch(&scope(tx, 1), second.batch_id, 111, 1000)?, assignment);
+			Ok(())
+		})
+	})
+	.unwrap();
+}
+
+#[test]
+fn carried_batch_admission_rechecks_original_evidence_and_exact_handoff_epoch() {
+	for damage in [
+		"historical",
+		"digest",
+		"epoch",
+		"missing_assignment",
+		"completed_assignment",
+		"unit_epoch",
+	] {
+		fixture()
+			.with_conn(|conn| {
+				let batch =
+					transaction::immediate(conn, |tx| {
+						hold_units(tx, 1)?;
+						tx.execute("UPDATE jobs SET state='succeeded' WHERE id=101", [])?;
+						let first = freeze_survey_batches(&scope(tx, 1), 101, 0)?.remove(0);
+						child(tx, 110, None, 101, true)?;
+						admit_exact_batch(&scope(tx, 1), first.batch_id, 110, 60)?;
+						tx.execute("UPDATE jobs SET state='succeeded' WHERE id=110", [])?;
+						let mut carried = freeze_survey_batches(&scope(tx, 1), 110, 61)?;
+						assert_eq!(carried.len(), 1, "untouched work needs an exact next handoff");
+						let second = carried.remove(0);
+						child(tx, 111, None, 110, true)?;
+						match damage {
+							"missing_assignment" => {
+								tx.execute(
+									"DELETE FROM job_assigned_review_units WHERE job_id=110",
+									[],
+								)?;
+							},
+							"completed_assignment" => {
+								tx.execute("UPDATE job_assigned_review_units SET completed=1 WHERE job_id=110",[])?;
+							},
+							"unit_epoch" => {
+								tx.execute("UPDATE review_units SET assignment_epoch=9 WHERE review_unit_id=1",[])?;
+							},
+							_ => damage_result(
+								tx,
+								get_hold(&scope(tx, 1), 1)?.unwrap().producing_result_id,
+								damage,
+							)?,
+						}
+						Ok(second)
+					})?;
+				assert!(
+					transaction::immediate(conn, |tx| admit_exact_batch(
+						&scope(tx, 1),
+						batch.batch_id,
+						111,
+						batch.not_before.unwrap()
+					))
+					.is_err(),
+					"admission accepted {damage}"
+				);
+				assert_eq!(
+					get_batch(&scope(conn, 1), batch.batch_id)?.unwrap().state,
+					State::Pending
+				);
+				assert_eq!(
+					get_hold(&scope(conn, 1), 1)?.unwrap().pending_batch_id,
+					Some(batch.batch_id)
+				);
+				assert!(assigned_units(conn, 111)?.is_empty());
+				Ok(())
+			})
+			.unwrap();
+	}
+}
+
 fn damage_result(tx: &Transaction<'_>, id: i64, kind: &str) -> Result<()> {
 	use crate::StoredEvidence;
 	let StoredEvidence::Recorded(mut evidence) =
@@ -876,5 +1148,45 @@ fn exact_batch_never_hides_foreign_or_dangling_extra_members() {
 			assert_eq!(conn.query_row("SELECT count(*) FROM job_assigned_review_units WHERE job_id=110",[],|r|r.get::<_,i64>(0))?,0);
 			Ok(())
 		}).unwrap();
+	}
+}
+
+#[test]
+fn handoff_freeze_rejects_dangling_and_foreign_members_before_decoding() {
+	for damage in ["dangling_new", "dangling_incoming", "foreign_malformed"] {
+		let db = fixture();
+		let first = db
+			.with_conn(|conn| {
+				transaction::immediate(conn, |tx| {
+					hold_units(tx, 1)?;
+					tx.execute("UPDATE jobs SET state='succeeded' WHERE id=101", [])?;
+					if damage == "dangling_new" {
+						return Ok(None);
+					}
+					let batch = freeze_survey_batches(&scope(tx, 1), 101, 0)?.remove(0);
+					child(tx, 110, None, 101, true)?;
+					admit_exact_batch(&scope(tx, 1), batch.batch_id, 110, 60)?;
+					Ok(Some(batch))
+				})
+			})
+			.unwrap();
+		db.with_conn(|conn| {
+            conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")?;
+            if damage=="foreign_malformed" {
+                conn.execute("INSERT INTO review_units(review_unit_id,generation_id,client_review_unit_key,title,objective,source_refs,priority_band,created_at) VALUES(999,21,'foreign','Foreign','Foreign','[]','not-a-priority',0)",[])?;
+            }
+            conn.execute("INSERT INTO review_unit_holds(review_unit_id,generation_id,producing_job_id,producing_result_id,source_assignment_epoch,continuation_class,pending_batch_id,batch_position,created_at,updated_at) VALUES(999,?1,101,1,0,'source_analysis_remaining',?2,?3,0,0)",
+                params![if damage=="foreign_malformed"{21}else{11},first.as_ref().map(|b|b.batch_id),first.as_ref().map(|_|1)])?;
+            conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF")?;
+            let result=transaction::immediate(conn,|tx| {
+                let job=if first.is_some(){110}else{101};
+                tx.execute("UPDATE jobs SET state='succeeded' WHERE id=?1",[job])?;
+                freeze_survey_batches(&scope(tx,1),job,61)
+            });
+            assert!(matches!(result,Err(Error::Conflict(Conflict::Assignment))),
+                "freeze must reject every corrupt held member before decoding: {damage}: {result:?}");
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM survey_continuation_batches",[],|row|row.get::<_,i64>(0))?,i64::from(first.is_some()));
+            Ok(())
+        }).unwrap();
 	}
 }

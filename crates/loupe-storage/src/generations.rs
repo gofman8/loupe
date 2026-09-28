@@ -127,13 +127,17 @@ pub(crate) fn get_raw(conn: &rusqlite::Connection, id: i64) -> Result<Option<Gen
 }
 
 pub fn get(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Option<Generation>> {
-	Ok(scope
-		.conn
+	get_for_repo_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_for_repo_raw(
+	conn: &Connection, repo: i64, id: i64,
+) -> Result<Option<Generation>> {
+	Ok(conn
 		.query_row(
 			&format!(
 				"SELECT {COLUMNS} FROM review_generations WHERE generation_id=?1 AND repo_id=?2"
 			),
-			params![id, scope.repo_id],
+			params![id, repo],
 			row,
 		)
 		.optional()?)
@@ -143,9 +147,14 @@ pub fn list_for_repo(scope: &crate::scope::RepoScope<'_>) -> Result<Vec<Generati
 }
 pub fn activate(scope: &crate::scope::RepoScope<'_>, id: i64, now: i64) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
-	let successor = get(scope, id)?.ok_or(Error::NotFound(Entity::Generation, id))?;
-	if successor.state != State::Building || inventory::manifest_sealed(scope, id)? == Some(false) {
+	activate_raw(scope.conn, scope.repo_id, id, now)
+}
+pub(crate) fn activate_raw(tx: &Connection, repo: i64, id: i64, now: i64) -> Result<()> {
+	let successor =
+		get_for_repo_raw(tx, repo, id)?.ok_or(Error::NotFound(Entity::Generation, id))?;
+	if successor.state != State::Building
+		|| inventory::manifest_sealed_raw(tx, repo, id)? == Some(false)
+	{
 		return Err(Error::Conflict(Conflict::GenerationState));
 	}
 	let active: Option<i64> = tx
@@ -159,14 +168,13 @@ pub fn activate(scope: &crate::scope::RepoScope<'_>, id: i64, now: i64) -> Resul
 		if successor.predecessor_generation_id != Some(active) {
 			return Err(Error::Conflict(Conflict::GenerationPredecessor));
 		}
-		retire_superseded(scope, active, now)?;
+		retire_superseded_raw(tx, repo, active, now)?;
 	}
-	changed(tx.execute("UPDATE review_generations SET state='active',activated_at=?2 WHERE generation_id=?1 AND repo_id=?3 AND state='building'",params![id,now,scope.repo_id])
+	changed(tx.execute("UPDATE review_generations SET state='active',activated_at=?2 WHERE generation_id=?1 AND repo_id=?3 AND state='building'",params![id,now,repo])
 		.map_err(|e|classify(e,"review_generations.repo_id",Conflict::ActiveGeneration))?,Conflict::GenerationState)
 }
-fn retire_superseded(scope: &crate::scope::RepoScope<'_>, id: i64, now: i64) -> Result<()> {
-	let tx = scope.conn;
-	changed(tx.execute("UPDATE review_generations SET state='retired',retired_reason='superseded',retired_at=?2 WHERE generation_id=?1 AND repo_id=?3 AND state='active'", params![id,now,scope.repo_id])?, Conflict::GenerationState)
+fn retire_superseded_raw(tx: &Connection, repo: i64, id: i64, now: i64) -> Result<()> {
+	changed(tx.execute("UPDATE review_generations SET state='retired',retired_reason='superseded',retired_at=?2 WHERE generation_id=?1 AND repo_id=?3 AND state='active'", params![id,now,repo])?, Conflict::GenerationState)
 }
 pub fn retire<S: Source>(
 	scope: &crate::scope::RepoScope<'_>, id: i64, reason: &BoundedText<Reason, S>, now: i64,
@@ -213,26 +221,30 @@ pub fn set_coverage(
 	scope: &crate::scope::RepoScope<'_>, id: i64, coverage: Coverage,
 ) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
+	set_coverage_raw(scope.conn, scope.repo_id, id, coverage)
+}
+pub(crate) fn set_coverage_raw(
+	tx: &Connection, repo: i64, id: i64, coverage: Coverage,
+) -> Result<()> {
 	if coverage == Coverage::Complete
-		&& (inventory::manifest_sealed(scope, id)? == Some(false)
-			|| !coverage_rollup(scope, id)?.complete())
+		&& (inventory::manifest_sealed_raw(tx, repo, id)? == Some(false)
+			|| !coverage_rollup_raw(tx, repo, id)?.complete())
 	{
 		return Err(Error::Conflict(Conflict::Coverage));
 	}
-	changed(tx.execute("UPDATE review_generations SET coverage=?2 WHERE generation_id=?1 AND repo_id=?3 AND state IN ('building','active') AND (?2<>'complete' OR corroboration_state='satisfied')",params![id,coverage.as_str(),scope.repo_id])?,Conflict::Coverage)
+	changed(tx.execute("UPDATE review_generations SET coverage=?2 WHERE generation_id=?1 AND repo_id=?3 AND state IN ('building','active') AND (?2<>'complete' OR corroboration_state='satisfied')",params![id,coverage.as_str(),repo])?,Conflict::Coverage)
 }
 pub fn coverage_rollup(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<CoverageRollup> {
-	let tx = scope.conn;
-	get(scope, id)?.ok_or(Error::NotFound(Entity::Generation, id))?;
+	coverage_rollup_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn coverage_rollup_raw(tx: &Connection, repo: i64, id: i64) -> Result<CoverageRollup> {
+	get_for_repo_raw(tx, repo, id)?.ok_or(Error::NotFound(Entity::Generation, id))?;
 	let held = "EXISTS(SELECT 1 FROM review_unit_holds h WHERE h.review_unit_id=u.review_unit_id)";
 	let uncovered = format!("FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.generation_id=?1 AND g.repo_id=?2 AND (u.status IN ('open','deferred') OR {held}) AND ({held} OR NOT ({}))", crate::review_units::UNIT_COVERED);
 	let missing_results =
-		tx.query_row(&format!("SELECT COUNT(*) {uncovered}"), params![id, scope.repo_id], |r| {
-			r.get(0)
-		})?;
-	let needs_follow_up = tx.query_row(&format!("SELECT COUNT(*) {uncovered} AND ({held} OR (SELECT r.disposition FROM review_unit_results r WHERE r.review_unit_id=u.review_unit_id AND r.invalidated=0 AND r.commit_sha=g.generation_commit_sha AND r.profile_version=g.profile_version ORDER BY r.review_unit_result_id DESC LIMIT 1)='needs_follow_up')"),params![id,scope.repo_id],|r|r.get(0))?;
-	let unresolved_inventory = if inventory::manifest_sealed(scope, id)?.is_some() {
+		tx.query_row(&format!("SELECT COUNT(*) {uncovered}"), params![id, repo], |r| r.get(0))?;
+	let needs_follow_up = tx.query_row(&format!("SELECT COUNT(*) {uncovered} AND ({held} OR (SELECT r.disposition FROM review_unit_results r WHERE r.review_unit_id=u.review_unit_id AND r.invalidated=0 AND r.commit_sha=g.generation_commit_sha AND r.profile_version=g.profile_version ORDER BY r.review_unit_result_id DESC LIMIT 1)='needs_follow_up')"),params![id,repo],|r|r.get(0))?;
+	let unresolved_inventory = if inventory::manifest_sealed_raw(tx, repo, id)?.is_some() {
 		// Historical nonmembers are retained evidence targets, not entries in
 		// this manifest. Every persisted mapping must still name this source.
 		tx.query_row(
@@ -247,10 +259,10 @@ pub fn coverage_rollup(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<C
 			   WHERE m.generation_id=i.generation_id AND m.inventory_entry_id=i.inventory_entry_id
 			   AND NOT EXISTS (SELECT 1 FROM json_each(u.source_refs) r
 			     WHERE json_extract(r.value,'$.path')=i.source_path)))))",
-			params![id, scope.repo_id], |row| row.get(0),
+			params![id, repo], |row| row.get(0),
 		)?
 	} else {
-		tx.query_row("SELECT COUNT(*) FROM generation_inventory WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=generation_inventory.generation_id AND g.repo_id=?2) AND disposition='unresolved'",params![id,scope.repo_id],|r|r.get(0))?
+		tx.query_row("SELECT COUNT(*) FROM generation_inventory WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=generation_inventory.generation_id AND g.repo_id=?2) AND disposition='unresolved'",params![id,repo],|r|r.get(0))?
 	};
 	Ok(CoverageRollup { missing_results, needs_follow_up, unresolved_inventory })
 }

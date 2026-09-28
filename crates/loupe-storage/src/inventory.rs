@@ -151,7 +151,9 @@ pub(crate) fn manifest_sealed(
 ) -> Result<Option<bool>> {
 	manifest_sealed_raw(scope.conn, scope.repo_id, generation)
 }
-fn manifest_sealed_raw(conn: &Connection, repo: i64, generation: i64) -> Result<Option<bool>> {
+pub(crate) fn manifest_sealed_raw(
+	conn: &Connection, repo: i64, generation: i64,
+) -> Result<Option<bool>> {
 	ownership::generation(conn, repo, generation, Ownership::InventoryGeneration)?;
 	Ok(conn
 		.query_row(
