@@ -7,12 +7,12 @@ pub(crate) use claim::{claim_raw, initialize_ordinary_batch};
 pub use claim::{ClaimRequest, Claimed};
 use loupe_core::text::policy::{Payload, Reason};
 use loupe_core::text::{BoundedJson, BoundedText};
-use loupe_core::{JobKind, JobState, WORKFLOW_CONTRACT_VERSION};
+use loupe_core::{JobKind, WORKFLOW_CONTRACT_VERSION};
 use loupe_provenance::{Db, Source};
 pub use policy::{CampaignPolicy, PhasePolicy};
 use rusqlite::{params, Connection};
 
-use crate::review::{changed, is_unique};
+use crate::review::is_unique;
 use crate::{campaigns, jobs, ownership, Conflict, Entity, Error, Ownership, Result};
 
 fn invalid(field: &'static str) -> Error {
@@ -237,50 +237,26 @@ pub enum RetryOutcome {
 pub enum FailureReason<'a, S: Source> {
 	Submitted(&'a BoundedText<Reason, S>),
 	LeaseExpired,
+	ExecutionFailed,
 }
 impl<S: Source> FailureReason<'_, S> {
-	fn expose(&self) -> &str {
+	pub(crate) fn expose(&self) -> &str {
 		match self {
 			Self::Submitted(reason) => reason.expose(),
 			Self::LeaseExpired => jobs::LEASE_EXPIRED_AFTER_MAX_ATTEMPTS_ERROR,
+			Self::ExecutionFailed => "phase execution failed",
 		}
 	}
 }
 pub(crate) fn retry_or_fail<S: Source>(
 	tx: &Connection, job_id: i64, now: i64, error: FailureReason<'_, S>,
 ) -> Result<RetryOutcome> {
-	let job = jobs::get_raw(tx, job_id)?.ok_or(Error::NotFound(Entity::Job, job_id))?;
-	if job.state != JobState::Leased
-		|| !matches!(job.kind, JobKind::Survey | JobKind::Drilldown | JobKind::Verify)
-		|| (matches!(error, FailureReason::LeaseExpired)
-			&& job.lease_expires_at.is_none_or(|deadline| deadline >= now))
-	{
-		return Err(Error::Conflict(Conflict::JobState));
-	}
-	let campaign_id = job.campaign_id.ok_or(Error::Conflict(Conflict::CampaignState))?;
-	let campaign = campaigns::get_raw(tx, campaign_id)?
-		.ok_or(Error::NotFound(Entity::Campaign, campaign_id))?;
-	if campaign.repo_id != job.repo_id {
-		return Err(Error::Ownership(Ownership::CampaignJob));
-	}
-	let inactive_reason;
-	let failure = if campaign.state != campaigns::State::Active {
-		inactive_reason = format!("campaign {}", campaign.state.as_str());
-		Some(inactive_reason.as_str())
-	} else {
-		let policy = CampaignPolicy::from_snapshot(&campaign.effective_policy)?;
-		if job.attempts >= policy.max_attempts {
-			Some(error.expose())
-		} else {
-			let eligible_at = now
-				.checked_add(policy.retry_delay(job.attempts))
-				.ok_or_else(|| invalid("eligible_at"))?;
-			changed(tx.execute("UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,job_capability_hash=NULL,eligible_at=?2,hard_deadline_at=NULL,soft_deadline_at=NULL,submit_by=NULL WHERE id=?1 AND repo_id=?3 AND state='leased'", params![job_id,eligible_at,job.repo_id])?, Conflict::JobState)?;
-			return Ok(RetryOutcome::Requeued { eligible_at });
-		}
-	};
-	changed(tx.execute("UPDATE jobs SET state='failed',error=?2,finished_at=?3,worker_id=NULL,lease_expires_at=NULL,job_capability_hash=NULL WHERE id=?1 AND repo_id=?4 AND state='leased'", params![job_id,failure,now,job.repo_id])?, Conflict::JobState)?;
-	Ok(RetryOutcome::Failed)
+	use rusqlite::OptionalExtension;
+	let repo = tx
+		.query_row("SELECT repo_id FROM jobs WHERE id=?1", [job_id], |row| row.get(0))
+		.optional()?
+		.ok_or(Error::NotFound(Entity::Job, job_id))?;
+	crate::phase_lifecycle::retry_or_fail(tx, repo, job_id, now, error)
 }
 
 pub(crate) fn cancel_queued_children<S: Source>(
@@ -288,12 +264,19 @@ pub(crate) fn cancel_queued_children<S: Source>(
 	reason: &BoundedText<Reason, S>,
 ) -> Result<usize> {
 	scope.require_operator()?;
-	Ok(scope.conn.execute("UPDATE jobs SET state='cancelled',error=?2,finished_at=?3,job_capability_hash=NULL WHERE campaign_id=?1 AND repo_id=?4 AND state='queued'", params![campaign_id,reason.expose(),now,scope.repo_id])?)
+	crate::phase_lifecycle::cancel_queued(scope.conn, scope.repo_id, campaign_id, now, reason)
 }
 pub(crate) fn cancel_queued_at_deadline(
 	scope: &crate::scope::RepoScope<'_>, campaign_id: i64, now: i64,
 ) -> Result<usize> {
-	Ok(scope.conn.execute("UPDATE jobs SET state='cancelled',error='campaign deadline',finished_at=?2,job_capability_hash=NULL WHERE campaign_id=?1 AND repo_id=?3 AND state='queued'", params![campaign_id,now,scope.repo_id])?)
+	crate::phase_lifecycle::cancel_queued_reason(
+		scope.conn,
+		scope.repo_id,
+		campaign_id,
+		now,
+		"campaign deadline",
+		crate::review_intents::BlockReason::CampaignDeadline,
+	)
 }
 #[cfg(test)]
 mod tests;

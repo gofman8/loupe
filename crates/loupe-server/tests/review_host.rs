@@ -19,6 +19,9 @@ use tower::Service;
 
 mod common;
 
+#[path = "review_lifecycle/mod.rs"]
+mod phase_lifecycle;
+
 #[path = "review_drilldown/mod.rs"]
 mod drilldown_terminal;
 

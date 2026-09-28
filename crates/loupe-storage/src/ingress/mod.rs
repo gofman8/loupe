@@ -16,6 +16,7 @@ mod app;
 pub(crate) mod candidates;
 pub(crate) mod checkpoint;
 pub(crate) mod host_preparation;
+pub(crate) mod lifecycle;
 pub(crate) mod profile;
 mod refs;
 mod reporting;

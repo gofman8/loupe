@@ -55,16 +55,16 @@ pub fn router(state: AppState) -> Router {
 		.route("/v1/jobs", get(routes::jobs::list))
 		.route("/v1/jobs/{id}", get(routes::jobs::get))
 		.route("/v1/jobs/{id}/retry", post(routes::jobs::retry))
-		.route("/v1/jobs/{id}/cancel", post(routes::jobs::cancel))
+		.route("/v1/jobs/{id}/cancel", post(routes::review_lifecycle::cancel))
 		.route_layer(axum::middleware::from_fn(auth::require_admin));
 
 	let worker_only = Router::new()
 		.route("/v1/jobs/lease", post(routes::jobs::lease))
-		.route("/v1/jobs/{id}/heartbeat", post(routes::jobs::heartbeat))
+		.route("/v1/jobs/{id}/heartbeat", post(routes::review_lifecycle::heartbeat))
 		.route("/v1/jobs/{id}/findings", post(routes::jobs::submit_findings))
 		.route("/v1/jobs/{id}/llm-findings", post(routes::jobs::submit_llm_finding))
 		.route("/v1/jobs/{id}/verdict", post(routes::jobs::submit_verdict))
-		.route("/v1/jobs/{id}/complete", post(routes::jobs::complete))
+		.route("/v1/jobs/{id}/complete", post(routes::review_lifecycle::complete))
 		.route("/v1/jobs/{id}/pin-target", post(routes::review_host::pin_target))
 		.route("/v1/jobs/{id}/inventory-batches", post(routes::review_host::inventory_batch))
 		.route("/v1/jobs/{id}/seal-inventory", post(routes::review_host::seal_inventory))
@@ -104,10 +104,10 @@ pub fn router(state: AppState) -> Router {
 		.with_state(state)
 		.layer(axum::middleware::from_fn(
 			|req: axum::extract::Request, next: axum::middleware::Next| async move {
-				let phase = req.extensions().get::<axum::extract::MatchedPath>()
-					.is_some_and(|path| crate::review::http::is_phase_route(path.as_str()));
+				let (phase,control)=req.extensions().get::<axum::extract::MatchedPath>()
+     .map(|path|(crate::review::http::is_phase_route(path.as_str()),crate::review::http::is_control_route(path.as_str()))).unwrap_or_default();
 				let resp = next.run(req).await;
-				let mut resp = if phase { crate::review::http::bound_phase_errors(resp).await } else { resp };
+				let mut resp = if phase { crate::review::http::bound_phase_errors(resp).await } else if control {crate::review::http::bound_control_errors(resp).await} else { resp };
 				#[expect(clippy::expect_used, reason = "decimal formatting of the fixed u16 protocol version produces only ASCII header digits")]
 				let version = PROTOCOL_VERSION.to_string().parse().expect("u16 parses as header value");
 				resp.headers_mut().insert(

@@ -45,6 +45,7 @@ pub mod leads;
 pub mod maintenance;
 pub mod migrations;
 mod ownership;
+pub mod phase_lifecycle;
 pub mod proofs;
 pub mod recovery;
 pub mod registry;

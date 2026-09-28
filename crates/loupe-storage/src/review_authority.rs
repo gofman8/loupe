@@ -37,6 +37,7 @@ mod envelope;
 mod evidence;
 mod host;
 mod inventory;
+mod lifecycle;
 mod survey;
 mod terminal;
 mod units;

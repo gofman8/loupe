@@ -1103,8 +1103,14 @@ async fn job_cancel(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> R
 		reason = "CLI API egress uses the configured server and the operation-specific endpoint and admitted request fields"
 	)]
 	let resp = client.post(url(base, &format!("/v1/jobs/{id}/cancel"))?).send().await?;
-	let job: JobInfo<Server> = ingress::cancel_job(server_response(resp, "cancel job").await?)?;
-	println!("job_id={} state={:?} attempts={}", job.job_id, job.state, job.attempts);
+	match ingress::cancel_job(server_response(resp, "cancel job").await?)? {
+		ingress::CancelResponse::Phase(job) => {
+			println!("job_id={} state={:?}", i64::from(job.job_id), job.state)
+		},
+		ingress::CancelResponse::Legacy(job) => {
+			println!("job_id={} state={:?} attempts={}", job.job_id, job.state, job.attempts)
+		},
+	}
 	Ok(())
 }
 
@@ -1270,6 +1276,64 @@ mod legacy_responses;
 
 #[cfg(test)]
 mod tests {
+
+	async fn cancel_with_response(body: &str) -> Result<()> {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let base = format!("http://{}", listener.local_addr().unwrap()).parse().unwrap();
+		let body = body.to_owned();
+		let server = tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			while !request.ends_with(b"\r\n\r\n") {
+				request.push(stream.read_u8().await.unwrap());
+				assert!(request.len() < 8192);
+			}
+			assert!(request.starts_with(b"POST /v1/jobs/7/cancel HTTP/1.1\r\n"));
+			stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+		});
+		let outcome = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			job_cancel(&reqwest::Client::new(), &base, 7),
+		)
+		.await
+		.unwrap();
+		server.await.unwrap();
+		outcome
+	}
+
+	#[tokio::test]
+	async fn job_cancel_decodes_minimal_phase_response() {
+		let outcome = cancel_with_response(
+			r#"{"protocol_version":3,"job_id":7,"state":"cancelled","eligible_at":null}"#,
+		)
+		.await;
+		assert!(
+			outcome.is_ok(),
+			"a successful phase cancellation must decode without legacy job fields: {outcome:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn job_cancel_preserves_legacy_response_support() {
+		let outcome = cancel_with_response(r#"{"job_id":7,"repo_id":1,"kind":"scan","state":"cancelled","incremental":false,"attempts":2,"enqueued_at":0}"#).await;
+		assert!(outcome.is_ok(), "legacy cancellation must keep decoding JobInfo: {outcome:?}");
+	}
+
+	#[tokio::test]
+	async fn job_cancel_keeps_phase_decode_strict() {
+		for body in [
+			r#"{"protocol_version":2,"job_id":7,"state":"cancelled","eligible_at":null}"#,
+			r#"{"protocol_version":3,"job_id":7,"job_id":7,"state":"cancelled","eligible_at":null}"#,
+			r#"{"protocol_version":3,"job_id":7,"state":"cancelled","eligible_at":null,"extra":true}"#,
+		] {
+			assert!(
+				cancel_with_response(body).await.is_err(),
+				"phase control must be strictly decoded: {body}"
+			);
+		}
+	}
+
 	use std::path::PathBuf;
 
 	use base64::Engine as _;

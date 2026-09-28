@@ -132,7 +132,14 @@ pub fn is_phase_route(path: &str) -> bool {
 	)
 }
 
+pub fn is_control_route(path: &str) -> bool {
+	matches!(path, "/v1/jobs/{id}/complete" | "/v1/jobs/{id}/heartbeat" | "/v1/jobs/{id}/cancel")
+}
+
 pub async fn bound_phase_errors(response: Response) -> Response {
+	bound_errors(response, false).await
+}
+async fn bound_errors(response: Response, control: bool) -> Response {
 	if !response.status().is_client_error() && !response.status().is_server_error() {
 		return response;
 	}
@@ -141,9 +148,21 @@ pub async fn bound_phase_errors(response: Response) -> Response {
 		.headers
 		.get(header::CONTENT_TYPE)
 		.is_some_and(|value| value.as_bytes() == b"application/json");
-	if json && let Ok(bytes) = to_bytes(body, 4096).await {
-		parts.headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
-		return Response::from_parts(parts, Body::from(bytes));
+	if let Ok(bytes) = to_bytes(body, 4096).await {
+		if json {
+			parts
+				.headers
+				.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+			return Response::from_parts(parts, Body::from(bytes));
+		}
+		if control && let Some(message) = legacy_control_diagnostic(parts.status, &bytes) {
+			// Reconstruct only closed host messages, never forward untrusted suffixes.
+			let mut response = (parts.status, message).into_response();
+			response
+				.headers_mut()
+				.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+			return response;
+		}
 	}
 	// Never echo an extractor's arbitrary-size untrusted path or middleware
 	// text. Preserve its status, with the same bounded structured vocabulary.
@@ -157,6 +176,63 @@ pub async fn bound_phase_errors(response: Response) -> Response {
 		_ => "request_failed",
 	};
 	ApiError::new(parts.status, code).into_response()
+}
+
+pub async fn bound_control_errors(response: Response) -> Response {
+	bound_errors(response, true).await
+}
+
+/// Preserve the landed legacy diagnostic vocabulary on shared controls only.
+/// Every match is status-bound and exact; no Policy/SQL text or arbitrary
+/// suffix is reflected, even when it starts with a recognized host prefix.
+fn legacy_control_diagnostic(status: StatusCode, bytes: &[u8]) -> Option<String> {
+	let raw = std::str::from_utf8(bytes).ok()?;
+	const CATEGORIES: &[&str] = &[
+		"missing field",
+		"duplicate field",
+		"invalid type",
+		"unknown field",
+		"unknown variant",
+		"invalid data",
+	];
+	let fixed = match status {
+		StatusCode::BAD_REQUEST => &[
+			"invalid heartbeat body: invalid JSON syntax",
+			"Failed to parse the request body as JSON: invalid syntax",
+			"successful scan completion requires non-empty head_sha",
+			"X-Loupe-Protocol must be an integer",
+			"X-Loupe-Protocol must be valid ASCII",
+		][..],
+		StatusCode::CONFLICT => &["successful verify completion requires a submitted verdict"][..],
+		_ => &[],
+	};
+	if let Some(message) = fixed.iter().find(|message| **message == raw) {
+		return Some((*message).to_owned());
+	}
+	let prefix = match status {
+		StatusCode::BAD_REQUEST => "invalid heartbeat body: ",
+		StatusCode::UNPROCESSABLE_ENTITY => {
+			"Failed to deserialize the JSON body into the target type: "
+		},
+		_ => return None,
+	};
+	if let Some(category) = raw
+		.strip_prefix(prefix)
+		.and_then(|suffix| CATEGORIES.iter().find(|category| **category == suffix))
+	{
+		return Some(format!("{prefix}{category}"));
+	}
+	if status == StatusCode::BAD_REQUEST {
+		for prefix in ["unsupported protocol_version ", "unsupported X-Loupe-Protocol "] {
+			if let Some(suffix) = raw.strip_prefix(prefix)
+				&& let Ok(version) = suffix.parse::<u16>()
+				&& version.to_string() == suffix
+			{
+				return Some(format!("{prefix}{version}"));
+			}
+		}
+	}
+	None
 }
 
 /// Validate the already captured request, without bypassing worker quotas or
@@ -232,27 +308,92 @@ pub fn transaction<T: Serialize>(
 		|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
 		|tx| {
 			let value = body(tx)?;
-			let mut output = BoundedBody { bytes: Vec::new(), limit: response_limit };
-			serde_json::to_writer(&mut output, &value).map_err(|_| {
-				ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "response_too_large")
-			})?;
-			Ok::<_, ApiError>(
-				(
-					[
-						(header::CONTENT_TYPE, "application/json"),
-						(header::CACHE_CONTROL, "no-store"),
-					],
-					output.bytes,
-				)
-					.into_response(),
-			)
+			response(&value, response_limit)
 		},
 	)?
 	.ok_or_else(ApiError::denied)
 }
 
+pub fn response(value: &impl Serialize, limit: usize) -> Result<Response> {
+	let mut output = BoundedBody { bytes: Vec::new(), limit };
+	serde_json::to_writer(&mut output, value)
+		.map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "response_too_large"))?;
+	Ok((
+		[(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+		output.bytes,
+	)
+		.into_response())
+}
+
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn shared_controls_preserve_only_reconstructed_known_diagnostics() {
+		for (status, message) in [
+			(StatusCode::BAD_REQUEST, "invalid heartbeat body: invalid JSON syntax"),
+			(StatusCode::BAD_REQUEST, "invalid heartbeat body: missing field"),
+			(StatusCode::BAD_REQUEST, "invalid heartbeat body: invalid data"),
+			(
+				StatusCode::UNPROCESSABLE_ENTITY,
+				"Failed to deserialize the JSON body into the target type: unknown variant",
+			),
+			(StatusCode::BAD_REQUEST, "Failed to parse the request body as JSON: invalid syntax"),
+			(StatusCode::BAD_REQUEST, "successful scan completion requires non-empty head_sha"),
+			(StatusCode::CONFLICT, "successful verify completion requires a submitted verdict"),
+			(StatusCode::BAD_REQUEST, "unsupported protocol_version 65535"),
+			(StatusCode::BAD_REQUEST, "unsupported X-Loupe-Protocol 65535"),
+			(StatusCode::BAD_REQUEST, "X-Loupe-Protocol must be an integer"),
+			(StatusCode::BAD_REQUEST, "X-Loupe-Protocol must be valid ASCII"),
+		] {
+			let response = bound_control_errors((status, message).into_response()).await;
+			assert_eq!(response.status(), status);
+			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+			let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+			assert_eq!(
+				bytes.as_ref(),
+				message.as_bytes(),
+				"shared control must preserve the closed legacy diagnostic"
+			);
+		}
+	}
+	#[tokio::test]
+	async fn shared_control_unknown_suffix_oversize_and_auth_errors_stay_closed() {
+		const SENTINEL: &str = "FAKE_UNTRUSTED_DIAGNOSTIC";
+		for (status,message) in [
+   (StatusCode::BAD_REQUEST,SENTINEL.to_owned()),
+   (StatusCode::BAD_REQUEST,format!("invalid heartbeat body: missing field {SENTINEL}")),
+   (StatusCode::BAD_REQUEST,format!("successful scan completion requires non-empty head_sha{SENTINEL}")),
+   (StatusCode::CONFLICT,format!("successful verify completion requires a submitted verdict{SENTINEL}")),
+   (StatusCode::UNPROCESSABLE_ENTITY,format!("Failed to deserialize the JSON body into the target type: unknown variant {SENTINEL}")),
+   (StatusCode::BAD_REQUEST,"unsupported X-Loupe-Protocol 65536".to_owned()),
+   (StatusCode::BAD_REQUEST,"unsupported X-Loupe-Protocol 065535".to_owned()),
+   (StatusCode::BAD_REQUEST,"unsupported protocol_version +3".to_owned()),
+   (StatusCode::BAD_REQUEST,format!("unsupported protocol_version 65535{SENTINEL}")),
+   (StatusCode::BAD_REQUEST,format!("invalid heartbeat body: {}",SENTINEL.repeat(1000))),
+   (StatusCode::FORBIDDEN,"invalid heartbeat body: missing field".to_owned()),
+   (StatusCode::UNAUTHORIZED,"successful scan completion requires non-empty head_sha".to_owned()),
+   (StatusCode::INTERNAL_SERVER_ERROR,"successful verify completion requires a submitted verdict".to_owned()),
+   (StatusCode::BAD_REQUEST,format!("reason: Character (U+0000) {SENTINEL}")),
+  ] {
+   let response=bound_control_errors((status,message).into_response()).await;
+   assert_eq!(response.status(),status);
+   assert_eq!(response.headers()[header::CACHE_CONTROL],"no-store");
+   let bytes=to_bytes(response.into_body(),4096).await.unwrap();
+   let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+   assert_eq!(value["error"]["detail"],serde_json::Value::Null);
+   assert!(!std::str::from_utf8(&bytes).unwrap().contains(SENTINEL));
+  }
+		let response = bound_phase_errors(
+			(StatusCode::BAD_REQUEST, "invalid heartbeat body: missing field").into_response(),
+		)
+		.await;
+		let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+			"invalid_request",
+			"only shared controls preserve legacy diagnostic framing"
+		);
+	}
 	use loupe_proto::review_api::SealInventoryRequestDecoder;
 
 	use super::*;
