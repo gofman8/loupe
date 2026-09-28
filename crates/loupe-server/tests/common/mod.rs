@@ -365,27 +365,31 @@ pub fn allowed_owners(
 }
 
 /// Resolve and store policy through the actual campaign owner, then read Db bytes.
-pub fn stored_policy(
+pub fn stored_legacy_policy(
 	policy: &loupe_server::review::policy::ReviewPolicy,
 ) -> loupe_core::text::BoundedJson<loupe_core::text::policy::Payload, loupe_provenance::Db> {
-	use loupe_server::review::campaign::{self, KindHint, OpenCampaign, Opened, RequestedRef};
+	use loupe_storage::campaigns::{self, CampaignPolicyInput, NewCampaign, Recipe, Trigger};
 	let db =
 		loupe_storage::Db::open_in_memory(&loupe_storage::secrets::MasterKey::for_tests()).unwrap();
 	let repo_id = register_repo(&db, &new_repo(), None);
 	with_repo(&db, repo_id, |scope| {
 		let reference = marked::operator::text("main");
-		let opened = campaign::open(
+		let frozen = policy.snapshot().unwrap();
+		let campaign_id = campaigns::create(
 			scope,
-			&OpenCampaign {
-				trigger: loupe_storage::campaigns::Trigger::Manual,
-				requested_ref: RequestedRef::Branch(&reference),
-				base_sha: None,
-				kind_hint: KindHint::Incremental,
+			&NewCampaign {
+				recipe: Recipe::Bootstrap,
+				trigger: Trigger::Manual,
+				requested_base_sha: None,
+				target_commit_sha: &reference,
+				generation_id: None,
+				effective_policy: CampaignPolicyInput::<loupe_provenance::Db>::Resolved(&frozen),
+				deadline_at: Some(policy.campaign_deadline_seconds),
+				root_campaign_id: None,
+				continuation_of_campaign_id: None,
 			},
-			policy,
 			0,
 		)?;
-		let Opened::Created { campaign_id, .. } = opened else { panic!("new campaign") };
 		// Independent SQL/canonical/digest agreement is asserted inside storage
 		// by stored_policy_sql_bytes_and_digest_match_the_actual_typed_readback.
 		Ok(loupe_storage::campaigns::get(scope, campaign_id)?.unwrap().effective_policy)

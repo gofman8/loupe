@@ -16,7 +16,7 @@ fn closed_numeric_policy_matches_the_prior_payload_bytes_and_digest() {
 	};
 	for value in [crate::scheduler::CampaignPolicy::default(), max] {
 		let original = json::<Payload>(&serde_json::to_string(&value).unwrap()).unwrap();
-		let composed = CampaignPolicyInput::<Db>::Resolved(&value).canonical();
+		let composed = CampaignPolicyInput::<Db>::Resolved(&value).canonical().unwrap();
 		assert_eq!(composed, original.canonical());
 		assert_eq!(loupe_core::canonical::digest(&composed), *original.digest());
 	}

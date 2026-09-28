@@ -28,7 +28,7 @@ fn request(
 }
 
 #[tokio::test]
-async fn background_scheduler_notifies_waiters_for_replenished_campaign_work() {
+async fn background_scheduler_keeps_pending_coverage_without_spurious_notifications() {
 	let mut fixture = common::offline::OfflineDatabase::new();
 	let db = fixture.open();
 	let repo = common::register_repo(&db, &common::new_repo(), None);
@@ -79,17 +79,22 @@ async fn background_scheduler_notifies_waiters_for_replenished_campaign_work() {
 	notified.as_mut().enable();
 	let handle =
 		loupe_server::background::spawn_scheduler(db.clone(), arrived.clone(), cancelled.clone());
-	let notification = tokio::time::timeout(std::time::Duration::from_secs(2), notified).await;
+	let notification = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
 	cancelled.cancel();
 	handle.await.unwrap();
-	assert!(notification.is_ok(), "campaign replenishment must wake leasing workers");
+	assert!(notification.is_err(), "unchanged pending coverage is not a newly queued job");
 	let queued: Vec<_> =
 		common::jobs(&db, repo).into_iter().filter(|job| job.state == JobState::Queued).collect();
-	assert_eq!(queued.len(), 1, "the notification must correspond to the new coverage survey");
-	assert_eq!(queued[0].kind, JobKind::Survey);
-	assert_eq!(queued[0].campaign_id, Some(campaign));
-	assert_eq!(queued[0].generation_id, Some(generation));
-	common::assert_survey_recipe(&queued[0], "coverage");
+	assert!(queued.is_empty(), "only a winning first claim may create coverage work");
+	common::with_repo(&db, repo, |scope| {
+		assert_eq!(
+			campaigns::get(scope, campaign)?.unwrap().state,
+			campaigns::State::Active,
+			"no worker is not a completion condition"
+		);
+		Ok(())
+	})
+	.unwrap();
 }
 
 #[test]
@@ -114,7 +119,7 @@ fn open_pins_only_known_commits_and_freezes_policy() {
 			assert_eq!(row.deadline_at, Some(21700));
 			assert_eq!(
 				serde_json::from_str::<serde_json::Value>(row.effective_policy.expose()).unwrap(),
-				serde_json::to_value(policy.snapshot().unwrap()).unwrap()
+				serde_json::to_value(policy.snapshot_v2().unwrap()).unwrap()
 			);
 			assert_eq!(row.generation_id.is_some(), pinned);
 			let job = jobs::get(scope, job)?.unwrap();

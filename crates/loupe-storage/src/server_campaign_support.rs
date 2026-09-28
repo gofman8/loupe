@@ -6,10 +6,6 @@ pub(crate) mod marked {
 		) -> loupe_core::text::BoundedJson<P, loupe_provenance::Agent> {
 			crate::test_support::json(raw).unwrap()
 		}
-		pub(crate) fn empty_refs<const MAX: usize>(
-		) -> crate::source_refs::SourceRefs<MAX, loupe_provenance::Agent> {
-			crate::test_support::refs(vec![]).unwrap()
-		}
 	}
 	pub(crate) mod repo {
 		pub(crate) fn try_text<P: loupe_core::text::TextPolicy>(

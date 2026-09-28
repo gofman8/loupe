@@ -478,6 +478,8 @@ async fn legacy_empty_heartbeat_and_successful_completion_are_unchanged() {
 	let f = fixture();
 	f.offline
 		.external_corruption(|conn| {
+			// Convert the fixture into a genuinely campaign-less legacy job.
+			conn.execute("DELETE FROM job_admission_charges WHERE job_id=?1", [f.job])?;
 			conn.execute("UPDATE jobs SET campaign_id=NULL,kind='scan' WHERE id=?1", [f.job])?;
 			Ok(())
 		})

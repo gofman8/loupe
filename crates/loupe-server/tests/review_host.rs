@@ -595,6 +595,8 @@ async fn host_endpoint_denial_matrix_does_not_reveal_unrelated_jobs() {
 		] {
 			f.offline
 				.external_corruption(|conn| {
+					// Explicit legacy/foreign identity fixture, not a production transition.
+					conn.execute("DELETE FROM job_admission_charges WHERE job_id=?1", [f.job])?;
 					conn.execute(&format!("UPDATE jobs SET {change} WHERE id=?1"), [f.job])?;
 					Ok(())
 				})

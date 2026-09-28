@@ -3,14 +3,16 @@ use loupe_core::text::policy::{Reason, RevisionText};
 use loupe_core::text::BoundedText;
 pub use loupe_core::ReviewIntent as KindHint;
 use loupe_core::{FollowUpTrigger, JobKind, JobState, PendingFollowUp, WORKFLOW_CONTRACT_VERSION};
-use loupe_provenance::{Db as DbSource, Source};
+use loupe_provenance::Source;
 use rusqlite::{params, OptionalExtension};
 
-use crate::scheduler::{self, Band, CampaignPolicy, NewPhaseJob, PhaseRecipeInput, SurveyRecipe};
+use crate::admission::{self, CapacityRefusal, Selection, Spending, WorkClass};
+use crate::admission_policy::CampaignPolicyV2;
+use crate::review_intents::BlockReason;
 use crate::scope::RepoScope;
 use crate::{
-	campaigns, generations, jobs, review_units, transaction, Conflict, Db, Entity, Error,
-	Ownership, Result,
+	campaign_work, campaigns, generations, jobs, scheduler, transaction, Conflict, Db, Entity,
+	Error, Ownership, Result,
 };
 
 // debug-ok: content members delegate to redacted typed owners; other members are numeric identifiers or closed states.
@@ -47,6 +49,7 @@ pub enum Opened {
 	Created { campaign_id: i64, job_id: i64 },
 	Coalesced { campaign_id: i64 },
 	Pending { campaign_id: i64 },
+	Deferred { campaign_id: i64 },
 }
 
 fn get(scope: &RepoScope<'_>, id: i64) -> Result<campaigns::Campaign> {
@@ -54,7 +57,7 @@ fn get(scope: &RepoScope<'_>, id: i64) -> Result<campaigns::Campaign> {
 }
 
 pub fn open<S: Source>(
-	scope: &RepoScope<'_>, new: &OpenCampaign<'_, S>, policy: &CampaignPolicy, now: i64,
+	scope: &RepoScope<'_>, new: &OpenCampaign<'_, S>, policy: &CampaignPolicyV2, now: i64,
 ) -> Result<Opened> {
 	scope.require_operator()?;
 	policy.validate()?;
@@ -90,12 +93,23 @@ pub fn open<S: Source>(
 		generations::coalesce_follow_up(scope, generation_id, &pending)?;
 		return Ok(Opened::Coalesced { campaign_id });
 	}
-	let has_baseline: bool = tx.query_row(
-		"SELECT EXISTS(SELECT 1 FROM review_generations WHERE repo_id=?1 AND state='active')",
-		[scope.repo_id],
-		|r| r.get(0),
-	)?;
-	let initial = if !has_baseline {
+	let baseline: Option<loupe_core::text::BoundedText<RevisionText,loupe_provenance::Db>> = tx.query_row(
+		"SELECT generation_commit_sha FROM review_generations WHERE repo_id=?1 AND state='active'",
+		[scope.repo_id], |r| crate::ingress::revision(r,0),
+	).optional()?;
+	let known_successor = if let RequestedRef::Pinned(sha) = new.requested_ref {
+		if !is_commit_sha(sha.expose()) {
+			return Err(loupe_core::text::Error::new(
+				"commit_sha",
+				loupe_core::text::Rule::Identifier,
+			)
+			.into());
+		}
+		baseline.as_ref().is_some_and(|old| old.expose() != sha.expose())
+	} else {
+		false
+	};
+	let initial = if baseline.is_none() {
 		campaigns::Recipe::Bootstrap
 	} else if new.kind_hint == KindHint::FullReview {
 		campaigns::Recipe::Reconciliation
@@ -114,37 +128,25 @@ pub fn open<S: Source>(
 			requested_base_sha: new.base_sha,
 			target_commit_sha: new.requested_ref.value(),
 			generation_id: None,
-			effective_policy: campaigns::CampaignPolicyInput::<S>::Resolved(snapshot),
+			effective_policy: campaigns::CampaignPolicyInput::<S>::ResolvedV2(snapshot),
 			deadline_at: Some(deadline),
 			root_campaign_id: None,
 			continuation_of_campaign_id: None,
 		},
 		now,
 	)?;
-	let recipe = match initial {
-		campaigns::Recipe::Bootstrap => SurveyRecipe::Bootstrap,
-		campaigns::Recipe::Incremental => SurveyRecipe::Incremental,
-		campaigns::Recipe::Reconciliation => SurveyRecipe::Reconciliation,
-		campaigns::Recipe::Corroboration => unreachable!("initial recipe is a survey"),
-	};
-	let job_id = scheduler::enqueue_phase(
-		scope,
-		&NewPhaseJob {
-			kind: JobKind::<S>::Survey,
+	if initial == campaigns::Recipe::Reconciliation || known_successor {
+		let summary = campaigns::summarize(scope, campaign_id)?;
+		campaigns::finish_scheduled(
+			scope,
 			campaign_id,
-			generation_id: None,
-			assigned_lead_id: None,
-			target_finding_id: None,
-			continuation_of_job_id: None,
-			band: Band::Normal,
-			effective_priority: 0,
-			eligible_at: now,
-			token_budget: policy.survey_token_budget,
-			recipe: PhaseRecipeInput::Survey(recipe),
-			handoff: false,
-		},
-		now,
-	)?;
+			&summary,
+			campaigns::FinishedReason::Unsupported,
+			now,
+		)?;
+		return Ok(Opened::Deferred { campaign_id });
+	}
+	let job_id = crate::admission_preparation::create_preparation(scope, campaign_id, now)?;
 	if let RequestedRef::Pinned(sha) = new.requested_ref {
 		pin(scope, campaign_id, job_id, sha, now)?;
 	}
@@ -235,6 +237,9 @@ pub fn pin<S: Source>(
 		"UPDATE jobs SET generation_id=?2 WHERE id=?1 AND repo_id=?3",
 		params![job_id, generation_id, scope.repo_id],
 	)?;
+	if job.state == JobState::Queued && active.is_some_and(|g| g.generation_id == generation_id) {
+		crate::review_intents::job_context(tx, scope.repo_id, job_id)?;
+	}
 	Ok(generation_id)
 }
 
@@ -259,77 +264,41 @@ pub fn activate_generation(scope: &RepoScope<'_>, campaign_id: i64, now: i64) ->
 	generations::activate(scope, id, now)
 }
 
-enum Replenished {
-	Queued(i64),
-	NotNeeded,
-	BudgetExhausted,
-}
-
-pub fn replenish(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Option<i64>> {
+/// Compatibility hook. Ordinary work is materialized only by its winning claim.
+pub fn replenish(scope: &RepoScope<'_>, campaign_id: i64, _now: i64) -> Result<Option<i64>> {
 	scope.require_operator()?;
-	Ok(match replenish_inner(scope, campaign_id, now)? {
-		Replenished::Queued(id) => Some(id),
-		Replenished::NotNeeded | Replenished::BudgetExhausted => None,
-	})
-}
-
-fn replenish_inner(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Replenished> {
-	let tx = scope.conn;
-	let campaign = get(scope, campaign_id)?;
-	if campaign.state != campaigns::State::Active
-		|| campaign.deadline_at.is_some_and(|at| at <= now)
-	{
-		return Ok(Replenished::NotNeeded);
+	let exists: bool = scope.conn.query_row(
+		"SELECT EXISTS(SELECT 1 FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2)",
+		params![campaign_id, scope.repo_id],
+		|r| r.get(0),
+	)?;
+	if !exists {
+		return Err(Error::NotFound(Entity::Campaign, campaign_id));
 	}
-	let Some(generation_id) = campaign.generation_id else {
-		return Ok(Replenished::NotNeeded);
-	};
-	let generation = generations::get(scope, generation_id)?
-		.ok_or(Error::NotFound(Entity::Generation, generation_id))?;
-	if generation.state != generations::State::Active {
-		return Ok(Replenished::NotNeeded);
-	}
-	let queued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE campaign_id=?1 AND repo_id=?2 AND kind='survey' AND state='queued')",params![campaign_id,scope.repo_id],|r|r.get(0))?;
-	if queued {
-		return Ok(Replenished::NotNeeded);
-	}
-	let band:Option<String>=tx.query_row(&format!("SELECT u.priority_band FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.generation_id=?1 AND g.repo_id=?2 AND {} ORDER BY CASE u.priority_band WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END LIMIT 1",*review_units::UNIT_NEEDS_WORK),params![generation_id,scope.repo_id],|r|r.get(0)).optional()?;
-	let Some(band) = band else {
-		return Ok(Replenished::NotNeeded);
-	};
-	let band: Band = band.parse()?;
-	let parent:Option<i64>=tx.query_row("SELECT id FROM jobs WHERE campaign_id=?1 AND repo_id=?2 AND kind='survey' AND state IN ('succeeded','failed','cancelled') ORDER BY finished_at DESC,id DESC LIMIT 1",params![campaign_id,scope.repo_id],|r|r.get(0)).optional()?;
-	let policy = CampaignPolicy::from_snapshot(&campaign.effective_policy)?;
-	match scheduler::enqueue_phase(
-		scope,
-		&NewPhaseJob {
-			kind: JobKind::<DbSource>::Survey,
-			campaign_id,
-			generation_id: Some(generation_id),
-			assigned_lead_id: None,
-			target_finding_id: None,
-			continuation_of_job_id: parent,
-			band,
-			effective_priority: 0,
-			eligible_at: now,
-			token_budget: policy.survey_token_budget,
-			recipe: PhaseRecipeInput::Survey(SurveyRecipe::Coverage),
-			handoff: false,
-		},
-		now,
-	) {
-		Ok(id) => Ok(Replenished::Queued(id)),
-		Err(Error::Conflict(Conflict::CampaignBudget)) => Ok(Replenished::BudgetExhausted),
-		Err(error) => Err(error),
-	}
+	Ok(None)
 }
 
 pub fn cancel<S: Source>(
 	scope: &RepoScope<'_>, campaign_id: i64, reason: &BoundedText<Reason, S>, now: i64,
 ) -> Result<()> {
 	scope.require_operator()?;
-	get(scope, campaign_id)?;
+	// Metadata existence only: cancellation must preserve even malformed evidence.
+	let exists: bool = scope.conn.query_row(
+		"SELECT EXISTS(SELECT 1 FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2)",
+		params![campaign_id, scope.repo_id],
+		|r| r.get(0),
+	)?;
+	if !exists {
+		return Err(Error::NotFound(Entity::Campaign, campaign_id));
+	}
 	scheduler::cancel_queued_children(scope, campaign_id, now, reason)?;
+	campaign_work::block_all(
+		scope.conn,
+		scope.repo_id,
+		campaign_id,
+		BlockReason::CampaignCancelled,
+		now,
+	)?;
 	campaigns::cancel(scope, campaign_id, reason, now)
 }
 
@@ -353,7 +322,6 @@ pub struct TickReport {
 
 #[derive(Default)]
 struct Progress {
-	enqueued: bool,
 	finish: Option<Finish>,
 	budget_exhausted: bool,
 }
@@ -363,41 +331,100 @@ pub fn try_finish(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<O
 	Ok(advance(scope, campaign_id, now)?.finish)
 }
 
+fn frozen_budget(scope: &RepoScope<'_>, campaign: i64) -> Result<(CampaignPolicyV2, Spending)> {
+	let policy = admission::load_policy(scope, campaign)?;
+	let spent = admission::get_spending(scope, campaign)?
+		.ok_or(Error::Conflict(Conflict::CampaignPolicy))?;
+	admission::choose_pool(&policy, spent, WorkClass::Survey)?;
+	Ok((policy, spent))
+}
 fn advance(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Progress> {
 	let tx = scope.conn;
-	let campaign = get(scope, campaign_id)?;
+	let repo = scope.repo_id;
+	let (state,recipe,deadline): (campaigns::State,campaigns::Recipe,Option<i64>) = tx.query_row(
+		"SELECT state,recipe,deadline_at FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2",
+		params![campaign_id,repo], |r| Ok((crate::review::parsed(r,0)?,crate::review::parsed(r,1)?,r.get(2)?)),
+	).optional()?.ok_or(Error::NotFound(Entity::Campaign,campaign_id))?;
 	let mut progress = Progress::default();
-	if campaign.state != campaigns::State::Active {
+	if state != campaigns::State::Active {
 		return Ok(progress);
 	}
-	let expired = campaign.deadline_at.is_some_and(|at| at <= now);
-	if expired {
-		scheduler::cancel_queued_at_deadline(scope, campaign_id, now)?;
+	let expired = deadline.is_some_and(|at| at <= now);
+	let mut reason = if expired {
+		Some(BlockReason::CampaignDeadline)
+	} else if !matches!(recipe, campaigns::Recipe::Bootstrap | campaigns::Recipe::Incremental) {
+		Some(BlockReason::UnsupportedRecipe)
+	} else {
+		None
+	};
+	let mut budget = None;
+	if reason.is_none() {
+		match frozen_budget(scope, campaign_id) {
+			Ok(value) => budget = Some(value),
+			Err(
+				Error::Conflict(Conflict::CampaignPolicy)
+				| Error::Sqlite(
+					rusqlite::Error::InvalidColumnType(..)
+					| rusqlite::Error::FromSqlConversionFailure(..),
+				),
+			) => reason = Some(BlockReason::CompatibilityPolicy),
+			Err(error) => return Err(error),
+		}
 	}
-	let busy: bool = tx.query_row(
-		"SELECT EXISTS(SELECT 1 FROM jobs WHERE campaign_id=?1 AND repo_id=?2 AND state IN ('queued','leased'))",
-		params![campaign_id,scope.repo_id],
-		|r| r.get(0),
-	)?;
+	if let Some(reason) = reason {
+		scheduler::cancel_queued_for_reason(scope, campaign_id, now, reason)?;
+		campaign_work::block_all(tx, repo, campaign_id, reason, now)?;
+	}
+	let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE campaign_id=?1 AND repo_id=?2 AND state IN('queued','leased'))",params![campaign_id,repo],|r|r.get(0))?;
 	if busy {
 		return Ok(progress);
 	}
-	if !expired {
-		match replenish_inner(scope, campaign_id, now)? {
-			Replenished::Queued(_) => {
-				progress.enqueued = true;
-				return Ok(progress);
-			},
-			Replenished::BudgetExhausted => progress.budget_exhausted = true,
-			Replenished::NotNeeded => {},
+	let mut terminal_reason = reason;
+	if let Some((policy, spent)) = budget {
+		let mut fundable = false;
+		for group in campaign_work::pending(tx, repo, campaign_id, deadline)? {
+			let reason = if !group.before_deadline {
+				Some(BlockReason::CampaignDeadline)
+			} else {
+				match admission::choose_pool(&policy, spent, group.work_class())? {
+					Selection::Pool(_) => {
+						fundable = true;
+						None
+					},
+					Selection::Refused(CapacityRefusal::CampaignBudget) => {
+						progress.budget_exhausted = true;
+						Some(BlockReason::CampaignBudget)
+					},
+					Selection::Refused(CapacityRefusal::ProtectedCapacity) => {
+						Some(BlockReason::ProtectedCapacity)
+					},
+				}
+			};
+			if let Some(reason) = reason {
+				campaign_work::block_pending(tx, repo, campaign_id, group, deadline, reason, now)?;
+				terminal_reason.get_or_insert(reason);
+			}
+		}
+		if fundable {
+			return Ok(progress);
 		}
 	}
+	campaign_work::block_unexplained(tx, repo, campaign_id, now)?;
+	let summary = campaigns::summarize(scope, campaign_id)?;
 	let (finish, reason) = if expired {
 		(Finish::DeadlineReached, campaigns::FinishedReason::Deadline)
 	} else {
-		(Finish::Completed, campaigns::FinishedReason::Completed)
+		let reason = match terminal_reason {
+			Some(reason) => campaigns::FinishedReason::Blocked(reason),
+			None if summary.coverage == generations::Coverage::Complete
+				&& !campaign_work::has_unfinished(tx, repo, campaign_id)? =>
+			{
+				campaigns::FinishedReason::Completed
+			},
+			None => campaigns::FinishedReason::Partial,
+		};
+		(Finish::Completed, reason)
 	};
-	let summary = campaigns::summarize(scope, campaign_id)?;
 	campaigns::finish_scheduled(scope, campaign_id, &summary, reason, now)?;
 	progress.finish = Some(finish);
 	Ok(progress)
@@ -435,7 +462,6 @@ pub fn tick(db: &Db, now: i64) -> Result<TickReport> {
 				continue;
 			},
 		};
-		report.enqueued += usize::from(progress.enqueued);
 		match progress.finish {
 			Some(Finish::Completed) => report.completed += 1,
 			Some(Finish::DeadlineReached) => report.deadline_reached += 1,
@@ -457,7 +483,7 @@ mod tests {
 	fn scope_safety_invalid_policy_cannot_hide_behind_an_active_campaign() {
 		let db = crate::review_tests::fixture();
 		let reference = crate::test_support::text("main").unwrap();
-		let invalid = CampaignPolicy { survey_units_per_job: 33, ..CampaignPolicy::default() };
+		let invalid = CampaignPolicyV2 { survey_units_per_job: 33, ..CampaignPolicyV2::default() };
 		let result = crate::scope::with_operator_repository(
 			&db,
 			&crate::test_support::operator_ingress(),
@@ -495,14 +521,14 @@ mod tests {
 	#[test]
 	fn stored_policy_sql_bytes_and_digest_match_the_actual_typed_readback() {
 		for policy in [
-			CampaignPolicy::default(),
-			CampaignPolicy {
+			CampaignPolicyV2::default(),
+			CampaignPolicyV2 {
 				campaign_max_jobs: 19,
-				campaign_handoff_reserve: 3,
+				campaign_urgent_reserve: 3,
 				survey_units_per_job: 7,
 				max_attempts: 5,
 				survey_token_budget: Some(1000),
-				..CampaignPolicy::default()
+				..CampaignPolicyV2::default()
 			},
 		] {
 			let db = crate::review_tests::fixture();

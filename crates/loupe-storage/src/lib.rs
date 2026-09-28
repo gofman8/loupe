@@ -28,6 +28,8 @@ pub mod admission_candidates;
 #[cfg(test)]
 mod admission_claim;
 pub mod admission_policy;
+mod admission_preparation;
+mod campaign_work;
 pub mod campaign_workflow;
 pub mod campaigns;
 pub mod checkpoints;

@@ -266,16 +266,18 @@ pub(crate) fn cancel_queued_children<S: Source>(
 	scope.require_operator()?;
 	crate::phase_lifecycle::cancel_queued(scope.conn, scope.repo_id, campaign_id, now, reason)
 }
-pub(crate) fn cancel_queued_at_deadline(
+pub(crate) fn cancel_queued_for_reason(
 	scope: &crate::scope::RepoScope<'_>, campaign_id: i64, now: i64,
+	reason: crate::review_intents::BlockReason,
 ) -> Result<usize> {
+	scope.require_operator()?;
 	crate::phase_lifecycle::cancel_queued_reason(
 		scope.conn,
 		scope.repo_id,
 		campaign_id,
 		now,
-		"campaign deadline",
-		crate::review_intents::BlockReason::CampaignDeadline,
+		reason.as_str(),
+		reason,
 	)
 }
 #[cfg(test)]

@@ -129,7 +129,12 @@ fn campaign_summary_filters_repository_before_decoding_foreign_content() {
 				"repository scope must exclude foreign malformed content before decoding"
 			);
 			let owned = crate::campaigns::summarize(&crate::test_support::scope(conn, 2), 2);
-			assert!(owned.is_err(), "owning repository must still reject corrupt stored content");
+			assert!(
+				owned.is_ok(),
+				"metadata-only summary must not decode unrelated corrupt campaign content"
+			);
+			let owned = crate::campaigns::get(&crate::test_support::scope(conn, 2), 2);
+			assert!(owned.is_err(), "the content reader must still reject corrupt stored content");
 			assert!(
 				!matches!(owned, Err(Error::NotFound(..))),
 				"the owning row exists and must reach admission"

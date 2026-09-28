@@ -62,7 +62,6 @@ async fn phase_advertisements_do_not_open_public_runtime_gates() {
 	use loupe_proto::review_lease::{LeaseList, ReviewCapability};
 	use loupe_server::review::campaign;
 	use loupe_server::review::policy::ReviewPolicy;
-	use loupe_storage::scheduler::{self, Band, NewPhaseJob, PhaseRecipeInput};
 	let f = bring_up_with_repo_and_worker().await;
 	let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 		as i64;
@@ -94,34 +93,19 @@ async fn phase_advertisements_do_not_open_public_runtime_gates() {
 		conn.execute("INSERT INTO findings(repo_id,job_id,scanner_id,severity,title,description,fingerprint,state,created_at,report_identity) VALUES(?1,?2,'review','high','t','d','phase-gate','validating',?3,randomblob(16))",(f.repo_id,job_id,now))?;
 		Ok((lead_id, conn.last_insert_rowid()))
 	}).unwrap();
-	let ids = common::with_repo(&f.db, f.repo_id, |scope| {
+	let ids = f.database.external_corruption(|conn| {
 		let mut ids = vec![job_id];
-		for kind in [JobKind::Drilldown, JobKind::Verify] {
+		for kind in [JobKind::<loupe_provenance::Db>::Drilldown, JobKind::Verify] {
 			let recipe = common::marked::operator::json::<Payload>(
 				&serde_json::json!({"version":1,"phase":kind.as_str()}).to_string(),
 			);
-			ids.push(scheduler::enqueue_phase(
-				scope,
-				&NewPhaseJob {
-					kind: kind.clone(),
-					campaign_id,
-					generation_id: Some(generation_id),
-					assigned_lead_id: (kind == JobKind::Drilldown).then_some(lead_id),
-					target_finding_id: (kind == JobKind::Verify).then_some(finding_id),
-					continuation_of_job_id: None,
-					band: Band::Urgent,
-					effective_priority: 100,
-					eligible_at: now,
-					token_budget: None,
-					recipe: PhaseRecipeInput::Submitted(&recipe),
-					handoff: true,
-				},
-				now,
-			)?);
+			// Explicit adversarial queued rows test the closed public gate,
+			// not the production V2 first-claim materialization path.
+			conn.execute("INSERT INTO jobs(repo_id,kind,state,campaign_id,generation_id,assigned_lead_id,target_finding_id,scheduling_band,effective_priority,eligible_at,recipe,workflow_contract_version,enqueued_at) VALUES(?1,?2,'queued',?3,?4,?5,?6,'urgent',100,?7,?8,?9,?7)",rusqlite::params![f.repo_id,kind.as_str(),campaign_id,generation_id,(kind==JobKind::Drilldown).then_some(lead_id),(kind==JobKind::Verify).then_some(finding_id),now,recipe.expose(),loupe_core::WORKFLOW_CONTRACT_VERSION])?;
+			ids.push(conn.last_insert_rowid());
 		}
 		Ok(ids)
-	})
-	.unwrap();
+	}).unwrap();
 	for review_capabilities in [
 		LeaseList::default(),
 		LeaseList::new(vec![
