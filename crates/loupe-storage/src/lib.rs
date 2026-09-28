@@ -65,6 +65,11 @@ pub(crate) mod transaction;
 pub mod workers;
 
 #[cfg(test)]
+mod checkpoint_evidence_feature_tests;
+#[cfg(test)]
+mod checkpoint_evidence_tests;
+
+#[cfg(test)]
 extern crate self as loupe_storage;
 
 #[cfg(test)]

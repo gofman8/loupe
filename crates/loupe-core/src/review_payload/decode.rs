@@ -42,6 +42,13 @@ scalar!(
 	PreProofRung,
 	PreProofApplicability,
 	crate::Severity,
+	super::LeadEvidenceFormat,
+	super::UnitResultFormat,
+	super::UnitResultDisposition,
+	crate::review_priority::Impact,
+	crate::review_priority::Access,
+	crate::review_priority::Reachability,
+	i64,
 	u32
 );
 
@@ -106,34 +113,39 @@ impl<S: Source, T: Field<S>> Field<S> for Box<T> {
 }
 impl<S: Source, T: Field<S>> Field<S> for Vec<T> {
 	fn decode(mark: &Mark<'_, S>, raw: Option<&RawValue>) -> Result<Self, Error> {
-		// Every list in these evidence schemas has the same 16-entry ceiling.
-		// Borrow at most 16 tokens, refusing the excess before output allocation.
-		struct Tokens<'a>(Vec<&'a RawValue>);
-		impl<'de> Deserialize<'de> for Tokens<'de> {
-			fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-				struct Visitor;
-				impl<'de> serde::de::Visitor<'de> for Visitor {
-					type Value = Tokens<'de>;
-					fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-						f.write_str("at most 16 evidence entries")
-					}
-					fn visit_seq<A: serde::de::SeqAccess<'de>>(
-						self, mut seq: A,
-					) -> Result<Self::Value, A::Error> {
-						let mut tokens = Vec::new();
-						while let Some(raw) = seq.next_element()? {
-							if tokens.len() == 16 {
-								return Err(serde::de::Error::custom("too many evidence entries"));
-							}
-							tokens.push(raw);
-						}
-						Ok(Tokens(tokens))
-					}
-				}
-				d.deserialize_seq(Visitor)
-			}
-		}
-		let tokens: Tokens<'_> = serde_json::from_str(required(raw)?.get())?;
-		tokens.0.into_iter().map(|raw| T::decode(mark, Some(raw))).collect()
+		list::<S, T, 16>(mark, raw)
 	}
+}
+
+/// Each schema selects its own closed list budget before owned admission.
+pub(super) fn list<S: Source, T: Field<S>, const MAX: usize>(
+	mark: &Mark<'_, S>, raw: Option<&RawValue>,
+) -> Result<Vec<T>, Error> {
+	struct Tokens<'a, const MAX: usize>(Vec<&'a RawValue>);
+	impl<'de, const MAX: usize> Deserialize<'de> for Tokens<'de, MAX> {
+		fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+			struct Visitor<const MAX: usize>;
+			impl<'de, const MAX: usize> serde::de::Visitor<'de> for Visitor<MAX> {
+				type Value = Tokens<'de, MAX>;
+				fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+					f.write_str("a bounded evidence list")
+				}
+				fn visit_seq<A: serde::de::SeqAccess<'de>>(
+					self, mut seq: A,
+				) -> Result<Self::Value, A::Error> {
+					let mut tokens = Vec::new();
+					while let Some(raw) = seq.next_element()? {
+						if tokens.len() == MAX {
+							return Err(serde::de::Error::custom("too many evidence entries"));
+						}
+						tokens.push(raw);
+					}
+					Ok(Tokens(tokens))
+				}
+			}
+			d.deserialize_seq(Visitor::<MAX>)
+		}
+	}
+	let tokens: Tokens<'_, MAX> = serde_json::from_str(required(raw)?.get())?;
+	tokens.0.into_iter().map(|raw| T::decode(mark, Some(raw))).collect()
 }

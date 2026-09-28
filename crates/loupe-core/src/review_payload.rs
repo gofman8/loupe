@@ -11,6 +11,16 @@
 //! use loupe_provenance::Agent;
 //! let _: FindingEvidenceV1<Agent> = serde_json::from_str("{}").unwrap();
 //! ```
+//! ```compile_fail,E0277
+//! use loupe_core::review_payload::LeadEvidenceV1;
+//! use loupe_provenance::Agent;
+//! let _: LeadEvidenceV1<Agent> = serde_json::from_str("{}").unwrap();
+//! ```
+//! ```compile_fail,E0277
+//! use loupe_core::review_payload::UnitResultPayloadV1;
+//! use loupe_provenance::Agent;
+//! let _: UnitResultPayloadV1<Agent> = serde_json::from_str("{}").unwrap();
+//! ```
 
 use loupe_provenance::{Mark, Source, Unvalidated, Validate};
 use serde::{Deserialize, Serialize};
@@ -593,3 +603,6 @@ payload_decoder!(PromotionV1Decoder, PromotionV1);
 payload_decoder!(SurveyTerminalV1Decoder, SurveyTerminalV1);
 payload_decoder!(DrilldownTerminalV1Decoder, DrilldownTerminalV1);
 payload_decoder!(VerificationTerminalV1Decoder, VerificationTerminalV1);
+
+mod checkpoint;
+pub use checkpoint::*;

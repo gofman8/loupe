@@ -14,6 +14,7 @@ use rusqlite::Row;
 pub(crate) mod admission_policy;
 mod app;
 pub(crate) mod candidates;
+pub(crate) mod checkpoint;
 pub(crate) mod host_preparation;
 pub(crate) mod profile;
 mod refs;

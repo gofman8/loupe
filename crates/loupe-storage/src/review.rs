@@ -47,6 +47,7 @@ pub enum Conflict {
 	Corroboration,
 	LeadState,
 	Checkpoint,
+	CheckpointEvidence,
 	CheckpointLimit,
 	Candidate,
 	TerminalReceipt,
@@ -166,3 +167,46 @@ macro_rules! string_enum {
 	};
 }
 pub(crate) use string_enum;
+
+/// Reserve namespaced formats for strict typed checkpoint readers.
+pub(crate) fn is_checkpoint_evidence(raw: &str) -> crate::Result<bool> {
+	use loupe_core::text::policy::Payload;
+	use loupe_core::text::{JsonPolicy, Rule};
+	// Modern checkpoints and historical payloads share the same raw-byte
+	// budget. Routing must enforce it before allocating either JSON view.
+	if raw.len() > Payload::MAX_BYTES {
+		return Err(loupe_core::text::Error::new(Payload::FIELD, Rule::Bytes).into());
+	}
+	#[cfg(test)]
+	crate::checkpoint_evidence_tests::observe_format_parse(raw.len());
+	let value: serde_json::Value =
+		serde_json::from_str(raw).map_err(loupe_core::review_payload::Error::from)?;
+	if !value.is_object() {
+		return Ok(false);
+	}
+	#[derive(serde::Deserialize)]
+	struct Marker {
+		format: Option<serde_json::Value>,
+	}
+	let marker: Marker =
+		serde_json::from_str(raw).map_err(loupe_core::review_payload::Error::from)?;
+	Ok(marker
+		.format
+		.as_ref()
+		.and_then(serde_json::Value::as_str)
+		.is_some_and(|format| format.starts_with("loupe.")))
+}
+pub(crate) fn require_historical_payload(raw: &str) -> crate::Result<()> {
+	if is_checkpoint_evidence(raw)? {
+		return Err(crate::Error::Conflict(Conflict::CheckpointEvidence));
+	}
+	Ok(())
+}
+/// Projection of already labelled references; this creates no new source owner.
+pub(crate) fn checkpoint_refs<S: loupe_provenance::Source>(
+	refs: &[loupe_core::text::SourceRef<S>],
+) -> crate::Result<String> {
+	let value = serde_json::to_value(refs).map_err(loupe_core::review_payload::Error::from)?;
+	String::from_utf8(crate::canonical::canonical_bytes(&value))
+		.map_err(|_| crate::Error::Conflict(Conflict::CheckpointEvidence))
+}

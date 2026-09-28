@@ -338,6 +338,8 @@ fn lead(u: &View<'_, '_>, raw: &RawValue) -> Result<AssignedReviewLead<Agent, Se
 		identity_instance_key: Option<&'a RawValue>,
 		#[serde(borrow)]
 		hypothesis: &'a RawValue,
+		#[serde(borrow, default)]
+		invariant_or_boundary: Option<&'a RawValue>,
 		#[serde(borrow)]
 		source_refs: &'a RawValue,
 		#[serde(borrow)]
@@ -355,6 +357,7 @@ fn lead(u: &View<'_, '_>, raw: &RawValue) -> Result<AssignedReviewLead<Agent, Se
 		identity_anchor: content(u, wire.identity_anchor)?,
 		identity_instance_key: optional_content(u, wire.identity_instance_key)?,
 		hypothesis: content(u, wire.hypothesis)?,
+		invariant_or_boundary: optional_content(u, wire.invariant_or_boundary)?,
 		source_refs: content_list(u, wire.source_refs)?,
 		next_proof_step: content(u, wire.next_proof_step)?,
 		counterevidence: content(u, wire.counterevidence)?,

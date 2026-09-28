@@ -261,6 +261,8 @@ pub struct AssignedReviewLead<ContentS: Source, MetaS: Source> {
 	pub identity_anchor: Anchor<AnchorText, ContentS>,
 	pub identity_instance_key: Option<Anchor<InstanceKey, ContentS>>,
 	pub hypothesis: BoundedText<Argument, ContentS>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub invariant_or_boundary: Option<BoundedText<Reason, ContentS>>,
 	pub source_refs: LeaseList<SourceRef<ContentS>, 16, 1>,
 	pub next_proof_step: BoundedText<Reason, ContentS>,
 	pub counterevidence: BoundedText<Objective, ContentS>,
@@ -306,7 +308,7 @@ record_impls!(ReviewGeneration<MetaS> { generation_id, commit_sha });
 record_impls!(FrozenReviewProfile<ContentS, MetaS> { profile_version, profile_digest, profile });
 record_impls!(AssignedReviewUnit<ContentS> { review_unit_id, assignment_epoch, title, objective, source_refs, depends_on, closure_criteria });
 record_impls!(ReviewSurveyLease<ContentS, MetaS> { provenance, context });
-record_impls!(AssignedReviewLead<ContentS, MetaS> { lead_id, producer_commit_sha, identity_family, identity_anchor, identity_instance_key, source_refs, hypothesis, next_proof_step, counterevidence, proof_gaps });
+record_impls!(AssignedReviewLead<ContentS, MetaS> { lead_id, producer_commit_sha, identity_family, identity_anchor, identity_instance_key, source_refs, hypothesis, invariant_or_boundary, next_proof_step, counterevidence, proof_gaps });
 record_impls!(ReviewDrilldownLease<ContentS, MetaS> { provenance, generation, profile, lead });
 record_impls!(AssignedReviewFinding<ContentS, MetaS> { finding_id, reviewed_commit_sha, severity, title, description, identity_family, identity_anchor, identity_instance_key, evidence });
 record_impls!(ReviewVerifyLease<ContentS, MetaS> { provenance, generation, profile, finding });
@@ -487,7 +489,7 @@ mod tests {
 			"generation":generation(),"profile":profile(),"lead":{
 				"lead_id":4,"producer_commit_sha":"a".repeat(40),"identity_family":"memory-safety",
 				"identity_anchor":"request allocation","identity_instance_key":"allocator",
-				"hypothesis":"Unbounded input","source_refs":[{"path":"src/e\u{301}.rs","symbol":"allocate"}],
+				"hypothesis":"Unbounded input","invariant_or_boundary":"Only authorized callers","source_refs":[{"path":"src/e\u{301}.rs","symbol":"allocate"}],
 				"next_proof_step":"Trace length","counterevidence":"Authentication","proof_gaps":"Caller scope"}});
 		let payload = decode_value(raw.clone()).unwrap();
 		assert_eq!(serde_json::to_value(&payload).unwrap(), raw);
@@ -496,6 +498,17 @@ mod tests {
 		};
 		let _: &ReviewCommit<Server> = &lease.lead.producer_commit_sha;
 		let _: &BoundedText<Argument, Agent> = &lease.lead.hypothesis;
+		let _: &Option<BoundedText<Reason, Agent>> = &lease.lead.invariant_or_boundary;
+		assert_eq!(
+			lease.lead.invariant_or_boundary.as_ref().unwrap().expose(),
+			"Only authorized callers"
+		);
+		let mut without_boundary = raw.clone();
+		without_boundary["lead"].as_object_mut().unwrap().remove("invariant_or_boundary");
+		assert_eq!(
+			serde_json::to_value(decode_value(without_boundary.clone()).unwrap()).unwrap(),
+			without_boundary
+		);
 		assert_eq!(lease.lead.source_refs.as_slice()[0].path.expose(), "src/e\u{301}.rs");
 		let mut invalid = raw.clone();
 		invalid["lead"]["unexpected"] = json!(true);
