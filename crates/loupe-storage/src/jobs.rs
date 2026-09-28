@@ -122,11 +122,15 @@ pub struct QueuedJob<S: Source> {
 }
 
 pub fn get(scope: &crate::scope::RepoScope<'_>, id: i64) -> crate::Result<Option<JobRow>> {
-	Ok(scope
-		.conn
+	get_scoped_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_scoped_raw(
+	conn: &Connection, repo: i64, id: i64,
+) -> crate::Result<Option<JobRow>> {
+	Ok(conn
 		.query_row(
 			&format!("SELECT {JOB_COLUMNS} FROM jobs WHERE id=?1 AND repo_id=?2"),
-			params![id, scope.repo_id],
+			params![id, repo],
 			row_to_job,
 		)
 		.optional()?)

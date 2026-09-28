@@ -245,11 +245,13 @@ pub(crate) fn get_raw(conn: &Connection, id: i64) -> Result<Option<Campaign>> {
 }
 
 pub fn get(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Option<Campaign>> {
-	Ok(scope
-		.conn
+	get_scoped_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_scoped_raw(conn: &Connection, repo: i64, id: i64) -> Result<Option<Campaign>> {
+	Ok(conn
 		.query_row(
 			&format!("SELECT {COLUMNS} FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2"),
-			params![id, scope.repo_id],
+			params![id, repo],
 			row,
 		)
 		.optional()?)
