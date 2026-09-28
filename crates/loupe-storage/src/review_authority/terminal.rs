@@ -7,7 +7,10 @@ use loupe_provenance::Db;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::{PhaseScope, PhaseTransaction};
+use super::{
+	DrilldownDisposition, DrilldownFinalization, DrilldownSummary, PhaseScope, PhaseTransaction,
+};
+use crate::terminal_receipt::EvidenceRung;
 use crate::{terminal_payloads, Conflict, Error, Result};
 
 // debug-ok: closed coverage state only.
@@ -168,31 +171,90 @@ pub(super) fn seal(
 		SurveyTerminalReason::Partial => "partial",
 		SurveyTerminalReason::Deferred => "deferred",
 	};
+	write_receipt(scope, audit, payload, summary, None, None, reason)?;
+	snapshot(scope.transaction)
+}
+
+pub(super) fn seal_drilldown(
+	scope: &PhaseScope<'_, '_>, audit: &Audit, payload: &terminal_payloads::TerminalPayload,
+	summary: &DrilldownSummary, subject_digest: &[u8; 32],
+) -> Result<DrilldownFinalization> {
+	if !matches!(payload, terminal_payloads::TerminalPayload::Drilldown(_)) {
+		return Err(incompatible());
+	}
+	write_receipt(
+		scope,
+		audit,
+		payload,
+		summary,
+		Some(subject_digest),
+		summary.promoted_finding_id.map(|_| EvidenceRung::L2),
+		summary.disposition.as_str(),
+	)?;
+	drilldown_snapshot(scope.transaction)
+}
+
+/// Shared private SQL writer. Public callers cannot supply arbitrary audit JSON,
+/// phase, content provenance, or finishing identity.
+fn write_receipt(
+	scope: &PhaseScope<'_, '_>, audit: &Audit, payload: &terminal_payloads::TerminalPayload,
+	summary: &impl Serialize, subject_digest: Option<&[u8; 32]>, rung: Option<EvidenceRung>,
+	reason: &'static str,
+) -> Result<()> {
 	let hash = scope.transaction.capability_hash.ok_or(Error::ScopeDenied)?;
 	let counts = loupe_core::canonical::canonical_bytes(
 		&serde_json::to_value(summary).map_err(|_| incompatible())?,
 	);
 	let counts = std::str::from_utf8(&counts).map_err(|_| incompatible())?;
 	scope.transaction.conn.execute(
-        "INSERT INTO job_terminal_receipts(job_id,phase,terminal_reason,pinned_commit_sha,effective_recipe,result_digest,result_counts,finishing_capability_hash,created_at)
-         VALUES(?1,'survey',?2,?3,?4,?5,?6,?7,?8)",
-        params![scope.job.id,reason,audit.commit.expose(),audit.recipe,payload.digest()?.as_slice(),counts,hash.as_slice(),scope.transaction.now]
-    ).map_err(|error| {
-        if crate::review::is_unique(&error, "job_terminal_receipts.job_id")
-            || crate::review::is_unique(&error, "job_terminal_receipts.job_id, job_terminal_receipts.phase")
-        {
-            Error::Conflict(Conflict::TerminalReceipt)
-        } else {
-            error.into()
-        }
-    })?;
-	terminal_payloads::insert_raw(
-		scope.transaction.conn,
-		scope.job.repo_id,
-		scope.job.id,
-		payload,
-	)?;
-	// Actual SQL admission validates the composed audit and summary before the
-	// enclosing transaction can commit, and is the only metadata source.
-	snapshot(scope.transaction)
+		"INSERT INTO job_terminal_receipts(job_id,phase,terminal_reason,pinned_commit_sha,effective_recipe,result_digest,result_counts,finishing_capability_hash,created_at,subject_digest,evidence_rung)
+		 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+		params![scope.job.id, payload.phase().as_str(), reason, audit.commit.expose(), audit.recipe,
+			payload.digest()?.as_slice(), counts, hash.as_slice(), scope.transaction.now,
+			subject_digest.map(|v| v.as_slice()), rung.map(EvidenceRung::as_str)],
+	).map_err(|error| {
+		if crate::review::is_unique(&error, "job_terminal_receipts.job_id")
+			|| crate::review::is_unique(&error, "job_terminal_receipts.job_id, job_terminal_receipts.phase")
+		{
+			Error::Conflict(Conflict::TerminalReceipt)
+		} else {
+			error.into()
+		}
+	})?;
+	terminal_payloads::insert_raw(scope.transaction.conn, scope.job.repo_id, scope.job.id, payload)
+}
+
+pub(super) fn drilldown_snapshot(tx: &PhaseTransaction<'_>) -> Result<DrilldownFinalization> {
+	tx.conn.query_row(
+		"SELECT job_terminal_receipt_id,job_id,pinned_commit_sha,result_digest,terminal_reason,result_counts,effective_recipe,evidence_rung,subject_digest
+		 FROM job_terminal_receipts WHERE job_id=?1 AND phase='drilldown'",
+		[tx.job_id],
+		|row| {
+			let _audit = crate::ingress::db_payload(row, 6)?;
+			let counts = crate::ingress::db_payload(row, 5)?;
+			let summary: DrilldownSummary = serde_json::from_str(counts.expose())
+				.map_err(|_| crate::review::invalid_scalar(5))?;
+			summary.validate().map_err(|_| crate::review::invalid_scalar(5))?;
+			if row.get_ref(4)?.as_str()? != summary.disposition.as_str() {
+				return Err(crate::review::invalid_scalar(4));
+			}
+			let expected_rung = if summary.disposition == DrilldownDisposition::Promoted {
+				rusqlite::types::ValueRef::Text(b"L2")
+			} else {
+				rusqlite::types::ValueRef::Null
+			};
+			if row.get_ref(7)? != expected_rung || row.get_ref(8)?.as_blob()?.len() != 32 {
+				return Err(crate::review::invalid_scalar(7));
+			}
+			let receipt_id: i64 = row.get(0)?;
+			let job_id: i64 = row.get(1)?;
+			if receipt_id <= 0 || job_id <= 0 {
+				return Err(crate::review::invalid_scalar(0));
+			}
+			Ok(DrilldownFinalization {
+				receipt_id, job_id, commit: crate::ingress::profile::commit(row, 2)?,
+				result_digest: crate::ingress::profile::digest(row, 3)?, summary,
+			})
+		},
+	).optional()?.ok_or_else(incompatible)
 }

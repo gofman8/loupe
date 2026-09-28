@@ -19,6 +19,9 @@ use tower::Service;
 
 mod common;
 
+#[path = "review_drilldown/mod.rs"]
+mod drilldown_terminal;
+
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEXT_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 

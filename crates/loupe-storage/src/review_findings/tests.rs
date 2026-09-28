@@ -176,7 +176,7 @@ fn canonical_evidence_and_all_locations_survive_restart_and_generation_purge() {
 		assert!(findings::get(&scope(conn, 1), id)?.is_some());
 		transaction::immediate(conn, |tx| {
 			assert_eq!(
-				classify_compatibility_collision(&scope(tx, 1), id, &identity(&payload))?,
+				classify_compatibility_collision(tx, 1, id, &identity(&payload))?,
 				Conflict::FindingIdentity(id)
 			);
 			Ok(())

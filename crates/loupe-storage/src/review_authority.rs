@@ -32,6 +32,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use crate::{jobs, review_units, Error, Result};
 
 mod context;
+mod drilldown;
 mod envelope;
 mod evidence;
 mod host;
@@ -40,6 +41,10 @@ mod survey;
 mod terminal;
 mod units;
 pub use context::{CapacitySnapshot, LimitsSnapshot};
+pub use drilldown::{
+	ContinuationBlockReason, ContinuationSummary, DrilldownDisposition, DrilldownFinalization,
+	DrilldownSummary,
+};
 pub use envelope::{AssignedUnit, ReviewPreparation};
 pub use evidence::{
 	LeadCheckpoint, LeadCheckpointOutcome, LeadCheckpointReceipt, UnitResultCheckpoint,

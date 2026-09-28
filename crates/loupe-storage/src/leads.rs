@@ -315,9 +315,12 @@ pub fn close(
 	scope: &crate::scope::RepoScope<'_>, id: i64, closure: &Closure, now: i64,
 ) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
-	get_metadata(scope, id)?.ok_or(Error::NotFound(Entity::Lead, id))?;
-	let repo = scope.repo_id;
+	close_raw(scope.conn, scope.repo_id, id, closure, now)
+}
+pub(crate) fn close_raw(
+	tx: &Connection, repo: i64, id: i64, closure: &Closure, now: i64,
+) -> Result<()> {
+	get_metadata_raw(tx, repo, id)?.ok_or(Error::NotFound(Entity::Lead, id))?;
 	let (disposition, duplicate_lead, duplicate_finding, promoted_finding) = match closure {
 		Closure::Promoted { finding } => {
 			ownership::finding(tx, *finding, repo, Ownership::PromotedFinding)?;
@@ -339,15 +342,22 @@ pub fn close(
 		Closure::Hardening => (Disposition::Hardening, None, None, None),
 		Closure::Stale => (Disposition::Stale, None, None, None),
 	};
-	changed(tx.execute("UPDATE leads SET status='closed',disposition=?2,duplicate_of_lead_id=?3,duplicate_of_finding_id=?4,promoted_finding_id=?5,closed_at=?6 WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?7) AND status IN ('open','deferred') AND (?2<>'stale' OR NOT EXISTS(SELECT 1 FROM jobs WHERE assigned_lead_id=?1 AND state IN ('queued','leased')))",params![id,disposition.as_str(),duplicate_lead,duplicate_finding,promoted_finding,now,scope.repo_id])?,Conflict::LeadState)
+	changed(tx.execute("UPDATE leads SET status='closed',disposition=?2,duplicate_of_lead_id=?3,duplicate_of_finding_id=?4,promoted_finding_id=?5,closed_at=?6 WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?7) AND status IN ('open','deferred') AND (?2<>'stale' OR NOT EXISTS(SELECT 1 FROM jobs WHERE assigned_lead_id=?1 AND state IN ('queued','leased')))",params![id,disposition.as_str(),duplicate_lead,duplicate_finding,promoted_finding,now,repo])?,Conflict::LeadState)
 }
 pub fn defer<S: Source>(
 	scope: &crate::scope::RepoScope<'_>, id: i64, reason: &BoundedText<Reason, S>,
 	retry: Option<&BoundedText<Reason, S>>,
 ) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
-	changed(tx.execute("UPDATE leads SET status='deferred',defer_reason=?2,retry_condition=?3 WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?4) AND status='open'",params![id,reason.expose(),retry.map(BoundedText::expose),scope.repo_id])?,Conflict::LeadState)
+	defer_raw(scope.conn, scope.repo_id, id, reason.expose(), retry.map(BoundedText::expose))
+}
+pub(crate) fn defer_for_continuation_raw(
+	tx: &Connection, repo: i64, id: i64, class: loupe_core::review_payload::ContinuationClass,
+) -> Result<()> {
+	defer_raw(tx, repo, id, crate::review_intents::class_str(class), None)
+}
+fn defer_raw(tx: &Connection, repo: i64, id: i64, reason: &str, retry: Option<&str>) -> Result<()> {
+	changed(tx.execute("UPDATE leads SET status='deferred',defer_reason=?2,retry_condition=?3 WHERE lead_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?4) AND status='open'",params![id,reason,retry,repo])?,Conflict::LeadState)
 }
 pub fn reopen(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<()> {
 	scope.require_operator()?;

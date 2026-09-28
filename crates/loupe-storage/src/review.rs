@@ -52,6 +52,7 @@ pub enum Conflict {
 	CheckpointLimit,
 	UnitResultExists,
 	IncompatibleReviewState,
+	RevalidationRequired,
 	Candidate,
 	TerminalReceipt,
 	FindingIdentity(i64),

@@ -169,17 +169,21 @@ pub fn insert_review_evidence<RevisionS: Source>(
 	scope: &crate::scope::RepoScope<'_>, new: &NewReviewEvidence<'_, RevisionS>, now: i64,
 ) -> Result<()> {
 	scope.require_operator()?;
-	let tx = scope.conn;
+	insert_review_evidence_raw(scope.conn, scope.repo_id, new, now)
+}
+pub(crate) fn insert_review_evidence_raw<RevisionS: Source>(
+	tx: &Connection, repo: i64, new: &NewReviewEvidence<'_, RevisionS>, now: i64,
+) -> Result<()> {
 	let bytes = new.evidence.canonical_bytes()?;
 	review_provenance(
 		tx,
 		new.finding_id,
-		scope.repo_id,
+		repo,
 		new.reviewed_commit_sha.expose(),
 		new.workflow_contract_version,
 	)?;
 	if let Some(lead) = new.origin_lead {
-		ownership::lead_in_repo(tx, lead, scope.repo_id, Ownership::FindingLead)?;
+		ownership::lead_in_repo(tx, lead, repo, Ownership::FindingLead)?;
 	}
 	let fingerprint = new.identity.fingerprint();
 	let result = tx.execute(
@@ -190,7 +194,7 @@ pub fn insert_review_evidence<RevisionS: Source>(
 		 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'L2',?11,?12,?13,'agent')",
 		params![
 			new.finding_id,
-			scope.repo_id,
+			repo,
 			new.workflow_contract_version,
 			new.profile_version,
 			new.profile_digest.map(|d| d.as_slice()),
@@ -204,7 +208,7 @@ pub fn insert_review_evidence<RevisionS: Source>(
 			now
 		],
 	);
-	review_insert_result(tx, result, scope.repo_id, &fingerprint)
+	review_insert_result(tx, result, repo, &fingerprint)
 }
 
 /// Store independently supplied verification evidence, deriving its digest and
@@ -413,8 +417,12 @@ pub fn get_review_evidence(
 pub(crate) fn read_review_evidence(
 	scope: &crate::scope::RepoScope<'_>, finding: i64,
 ) -> Result<StoredEvidence<ReviewEvidence>> {
-	let conn = scope.conn;
-	let value = conn.query_row(&format!("SELECT {REVIEW_COLUMNS} FROM finding_review_details WHERE finding_id=?1 AND repo_id=?2 AND EXISTS(SELECT 1 FROM findings WHERE id=?1 AND repo_id=?2)"), params![finding,scope.repo_id], review_row).optional()?.unwrap_or(StoredEvidence::Missing);
+	read_review_evidence_raw(scope.conn, scope.repo_id, finding)
+}
+pub(crate) fn read_review_evidence_raw(
+	conn: &Connection, repo: i64, finding: i64,
+) -> Result<StoredEvidence<ReviewEvidence>> {
+	let value = conn.query_row(&format!("SELECT {REVIEW_COLUMNS} FROM finding_review_details WHERE finding_id=?1 AND repo_id=?2 AND EXISTS(SELECT 1 FROM findings WHERE id=?1 AND repo_id=?2)"), params![finding,repo], review_row).optional()?.unwrap_or(StoredEvidence::Missing);
 	validate_review_provenance(conn, &value)?;
 	Ok(value)
 }

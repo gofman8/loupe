@@ -8,7 +8,7 @@ use loupe_core::review_payload::PromotionV1;
 use loupe_core::text::policy::RevisionText;
 use loupe_core::text::{BoundedText, SourceRef};
 use loupe_provenance::{Agent, Source};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::finding_details::{self, NewReviewEvidence};
 use crate::identity::Identity;
@@ -45,12 +45,16 @@ pub fn insert<RevisionS: Source>(
 	scope: &crate::scope::RepoScope<'_>, new: &NewFinding<'_, RevisionS>, now: i64,
 ) -> Result<i64> {
 	scope.require_operator()?;
-	let tx = scope.conn;
+	insert_raw(scope.conn, scope.repo_id, new, now)
+}
+pub(crate) fn insert_raw<RevisionS: Source>(
+	tx: &Connection, repo: i64, new: &NewFinding<'_, RevisionS>, now: i64,
+) -> Result<i64> {
 	new.promotion.canonical_bytes()?;
 	if new.profile_version <= 0 {
 		return Err(Error::Conflict(Conflict::FindingDetails));
 	}
-	ownership::lead_in_repo(tx, new.origin_lead_id, scope.repo_id, Ownership::FindingLead)?;
+	ownership::lead_in_repo(tx, new.origin_lead_id, repo, Ownership::FindingLead)?;
 	let generation: Option<i64> = tx
 		.query_row(
 			"SELECT generation_id FROM jobs WHERE id=?1 AND repo_id=?2 AND kind='drilldown'
@@ -59,7 +63,7 @@ pub fn insert<RevisionS: Source>(
 		 AND (workflow_contract_version IS NULL OR workflow_contract_version=?5)",
 			params![
 				new.job_id,
-				scope.repo_id,
+				repo,
 				new.origin_lead_id,
 				new.reviewed_commit_sha.expose(),
 				loupe_core::WORKFLOW_CONTRACT_VERSION
@@ -69,7 +73,7 @@ pub fn insert<RevisionS: Source>(
 		.optional()?
 		.ok_or(Error::Ownership(Ownership::Finding))?;
 	if let Some(generation) = generation {
-		ownership::generation(tx, scope.repo_id, generation, Ownership::Finding)?;
+		ownership::generation(tx, repo, generation, Ownership::Finding)?;
 		ownership::lead_in_generation(tx, new.origin_lead_id, generation, Ownership::FindingLead)?;
 		// Symbols remain in canonical material locations. Membership is path-only.
 		let refs: Vec<_> = new
@@ -79,7 +83,7 @@ pub fn insert<RevisionS: Source>(
 			.iter()
 			.map(|location| SourceRef { path: location.file.clone(), symbol: None })
 			.collect();
-		inventory::verify_refs(scope, generation, &refs)?;
+		inventory::verify_refs_raw(tx, repo, generation, &refs)?;
 	}
 	let identity = identity(new.promotion);
 	let key = compatibility_key(&identity);
@@ -93,7 +97,7 @@ pub fn insert<RevisionS: Source>(
 		 fingerprint,state,verification_required,created_at,report_identity,source)
 		 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'validating',1,?12,?13,'agent')",
 		params![
-			scope.repo_id,
+			repo,
 			new.job_id,
 			SCANNER_ID,
 			new.promotion.severity.as_str(),
@@ -112,18 +116,19 @@ pub fn insert<RevisionS: Source>(
 		if is_unique(&error, "findings.repo_id, findings.fingerprint") {
 			let existing: i64 = tx.query_row(
 				"SELECT id FROM findings WHERE repo_id=?1 AND fingerprint=?2",
-				params![scope.repo_id, key],
+				params![repo, key],
 				|row| row.get(0),
 			)?;
 			return Err(Error::Conflict(classify_compatibility_collision(
-				scope, existing, &identity,
+				tx, repo, existing, &identity,
 			)?));
 		}
 		return Err(error.into());
 	}
 	let finding_id = tx.last_insert_rowid();
-	finding_details::insert_review_evidence(
-		scope,
+	finding_details::insert_review_evidence_raw(
+		tx,
+		repo,
 		&NewReviewEvidence {
 			finding_id,
 			workflow_contract_version: loupe_core::WORKFLOW_CONTRACT_VERSION,
@@ -140,11 +145,11 @@ pub fn insert<RevisionS: Source>(
 }
 
 fn classify_compatibility_collision(
-	scope: &crate::scope::RepoScope<'_>, existing: i64, identity: &Identity<Agent>,
+	tx: &Connection, repo: i64, existing: i64, identity: &Identity<Agent>,
 ) -> Result<Conflict> {
-	match finding_details::get_review_evidence(scope, existing) {
+	match finding_details::read_review_evidence_raw(tx, repo, existing) {
 		Ok(StoredEvidence::Recorded(details))
-			if details.repo_id == scope.repo_id
+			if details.repo_id == repo
 				&& details.workflow_contract_version == loupe_core::WORKFLOW_CONTRACT_VERSION
 				&& &details.identity == identity =>
 		{
