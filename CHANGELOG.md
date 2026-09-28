@@ -11,6 +11,7 @@
 - Add campaign-aware review scheduling with frozen budgets, resumable survey batches, bounded fair claims, and deadline handling; preserve legacy leasing and keep survey/drilldown runtime-gated.
 - File GitHub issues through a server-wide GitHub App by default, with repo-scoped short-lived installation tokens, an optional tracker-owner allowlist, and a schema v4 bump; keep per-repo PATs as a fallback.
 - Add guarded schema v7 with lossless inventory paths and retained typed review evidence; preserve historical records and source metadata and keep phase execution disabled (see the [offline upgrade runbook](contrib/upgrading-schema-v7.md)).
+- Isolate campaign capabilities from legacy routes and add transaction-bound review authority, assignment epochs and finishing-worker receipt replay; keep public phase execution disabled.
 
 ## v0.1 — 2026-09-07
 

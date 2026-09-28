@@ -198,7 +198,7 @@ pub(crate) fn assign_selected(
 		|r| r.get(0),
 	)?;
 	for (offset, claim) in units.iter().enumerate() {
-		tx.execute("INSERT INTO job_assigned_review_units (job_id,review_unit_id,position) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?4)",params![job,claim.unit_id,start + offset as i64,repo])?;
+		tx.execute("INSERT INTO job_assigned_review_units (job_id,review_unit_id,position,assignment_epoch) SELECT ?1,u.review_unit_id,?3,u.assignment_epoch FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?2 AND g.repo_id=?4 AND EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?4)",params![job,claim.unit_id,start + offset as i64,repo])?;
 	}
 	Ok(())
 }

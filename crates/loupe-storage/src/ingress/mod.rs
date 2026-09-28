@@ -14,6 +14,7 @@ use rusqlite::Row;
 mod app;
 mod refs;
 mod reporting;
+pub(crate) mod review_authority;
 mod review_payload;
 #[cfg(test)]
 mod tests;

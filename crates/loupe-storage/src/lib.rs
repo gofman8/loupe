@@ -46,6 +46,7 @@ mod report_identity;
 pub mod reports;
 pub mod repos;
 mod review;
+pub mod review_authority;
 pub mod review_unit_results;
 pub mod review_units;
 pub mod scheduler;
