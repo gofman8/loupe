@@ -9,7 +9,7 @@ use super::*;
 
 macro_rules! evidence {
 	($stored:ident, $validator:ident, $read:ident, $value:ident) => {
-		struct $stored;
+		pub(super) struct $stored;
 		struct $validator;
 		impl<'a> ValidateCarrying<&'a [u8], Db> for $stored {
 			type Output = $value<Agent>;
@@ -37,6 +37,8 @@ macro_rules! evidence {
 			) -> Result<Self::Output, Self::Error> {
 				#[cfg(test)]
 				tests::observe("agent", stringify!($validator), u.get());
+				#[cfg(test)]
+				super::coverage::observe("agent", u.get());
 				$value::from_json(&mark, utf8(u.get())?)
 			}
 		}

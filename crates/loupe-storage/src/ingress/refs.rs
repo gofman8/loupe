@@ -5,7 +5,9 @@ use std::ops::Range;
 use loupe_core::text::{
 	decode_json_string_bounded, policy, BoundedText, Error, RepoPath, Rule, SourceRef, TextPolicy,
 };
-use loupe_provenance::{Agent, Db as DbSource, Mark, Unvalidated, Validate, ValidateCarrying};
+use loupe_provenance::{
+	Agent, Db as DbSource, Mark, Untrusted, Unvalidated, Validate, ValidateCarrying,
+};
 use rusqlite::Row;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -31,9 +33,12 @@ struct StoredRefs<const MAX: usize> {
 fn refs<const MAX: usize>(
 	row: &Row<'_>, index: usize,
 ) -> rusqlite::Result<crate::source_refs::SourceRefs<MAX, Agent>> {
-	let marked = column(row, index)?
-		.validate_carrying(StoredRefColumn::<MAX>)
-		.map_err(|e| sql_error(index, ReadError::existing(e)))?;
+	stored_refs(column(row, index)?).map_err(|e| sql_error(index, ReadError::existing(e)))
+}
+pub(super) fn stored_refs<const MAX: usize>(
+	column: Untrusted<&[u8], DbSource>,
+) -> Result<crate::source_refs::SourceRefs<MAX, Agent>, Error> {
+	let marked = column.validate_carrying(StoredRefColumn::<MAX>)?;
 	// These range invariants are checked by token_span and carry, before
 	// decoding; the original SQL TEXT remains live throughout validation.
 	for span in &marked.spans {
@@ -178,6 +183,8 @@ impl Validate<&[u8], Agent> for AgentRefPath {
 		self, u: Unvalidated<'view, &[u8]>, mark: Mark<'view, Agent>,
 	) -> Result<Self::Output, Error> {
 		let raw = std::str::from_utf8(u.get()).map_err(|_| invalid())?;
+		#[cfg(test)]
+		super::coverage::observe("agent_path", u.get());
 		let decoded = decode_json_string_bounded(raw, "path", 512, 512)?;
 		Ok((RepoPath::new(&mark, &decoded)?, raw.as_ptr() as usize))
 	}

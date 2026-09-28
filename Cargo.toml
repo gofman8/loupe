@@ -71,7 +71,7 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "rin
 # uses it directly to sign GitHub App JWTs (RS256) instead of pulling in
 # a dedicated JWT crate.
 ring = { version = "0.17", default-features = false, features = ["std"] }
-rusqlite ={ version = "0.32", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite ={ version = "0.32", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "functions"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
 pem = { version = "3", default-features = false, features = ["std"] }

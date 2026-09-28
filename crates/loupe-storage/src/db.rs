@@ -151,6 +151,7 @@ impl Db {
 		conn.pragma_update(None, "foreign_keys", "ON")?;
 		conn.pragma_update(None, "synchronous", "NORMAL")?;
 		migrate(&mut conn)?;
+		crate::review_coverage::register(&conn)?;
 		Ok(Self { conn: Mutex::new(conn), identity: Arc::new(DbIdentity) })
 	}
 

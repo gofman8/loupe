@@ -41,7 +41,7 @@ pub(crate) fn digest(row: &Row<'_>, index: usize) -> rusqlite::Result<ReviewDige
 	blob(row, index)?.validate(Digest).map_err(|error| admission_error(index, error))
 }
 
-struct StoredProfile;
+pub(super) struct StoredProfile;
 struct AgentProfile;
 impl<'a> ValidateCarrying<&'a [u8], Db> for StoredProfile {
 	type Output = GeneratedProfile<Agent>;
@@ -65,6 +65,8 @@ impl Validate<&[u8], Agent> for AgentProfile {
 	) -> Result<Self::Output, Error> {
 		#[cfg(test)]
 		tests::observe("agent", u.get());
+		#[cfg(test)]
+		super::coverage::observe("agent", u.get());
 		GeneratedProfile::new(&mark, utf8(u.get())?)
 	}
 }

@@ -15,6 +15,7 @@ pub(crate) mod admission_policy;
 mod app;
 pub(crate) mod candidates;
 pub(crate) mod checkpoint;
+pub(crate) mod coverage;
 pub(crate) mod host_preparation;
 pub(crate) mod lifecycle;
 pub(crate) mod profile;
@@ -90,6 +91,19 @@ fn column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Untrusted<&'a 
 	// SAFETY: this is the original TEXT value returned by SQLite, not a
 	// reserialized value or a caller-supplied string.
 	Ok(Untrusted::new(bytes, unsafe { Ingress::<Db>::new() }))
+}
+// Scalar arguments, like row columns, are borrowed from this actual SQLite
+// invocation. No caller-supplied byte slice can enter this issuance boundary.
+#[allow(unsafe_code)] // Only original SQL TEXT returned by this Context is labelled.
+fn function_text<'a>(
+	ctx: &'a rusqlite::functions::Context<'_>, index: usize,
+) -> Option<Untrusted<&'a [u8], Db>> {
+	let ValueRef::Text(bytes) = ctx.get_raw(index) else { return None };
+	#[cfg(test)]
+	coverage::observe("argument", bytes);
+	// SAFETY: the exact TEXT argument remains borrowed from the live Context,
+	// never reconstructed from JSON or a typed value.
+	Some(Untrusted::new(bytes, unsafe { Ingress::<Db>::new() }))
 }
 #[allow(unsafe_code)] // Only original SQL BLOB returned by this Row is labelled.
 fn blob<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Untrusted<&'a [u8], Db>> {

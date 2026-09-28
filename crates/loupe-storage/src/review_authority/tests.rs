@@ -564,11 +564,28 @@ fn survey_subjects_require_exact_membership_epoch_and_freshness() {
 		"UPDATE review_units SET assignment_epoch=4 WHERE review_unit_id=31",
 		"UPDATE review_units SET stale=1 WHERE review_unit_id=31",
 		"UPDATE review_units SET status='retired' WHERE review_unit_id=31",
-		"INSERT INTO review_unit_results(review_unit_id,commit_sha,profile_version,disposition,inspected_refs,result_payload,result_digest,created_at) SELECT 31,generation_commit_sha,1,'no_lead_found','[]','{}',zeroblob(32),0 FROM review_generations WHERE generation_id=11",
 	] {
-		let db = fixture(); units(&db); mutate(&db,sql);
-		assert!(!unit_allowed(&db,31,3,PolicyDecision::Ordinary), "{sql}");
+		let db = fixture();
+		units(&db);
+		mutate(&db, sql);
+		assert!(!unit_allowed(&db, 31, 3, PolicyDecision::Ordinary), "{sql}");
 	}
+	// A conclusive control needs current Recorded evidence. Historical '{}'
+	// is retained, but deliberately cannot certify modern coverage.
+	let covered_db = fixture();
+	units(&covered_db);
+	assert!(unit_allowed(&covered_db, 31, 3, PolicyDecision::Ordinary));
+	covered_db.with_conn(|conn| {
+		conn.execute("UPDATE generation_manifests SET expected_entry_count=1,received_entry_count=1 WHERE generation_id=11",[])?;
+		conn.execute("INSERT INTO generation_inventory(generation_id,path,source_path,raw_path,blob_sha,entry_kind,git_mode,manifest_position,disposition,created_at) VALUES(11,'src.rs','src.rs',?1,?2,'tracked',33188,0,'context',0)",params![b"src.rs".as_slice(),SHA])?;
+		let payload=crate::test_support::agent(&serde_json::json!({"format":"loupe.unit_result","version":1,"review_unit_id":31,"assignment_epoch":3,"disposition":"no_lead_found","inspected_refs":[{"path":"src.rs"}],"created_lead_ids":[],"counterevidence":"Guard traced","proof_gaps":"None"}).to_string(),|raw,mark|loupe_core::review_payload::UnitResultPayloadV1::from_json(mark,raw))?;
+		crate::review_unit_results::insert_evidence(&crate::test_support::scope(conn,1),&crate::review_unit_results::NewResultEvidence{generation_id:11,produced_by_job:101,commit_sha:&crate::test_support::db_text(SHA)?,profile_version:1,payload:&payload},100)?;
+		Ok(())
+	}).unwrap();
+	assert!(
+		!unit_allowed(&covered_db, 31, 3, PolicyDecision::Ordinary),
+		"current conclusive evidence excludes another fresh result"
+	);
 	mutate(&db, "DELETE FROM job_assigned_review_units");
 	assert!(!unit_allowed(&db, 31, 3, PolicyDecision::Ordinary));
 	assert!(unit_allowed(&db, 31, 3, PolicyDecision::Bootstrap));

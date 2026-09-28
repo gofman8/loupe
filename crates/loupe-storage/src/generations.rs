@@ -44,16 +44,21 @@ pub struct Generation {
 	pub retired_at: Option<i64>,
 	pub retired_reason: Option<BoundedText<Reason, Db>>,
 }
-// debug-ok: coverage rollup contains only counts of outstanding work.
+// debug-ok: coverage rollup contains only readiness and counts of outstanding work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverageRollup {
+	/// Derived readiness, including managed preparation even for empty work.
+	pub ready: bool,
 	pub missing_results: i64,
 	pub needs_follow_up: i64,
 	pub unresolved_inventory: i64,
 }
 impl CoverageRollup {
 	pub fn complete(self) -> bool {
-		self.missing_results == 0 && self.needs_follow_up == 0 && self.unresolved_inventory == 0
+		self.ready
+			&& self.missing_results == 0
+			&& self.needs_follow_up == 0
+			&& self.unresolved_inventory == 0
 	}
 }
 
@@ -238,12 +243,29 @@ pub fn coverage_rollup(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<C
 	coverage_rollup_raw(scope.conn, scope.repo_id, id)
 }
 pub(crate) fn coverage_rollup_raw(tx: &Connection, repo: i64, id: i64) -> Result<CoverageRollup> {
-	get_for_repo_raw(tx, repo, id)?.ok_or(Error::NotFound(Entity::Generation, id))?;
+	let ready: bool = tx
+		.query_row(
+			&format!(
+				"SELECT {} FROM review_generations g WHERE g.generation_id=?1 AND g.repo_id=?2",
+				crate::review_coverage::GENERATION_READY
+			),
+			params![id, repo],
+			|row| row.get(0),
+		)
+		.optional()?
+		.ok_or(Error::NotFound(Entity::Generation, id))?;
 	let held = "EXISTS(SELECT 1 FROM review_unit_holds h WHERE h.review_unit_id=u.review_unit_id)";
 	let uncovered = format!("FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.generation_id=?1 AND g.repo_id=?2 AND (u.status IN ('open','deferred') OR {held}) AND ({held} OR NOT ({}))", crate::review_units::UNIT_COVERED);
 	let missing_results =
 		tx.query_row(&format!("SELECT COUNT(*) {uncovered}"), params![id, repo], |r| r.get(0))?;
-	let needs_follow_up = tx.query_row(&format!("SELECT COUNT(*) {uncovered} AND ({held} OR (SELECT r.disposition FROM review_unit_results r WHERE r.review_unit_id=u.review_unit_id AND r.invalidated=0 AND r.commit_sha=g.generation_commit_sha AND r.profile_version=g.profile_version ORDER BY r.review_unit_result_id DESC LIMIT 1)='needs_follow_up')"),params![id,repo],|r|r.get(0))?;
+	let needs_follow_up = tx.query_row(
+		&format!(
+			"SELECT COUNT(*) {uncovered} AND ({held} OR ({}))",
+			crate::review_coverage::UNIT_FOLLOW_UP
+		),
+		params![id, repo],
+		|r| r.get(0),
+	)?;
 	let unresolved_inventory = if inventory::manifest_sealed_raw(tx, repo, id)?.is_some() {
 		// Historical nonmembers are retained evidence targets, not entries in
 		// this manifest. Every persisted mapping must still name this source.
@@ -257,14 +279,13 @@ pub(crate) fn coverage_rollup_raw(tx: &Connection, repo: i64, id: i64) -> Result
 			 OR EXISTS (SELECT 1 FROM generation_inventory_units m
 			   JOIN review_units u ON u.review_unit_id=m.review_unit_id AND u.generation_id=m.generation_id
 			   WHERE m.generation_id=i.generation_id AND m.inventory_entry_id=i.inventory_entry_id
-			   AND NOT EXISTS (SELECT 1 FROM json_each(u.source_refs) r
-			     WHERE json_extract(r.value,'$.path')=i.source_path)))))",
+			   AND NOT loupe_unit_refs_contain(u.source_refs,i.source_path,u.source)))))",
 			params![id, repo], |row| row.get(0),
 		)?
 	} else {
 		tx.query_row("SELECT COUNT(*) FROM generation_inventory WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=generation_inventory.generation_id AND g.repo_id=?2) AND disposition='unresolved'",params![id,repo],|r|r.get(0))?
 	};
-	Ok(CoverageRollup { missing_results, needs_follow_up, unresolved_inventory })
+	Ok(CoverageRollup { ready, missing_results, needs_follow_up, unresolved_inventory })
 }
 pub fn set_pending_follow_up<S: Source>(
 	scope: &crate::scope::RepoScope<'_>, id: i64, follow_up: &BoundedJson<Payload, S>,

@@ -245,6 +245,10 @@ fn receiving_generation_cannot_activate_with_old_profile_and_digest() {
 fn receiving_generation_cannot_claim_complete_coverage() {
 	let db = fixture();
 	db.with_conn(|conn| {
+		// Isolate receiving -> sealed: other modern readiness is valid even
+		// for an empty inventory.
+		let profile=crate::test_support::agent("{}",|raw,mark|loupe_core::review_payload::GeneratedProfile::new(mark,raw))?;
+		conn.execute("UPDATE review_generations SET generation_commit_sha=?1,workflow_contract_version=2,profile_version=1,generated_profile=?2,generated_profile_digest=?3,generated_profile_source='agent' WHERE generation_id=11",params!["a".repeat(40),profile.expose(),profile.digest().as_slice()])?;
 		crate::test_support::scoped(conn, 1, |scope| {
 			g::set_corroboration(scope, 11, g::Corroboration::Satisfied)
 		})?;

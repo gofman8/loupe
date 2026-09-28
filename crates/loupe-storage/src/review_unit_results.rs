@@ -170,18 +170,31 @@ pub(crate) fn insert_evidence_raw<RevisionS: Source>(
 	tx.execute("INSERT INTO review_unit_results(review_unit_id,produced_by_job_id,commit_sha,profile_version,disposition,inspected_refs,result_payload,result_digest,created_at,source) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,'agent' WHERE EXISTS(SELECT 1 FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1 AND g.repo_id=?10)",params![payload.review_unit_id,new.produced_by_job,new.commit_sha.expose(),new.profile_version,payload.disposition.as_str(),refs,raw,crate::canonical::digest(&bytes).as_slice(),now,repo])?;
 	Ok(tx.last_insert_rowid())
 }
+/// Canonical evidence and its legacy SQL projections describe one result.
+/// The caller owns source admission; this helper only compares typed content.
+pub(crate) fn projection_matches(
+	value: &UnitResultPayloadV1<Agent>, unit: i64, disposition: &str, refs: &str,
+	legacy_projections_empty: bool,
+) -> Result<bool> {
+	Ok(value.review_unit_id == unit
+		&& disposition == value.disposition.as_str()
+		&& refs == crate::review::checkpoint_refs(&value.inspected_refs)?
+		&& legacy_projections_empty)
+}
 fn evidence_row(r: &rusqlite::Row<'_>) -> Result<EvidenceResult> {
 	crate::ingress::require_agent_source(r, 15)?;
 	let payload = crate::ingress::checkpoint::unit_result(r, 9, 16)?;
 	let unit_id = r.get(1)?;
 	if let StoredEvidence::Recorded(value) = &payload
-		&& (value.review_unit_id != unit_id
-			|| r.get::<_, String>(5)? != value.disposition.as_str()
-			|| r.get::<_, String>(6)? != crate::review::checkpoint_refs(&value.inspected_refs)?
-			|| [7, 8, 12, 13]
+		&& !projection_matches(
+			value,
+			unit_id,
+			&r.get::<_, String>(5)?,
+			&r.get::<_, String>(6)?,
+			[7, 8, 12, 13]
 				.into_iter()
-				.any(|i| !matches!(r.get_ref(i), Ok(rusqlite::types::ValueRef::Null))))
-	{
+				.all(|i| matches!(r.get_ref(i), Ok(rusqlite::types::ValueRef::Null))),
+		)? {
 		return Err(Error::Conflict(Conflict::CheckpointEvidence));
 	}
 	Ok(EvidenceResult {
