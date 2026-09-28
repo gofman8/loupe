@@ -824,7 +824,7 @@ enum TestRecipe {
 	Drilldown { version: loupe_core::review_payload::Version1 },
 	Verify { version: loupe_core::review_payload::Version1 },
 }
-fn test_policy(
+pub(crate) fn test_policy(
 	phase: Phase, context: &Context, input: RecipeInput<'_>,
 ) -> std::result::Result<RecipeDecision, CallbackError<Error>> {
 	let invalid = || CallbackError::Incompatible(Incompatibility::InvalidData);

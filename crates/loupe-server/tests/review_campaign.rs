@@ -57,11 +57,24 @@ async fn background_scheduler_keeps_pending_coverage_without_spurious_notificati
 	.unwrap();
 	// Inventory finalization has no runtime producer. Author that worker state
 	// in this test-owned encrypted file, then reopen the ordinary Db.
+	let entry = loupe_proto::review_api::ManifestEntry {
+		raw_path_hex: common::marked::operator::identifier("7372632e7273"),
+		git_mode: 0o100644,
+		object_id: common::marked::operator::identifier(SHA),
+	}
+	.to_manifest()
+	.unwrap();
+	let mut manifest = loupe_core::inventory_manifest::ManifestHasher::new(SHA, 1).unwrap();
+	manifest.push(&entry).unwrap();
+	let bytes = manifest.bytes();
+	let digest = manifest.finish().unwrap();
 	drop(db);
 	fixture.edit(|conn| {
-        conn.execute("UPDATE review_generations SET inventory_digest=zeroblob(32) WHERE generation_id=?1",[generation])?;
-        conn.execute("UPDATE jobs SET state='succeeded',finished_at=?2 WHERE id=?1",rusqlite::params![job,now])?;
-        conn.execute("INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,source_refs,priority_band,created_at) VALUES(?1,'u','t','o','[]','high',0)",[generation])?;
+        conn.execute("UPDATE review_generations SET inventory_digest=?2 WHERE generation_id=?1",rusqlite::params![generation,digest.as_slice()])?;
+        conn.execute("INSERT INTO generation_manifests(generation_id,format_version,owner_job_id,expected_entry_count,received_entry_count,received_canonical_bytes,expected_digest,created_at,sealed_at) VALUES(?1,1,?2,1,1,?3,?4,0,0)",rusqlite::params![generation,job,bytes,digest.as_slice()])?;
+        conn.execute("INSERT INTO generation_inventory(generation_id,path,source_path,raw_path,manifest_position,git_mode,blob_sha,entry_kind,disposition,disposition_reason,created_at) VALUES(?1,'src.rs','src.rs',?2,0,33188,?3,'tracked','context','fixture source',0)",rusqlite::params![generation,b"src.rs".as_slice(),SHA])?;
+        conn.execute("UPDATE jobs SET state='succeeded',finished_at=?2,head_sha=?3 WHERE id=?1",rusqlite::params![job,now,SHA])?;
+        conn.execute("INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,source_refs,priority_band,created_by_job_id,created_at) VALUES(?1,'u','t','o','[{\"path\":\"src.rs\"}]','high',?2,0)",rusqlite::params![generation,job])?;
         Ok(())
     });
 	let db = fixture.open();

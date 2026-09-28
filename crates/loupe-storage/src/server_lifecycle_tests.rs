@@ -9,7 +9,7 @@ use loupe_storage::{
 use rusqlite::{params, Transaction};
 
 use crate::admission_policy::CampaignPolicyV2 as ReviewPolicy;
-use crate::{campaign_workflow as campaign, server_campaign_support as common};
+use crate::server_campaign_support::{self as common, campaign};
 
 // Pinning only accepts complete object ids.
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -46,10 +46,7 @@ fn bootstrap_to_coverage_preserves_the_profile_and_activation() {
 		assert_eq!(recipe["recipe"],"bootstrap");
 		common::assert_survey_recipe(tx, &bootstrap, "bootstrap");
 		let payload=common::marked::agent::json::<Payload>("{}");
-		generations::set_profile(&crate::test_support::scope(tx,1),generation,1,&payload)?;
-		tx.execute("UPDATE review_generations SET inventory_digest=zeroblob(32) WHERE generation_id=?1",[generation])?;
-		tx.execute("INSERT INTO generation_manifests(generation_id,format_version,owner_job_id,expected_entry_count,received_entry_count,expected_digest,created_at,sealed_at) VALUES(?1,1,?2,1,1,zeroblob(32),0,0)",params![generation,job_id])?;
-		tx.execute("INSERT INTO generation_inventory(generation_id,path,source_path,raw_path,manifest_position,git_mode,blob_sha,entry_kind,disposition,disposition_reason,created_at) VALUES(?1,'src.rs','src.rs',?2,0,33188,?3,'tracked','context','fixture source',0)",params![generation,b"src.rs".as_slice(),SHA])?;
+		crate::server_campaign_tests::ready(tx,generation)?;
 		for (i,band) in ["background","normal","urgent","high","normal","urgent"].iter().enumerate() {
 			tx.execute("INSERT INTO review_units(review_unit_id,generation_id,client_review_unit_key,title,objective,source_refs,priority_band,created_by_job_id,created_at) VALUES(?1,?2,?3,'t','o','[{\"path\":\"src.rs\"}]',?4,?5,?1)",params![i as i64+1,generation,format!("unit-{i}"),band,job_id])?;
 		}

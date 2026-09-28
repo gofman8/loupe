@@ -1,11 +1,9 @@
 //! Durable exclusion of one permanently incompatible admission source.
 //! The server chooses the category; this layer never changes canonical verdicts,
 //! evidence, admission spending, assignment epochs or scheduler fairness.
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection};
 
-use crate::Result;
-#[cfg(test)]
-use crate::{Conflict, Error};
+use crate::{Conflict, Error, Result};
 
 // debug-ok: these states contain only closed categories and numeric row IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +42,7 @@ impl Reason {
 /// Must follow rollback of the tentative candidate savepoint. Queued-job holds
 /// affect only work admitted to it, never independent accepted producer leads.
 pub(crate) fn hold(
-	tx: &Transaction<'_>, repo: i64, source: Source, reason: Reason, now: i64,
+	tx: &Connection, repo: i64, source: Source, reason: Reason, now: i64,
 ) -> Result<bool> {
 	let block = reason.block();
 	let changed=match source {
@@ -75,12 +73,10 @@ pub(crate) fn hold(
 /// admission order or persistent scheduling state; restart begins a new walk.
 // debug-ok: these states contain only closed categories and numeric row IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
 pub(crate) struct Cursor {
 	source: i64,
 	id: i64,
 }
-#[cfg(test)]
 impl Cursor {
 	pub(crate) fn after(source: Source) -> Result<Self> {
 		let (source, id) = match source {
@@ -95,9 +91,8 @@ impl Cursor {
 	}
 }
 
-#[cfg(test)]
 pub(crate) fn page(
-	tx: &Transaction<'_>, repo: i64, campaign: i64, cursor: Option<Cursor>, limit: u32,
+	tx: &Connection, repo: i64, campaign: i64, cursor: Option<Cursor>, limit: u32,
 ) -> Result<Vec<Source>> {
 	if !(1..=256).contains(&limit) {
 		return Err(Error::Conflict(Conflict::CampaignPolicy));

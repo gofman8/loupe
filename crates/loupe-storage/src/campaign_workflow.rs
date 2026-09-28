@@ -1,4 +1,6 @@
 //! Transactional campaign orchestration. Worker checkout pins the commit.
+use std::collections::BTreeMap;
+
 use loupe_core::text::policy::{Reason, RevisionText};
 use loupe_core::text::BoundedText;
 pub use loupe_core::ReviewIntent as KindHint;
@@ -7,7 +9,10 @@ use loupe_provenance::Source;
 use rusqlite::{params, OptionalExtension};
 
 use crate::admission::{self, CapacityRefusal, Selection, Spending, WorkClass};
+use crate::admission_claim::{CallbackError, RecipeDecision, RecipeInput};
 use crate::admission_policy::CampaignPolicyV2;
+use crate::admission_quarantine::Cursor;
+use crate::review_authority::{Context, Phase};
 use crate::review_intents::BlockReason;
 use crate::scope::RepoScope;
 use crate::{
@@ -326,9 +331,66 @@ struct Progress {
 	budget_exhausted: bool,
 }
 
-pub fn try_finish(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Option<Finish>> {
+/// A bounded one-shot attempt. Large campaigns require retained maintenance;
+/// an incomplete scan cannot permit normal completion.
+pub fn try_finish(
+	scope: &RepoScope<'_>, campaign_id: i64, now: i64,
+	mut policy: impl FnMut(
+		Phase,
+		&Context,
+		RecipeInput<'_>,
+	) -> std::result::Result<RecipeDecision, CallbackError<Error>>,
+) -> Result<Option<Finish>> {
 	scope.require_operator()?;
-	Ok(advance(scope, campaign_id, now)?.finish)
+	Ok(advance_checked(scope, campaign_id, now, None, &mut policy)?.0.finish)
+}
+
+/// Process-local scan progress, not persisted coverage or admission authority.
+/// The background owner retains this across ticks; restart safely rescans.
+#[derive(Default)]
+pub struct Maintenance {
+	identity: Option<std::sync::Arc<crate::db::DbIdentity>>,
+	cursors: BTreeMap<(i64, i64), Cursor>,
+}
+impl Maintenance {
+	fn bind(&mut self, db: &Db) {
+		if self
+			.identity
+			.as_ref()
+			.is_none_or(|identity| !std::sync::Arc::ptr_eq(identity, &db.identity))
+		{
+			self.cursors.clear();
+			self.identity = Some(db.identity.clone());
+		}
+	}
+}
+
+fn advance_checked(
+	scope: &RepoScope<'_>, campaign_id: i64, now: i64, cursor: Option<Cursor>,
+	policy: &mut impl FnMut(
+		Phase,
+		&Context,
+		RecipeInput<'_>,
+	) -> std::result::Result<RecipeDecision, CallbackError<Error>>,
+) -> Result<(Progress, Option<Cursor>)> {
+	let (active, deadline): (bool, Option<i64>) = scope.conn.query_row(
+		"SELECT state='active',deadline_at FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2",
+		params![campaign_id, scope.repo_id], |row| Ok((row.get(0)?, row.get(1)?)),
+	).optional()?.ok_or(Error::NotFound(Entity::Campaign, campaign_id))?;
+	// Identity-only control must not depend on a domain-integrity walk.
+	if !active || deadline.is_some_and(|at| at <= now) {
+		return Ok((advance(scope, campaign_id, now, false)?, None));
+	}
+	let scan = crate::admission_claim::validation::maintain_campaign(
+		scope.conn,
+		(scope.repo_id, campaign_id),
+		now,
+		cursor,
+		256,
+		32,
+		policy,
+	)?;
+	Ok((advance(scope, campaign_id, now, scan.scan_complete)?, scan.next))
 }
 
 fn frozen_budget(scope: &RepoScope<'_>, campaign: i64) -> Result<(CampaignPolicyV2, Spending)> {
@@ -338,7 +400,9 @@ fn frozen_budget(scope: &RepoScope<'_>, campaign: i64) -> Result<(CampaignPolicy
 	admission::choose_pool(&policy, spent, WorkClass::Survey)?;
 	Ok((policy, spent))
 }
-fn advance(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Progress> {
+fn advance(
+	scope: &RepoScope<'_>, campaign_id: i64, now: i64, scan_complete: bool,
+) -> Result<Progress> {
 	let tx = scope.conn;
 	let repo = scope.repo_id;
 	let (state,recipe,deadline): (campaigns::State,campaigns::Recipe,Option<i64>) = tx.query_row(
@@ -374,6 +438,9 @@ fn advance(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Progress
 	if let Some(reason) = reason {
 		scheduler::cancel_queued_for_reason(scope, campaign_id, now, reason)?;
 		campaign_work::block_all(tx, repo, campaign_id, reason, now)?;
+	}
+	if reason.is_none() && !scan_complete {
+		return Ok(progress);
 	}
 	let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE campaign_id=?1 AND repo_id=?2 AND state IN('queued','leased'))",params![campaign_id,repo],|r|r.get(0))?;
 	if busy {
@@ -432,7 +499,15 @@ fn advance(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Progress
 
 /// No active campaigns means no write transaction. Each campaign otherwise
 /// advances independently, so a malformed row cannot stall another repository.
-pub fn tick(db: &Db, now: i64) -> Result<TickReport> {
+pub fn tick(
+	db: &Db, now: i64, maintenance: &mut Maintenance,
+	mut policy: impl FnMut(
+		Phase,
+		&Context,
+		RecipeInput<'_>,
+	) -> std::result::Result<RecipeDecision, CallbackError<Error>>,
+) -> Result<TickReport> {
+	maintenance.bind(db);
 	let active: Vec<(i64, i64)> = db.with_conn(|c| {
 		Ok(c.prepare(
 			"SELECT campaign_id,repo_id FROM review_campaigns WHERE state='active' ORDER BY campaign_id",
@@ -440,8 +515,13 @@ pub fn tick(db: &Db, now: i64) -> Result<TickReport> {
 		.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?
 		.collect::<rusqlite::Result<_>>()?)
 	})?;
+	maintenance
+		.cursors
+		.retain(|(repo, campaign), _| active.binary_search(&(*campaign, *repo)).is_ok());
 	let mut report = TickReport::default();
 	for (campaign_id, repo_id) in active {
+		let key = (repo_id, campaign_id);
+		let cursor = maintenance.cursors.get(&key).copied();
 		let progress = db.with_conn(|c| {
 			transaction::immediate(c, |tx| {
 				let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -452,16 +532,22 @@ pub fn tick(db: &Db, now: i64) -> Result<TickReport> {
 					operator: true,
 					committed: &committed,
 				};
-				advance(&scope, campaign_id, now)
+				advance_checked(&scope, campaign_id, now, cursor, &mut policy)
 			})
 		});
-		let progress = match progress {
+		let (progress, next) = match progress {
 			Ok(progress) => progress,
 			Err(_) => {
 				report.failed += 1;
 				continue;
 			},
 		};
+		// Only successful SQL commit publishes process-local scan progress.
+		if let Some(next) = next.filter(|_| progress.finish.is_none()) {
+			maintenance.cursors.insert(key, next);
+		} else {
+			maintenance.cursors.remove(&key);
+		}
 		match progress.finish {
 			Some(Finish::Completed) => report.completed += 1,
 			Some(Finish::DeadlineReached) => report.deadline_reached += 1,

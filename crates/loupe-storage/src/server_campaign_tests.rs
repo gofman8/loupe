@@ -3,11 +3,15 @@ use loupe_core::{JobKind, JobState, WORKFLOW_CONTRACT_VERSION};
 use loupe_storage::{campaigns, generations, jobs, transaction, Conflict, Db, Error};
 
 use crate::admission_policy::CampaignPolicyV2 as ReviewPolicy;
-use crate::campaign_workflow::{self as campaign, KindHint, OpenCampaign, Opened, RequestedRef};
+use crate::campaign_workflow::{KindHint, OpenCampaign, Opened, RequestedRef};
 use crate::server_campaign_support as common;
+use crate::server_campaign_support::campaign;
 
 #[path = "server_campaign_v2_tests.rs"]
 mod v2;
+
+#[path = "server_campaign_maintenance_tests.rs"]
+mod maintenance;
 
 // Pinning only accepts complete object ids, so fixtures use full SHA-1s.
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -43,7 +47,8 @@ fn created(opened: Opened) -> (i64, i64) {
 	}
 }
 
-fn ready(tx: &rusqlite::Transaction<'_>, generation: i64) -> loupe_storage::Result<()> {
+pub(crate) fn ready(tx: &rusqlite::Transaction<'_>, generation: i64) -> loupe_storage::Result<()> {
+	use loupe_core::inventory_manifest::{ManifestEntry, ManifestHasher};
 	use rusqlite::OptionalExtension;
 	let repo: i64 = tx.query_row(
 		"SELECT repo_id FROM review_generations WHERE generation_id=?1",
@@ -56,9 +61,19 @@ fn ready(tx: &rusqlite::Transaction<'_>, generation: i64) -> loupe_storage::Resu
 		1,
 		&common::marked::agent::json::<Payload>("{}"),
 	)?;
+	let commit =
+		generations::get(&crate::test_support::scope(tx, repo), generation)?.unwrap().commit_sha;
+	let entry = crate::test_support::worker("synthetic manifest", |_, mark| {
+		ManifestEntry::new(mark, b"src.rs", 0o100644, SHA)
+	})
+	.unwrap();
+	let mut manifest = ManifestHasher::new(commit.expose(), 1).unwrap();
+	manifest.push(&entry).unwrap();
+	let bytes = manifest.bytes();
+	let digest = manifest.finish().unwrap();
 	tx.execute(
-		"UPDATE review_generations SET inventory_digest=zeroblob(32) WHERE generation_id=?1",
-		[generation],
+		"UPDATE review_generations SET inventory_digest=?2 WHERE generation_id=?1",
+		rusqlite::params![generation, digest.as_slice()],
 	)?;
 	let owner: Option<i64> = tx
 		.query_row(
@@ -74,7 +89,8 @@ fn ready(tx: &rusqlite::Transaction<'_>, generation: i64) -> loupe_storage::Resu
 		tx.last_insert_rowid()
 	};
 	// A ready baseline includes the immutable manifest seal, not just its digest.
-	tx.execute("INSERT INTO generation_manifests(generation_id,format_version,owner_job_id,expected_entry_count,received_entry_count,expected_digest,created_at,sealed_at) VALUES(?1,1,?2,0,0,zeroblob(32),0,0)",rusqlite::params![generation,owner])?;
+	tx.execute("INSERT INTO generation_manifests(generation_id,format_version,owner_job_id,expected_entry_count,received_entry_count,received_canonical_bytes,expected_digest,created_at,sealed_at) VALUES(?1,1,?2,1,1,?3,?4,0,0)",rusqlite::params![generation,owner,bytes,digest.as_slice()])?;
+	tx.execute("INSERT INTO generation_inventory(generation_id,path,source_path,raw_path,manifest_position,git_mode,blob_sha,entry_kind,disposition,disposition_reason,created_at) VALUES(?1,'src.rs','src.rs',?2,0,33188,?3,'tracked','context','fixture source',0)",rusqlite::params![generation,entry.raw_path(),entry.object_id()])?;
 	Ok(())
 }
 
@@ -92,14 +108,14 @@ fn idle_campaign(
 	ready(tx, generation)?;
 	campaign::activate_generation(&crate::test_support::scope(tx, repo_id), campaign_id, now)?;
 	tx.execute(
-		"UPDATE jobs SET state='succeeded',finished_at=?2 WHERE id=?1",
-		rusqlite::params![job_id, now],
+		"UPDATE jobs SET state='succeeded',finished_at=?2,head_sha=?3 WHERE id=?1",
+		rusqlite::params![job_id, now, SHA],
 	)?;
 	if has_work {
 		tx.execute(
 			"INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,
-			 source_refs,priority_band,created_at) VALUES(?1,'u','t','o','[]','high',0)",
-			[generation],
+			 source_refs,priority_band,created_by_job_id,created_at) VALUES(?1,'u','t','o','[{\"path\":\"src.rs\"}]','high',?2,0)",
+			rusqlite::params![generation, job_id],
 		)?;
 	}
 	Ok((campaign_id, generation))
@@ -695,10 +711,22 @@ fn deadline_cancels_only_queued_work_and_waits_for_the_leased_child() {
 	let db = fixture();
 	db.with_conn(|c| {
 		transaction::immediate(c, |tx| {
-			let (id, leased) = created(campaign::open(&crate::test_support::scope(tx,1), &request(RequestedRef::Branch(&common::marked::operator::text("main"))), &ReviewPolicy::default(), 0)?);
-			tx.execute("UPDATE jobs SET state='leased' WHERE id=?1", [leased])?;
-			tx.execute("INSERT INTO jobs(repo_id,kind,state,campaign_id,enqueued_at) VALUES(1,'survey','queued',?1,1)", [id])?;
-			let queued = tx.last_insert_rowid();
+			let policy = ReviewPolicy { survey_units_per_job: 1, ..ReviewPolicy::default() };
+			let (id, generation) = idle_campaign(tx, 1, &policy, 0, true)?;
+			tx.execute("INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,source_refs,created_at) VALUES(?1,'second','Second unit','Review boundary','[{\"path\":\"src.rs\"}]',0)",[generation])?;
+			let worker=loupe_storage::workers::insert(tx,&common::marked::operator::text("deadline"),loupe_storage::workers::WorkerKind::Worker,&[4;32],0)?;
+			let claim_policy=crate::scheduler::ClaimPolicy { active_surveys_per_repo: 2, ..Default::default() };
+			let req=loupe_storage::admission_candidates::Request {worker_id:worker,legacy_kinds:&[],phase_kinds:&[JobKind::<loupe_provenance::Db>::Survey],now:1,policy:&claim_policy,limit:1};
+			let mut children=Vec::new();
+			for capability in 5..7 {
+				let candidate=loupe_storage::admission_candidates::ranked_raw(tx,&req)?.remove(0);
+				let loupe_storage::admission_claim::Outcome::Uncommitted(claimed)=loupe_storage::admission_claim::materialize(tx,&candidate,&req,&[capability;32],22000)? else {panic!("coverage claim")};
+				assert_eq!(claimed.assigned_units.len(),1);
+				children.push(claimed.job.id);
+			}
+			let (leased,queued)=(children[0],children[1]);
+			// A real execution retry retains its original charge and exact assignment.
+			tx.execute("UPDATE jobs SET state='queued',worker_id=NULL,lease_expires_at=NULL,job_capability_hash=NULL,eligible_at=21600 WHERE id=?1",[queued])?;
 			assert_eq!(campaign::try_finish(&crate::test_support::scope(tx,1), id, 21599)?, None);
 			assert_eq!(jobs::get(&crate::test_support::scope(tx,1), queued)?.unwrap().state, JobState::Queued);
 			assert_eq!(campaign::try_finish(&crate::test_support::scope(tx,1), id, 21600)?, None);

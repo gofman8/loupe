@@ -7,7 +7,7 @@ use loupe_core::text::policy::{
 use loupe_core::text::{BoundedText, SourceRef};
 use loupe_core::{JobKind, Severity, WORKFLOW_CONTRACT_VERSION};
 use loupe_provenance::{Agent, Db};
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection, Transaction};
 
 use super::validation::{self, invalid, Failure, Planned, Result};
 use super::{CallbackError, RecipeDecision, RecipeInput};
@@ -47,12 +47,12 @@ pub enum PhaseSubject {
 	},
 }
 pub(super) fn profile_snapshot(
-	tx: &Transaction<'_>, repo: i64, generation: i64,
+	tx: &Connection, repo: i64, generation: i64,
 ) -> crate::Result<Option<crate::generations::FrozenProfile>> {
 	Ok(tx.query_row("SELECT profile_version,generated_profile,generated_profile_digest,generated_profile_source FROM review_generations WHERE generation_id=?1 AND repo_id=?2",params![generation,repo],|r|crate::ingress::profile::frozen_profile(r,0,1,2,3))?)
 }
 pub(super) fn assignment_snapshot<E: From<Error>>(
-	tx: &Transaction<'_>, repo: i64, job: i64, generation: i64,
+	tx: &Connection, repo: i64, job: i64, generation: i64,
 ) -> Result<Vec<AssignedUnit>, E> {
 	let rows=tx.prepare("SELECT review_unit_id,assignment_epoch,position,completed FROM job_assigned_review_units WHERE job_id=?1 AND EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?2 AND generation_id=?3) ORDER BY position LIMIT 33")?
 		.query_map(params![job,repo,generation],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<u64>>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -68,7 +68,7 @@ pub(super) fn assignment_snapshot<E: From<Error>>(
 	Ok(units)
 }
 pub(super) fn unit_snapshot<E: From<Error>>(
-	tx: &Transaction<'_>, repo: i64, id: i64, generation: i64, epoch: Option<u64>,
+	tx: &Connection, repo: i64, id: i64, generation: i64, epoch: Option<u64>,
 ) -> Result<AssignedUnit, E> {
 	unit_inner(tx, repo, id, generation, epoch).map_err(|error| match error {
 		Failure::Defect(reason) => Failure::Unit(id, reason),
@@ -76,7 +76,7 @@ pub(super) fn unit_snapshot<E: From<Error>>(
 	})
 }
 fn unit_inner<E: From<Error>>(
-	tx: &Transaction<'_>, repo: i64, id: i64, generation: i64, epoch: Option<u64>,
+	tx: &Connection, repo: i64, id: i64, generation: i64, epoch: Option<u64>,
 ) -> Result<AssignedUnit, E> {
 	let (mut unit,status,stale)=tx.query_row(
 		"SELECT u.review_unit_id,u.assignment_epoch,u.title,u.objective,u.source_refs,u.depends_on,u.closure_criteria,u.source,u.status,u.stale FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1 AND u.generation_id=?2 AND g.repo_id=?3",
@@ -111,7 +111,7 @@ fn unit_inner<E: From<Error>>(
 	Ok(unit)
 }
 pub(super) fn lead_snapshot<E: From<Error>>(
-	tx: &Transaction<'_>, id: i64, plan: &Planned,
+	tx: &Connection, id: i64, plan: &Planned,
 ) -> Result<PhaseSubject, E> {
 	let meta = crate::leads::get_metadata_raw(tx, plan.repo, id)?.ok_or_else(invalid)?;
 	if Some(meta.generation_id) != plan.generation
@@ -138,7 +138,7 @@ pub(super) fn lead_snapshot<E: From<Error>>(
 	Ok(PhaseSubject::Lead { id, commit, evidence })
 }
 pub(super) fn finding_snapshot<E: From<Error>>(
-	tx: &Transaction<'_>, id: i64, plan: &Planned,
+	tx: &Connection, id: i64, plan: &Planned,
 ) -> Result<PhaseSubject, E> {
 	let StoredEvidence::Recorded(details) =
 		crate::finding_details::read_review_evidence_raw(tx, plan.repo, id)?

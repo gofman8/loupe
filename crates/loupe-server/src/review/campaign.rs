@@ -1,7 +1,7 @@
 //! Resolve deployment policy; storage owns campaign selection and mutation.
 use loupe_provenance::Source;
 pub use loupe_storage::campaign_workflow::{
-	activate_generation, cancel, pin, replenish, try_finish, Finish, KindHint, OpenCampaign,
+	activate_generation, cancel, pin, replenish, Finish, KindHint, Maintenance, OpenCampaign,
 	Opened, RequestedRef, TickReport,
 };
 use loupe_storage::scope::RepoScope;
@@ -16,8 +16,22 @@ pub fn open<S: Source>(
 	loupe_storage::campaign_workflow::open(scope, new, &policy, now)
 }
 
-pub fn tick(db: &Db, now: i64) -> Result<TickReport> {
-	let report = loupe_storage::campaign_workflow::tick(db, now)?;
+pub fn try_finish(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Option<Finish>> {
+	loupe_storage::campaign_workflow::try_finish(
+		scope,
+		campaign_id,
+		now,
+		super::authority::admission_policy,
+	)
+}
+
+pub fn tick(db: &Db, now: i64, maintenance: &mut Maintenance) -> Result<TickReport> {
+	let report = loupe_storage::campaign_workflow::tick(
+		db,
+		now,
+		maintenance,
+		super::authority::admission_policy,
+	)?;
 	if report.failed != 0 {
 		tracing::warn!(failed = report.failed, "campaign transactions rolled back");
 	}

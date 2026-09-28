@@ -35,7 +35,7 @@ pub use delivery::{DeliverySnapshot, PhaseDelivery, PhaseSubject};
 pub use quarantine::Reason as Incompatibility;
 
 #[cfg(test)]
-mod validation_tests;
+pub(crate) mod validation_tests;
 
 pub const MAX_REPAIRS: u32 = 32;
 
@@ -466,9 +466,7 @@ fn work_class(kind: &JobKind, band: Band) -> Result<WorkClass> {
 	}
 }
 
-fn validate_parent(
-	tx: &Transaction<'_>, intent: &review_intents::Intent, kind: &JobKind,
-) -> Result<()> {
+fn validate_parent(tx: &Connection, intent: &review_intents::Intent, kind: &JobKind) -> Result<()> {
 	let parent = get_job(tx, intent.repo_id, intent.originating_job_id)?;
 	if parent.repo_id != intent.repo_id
 		|| parent.campaign_id != Some(intent.originating_campaign_id)
@@ -496,7 +494,7 @@ fn validate_parent(
 	Ok(())
 }
 
-fn validate_retry_subject(tx: &Transaction<'_>, job: &jobs::JobRow) -> Result<()> {
+fn validate_retry_subject(tx: &Connection, job: &jobs::JobRow) -> Result<()> {
 	let subject = match job.kind {
 		JobKind::Drilldown if job.target_finding_id.is_none() => {
 			Subject::Lead(job.assigned_lead_id.ok_or_else(conflict)?)

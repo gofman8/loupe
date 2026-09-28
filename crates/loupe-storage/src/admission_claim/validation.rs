@@ -1,15 +1,13 @@
 //! Read-only validation of original sources, before initialization or admission.
 use loupe_core::{JobKind, WORKFLOW_CONTRACT_VERSION};
 use rusqlite::types::ValueRef;
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use super::{CallbackError, RecipeDecision, RecipeInput};
-#[cfg(test)]
-use crate::admission_quarantine as quarantine;
 use crate::admission_quarantine::{Reason, Source};
 use crate::review_authority::{Context, Generation, Phase};
-use crate::{admission, jobs, review_intents, Conflict, Error};
+use crate::{admission, admission_quarantine as quarantine, jobs, review_intents, Conflict, Error};
 
 pub(crate) enum Failure<E> {
 	Defect(Reason),
@@ -94,7 +92,7 @@ pub(super) struct Planned {
 /// Recipes and commits are admitted from their actual scoped SQL columns;
 /// the host policy receives a closed variant for a not-yet-created job.
 pub(super) fn planned<E: From<Error>>(
-	tx: &Transaction<'_>, repo: i64, source: Source,
+	tx: &Connection, repo: i64, source: Source,
 	policy: &mut impl FnMut(
 		Phase,
 		&Context,
@@ -217,7 +215,7 @@ pub(super) fn planned<E: From<Error>>(
 	Ok(Some(Planned { repo, campaign, generation, phase, recipe, context }))
 }
 
-fn has_retry_history(tx: &Transaction<'_>, repo: i64, job: i64) -> crate::Result<bool> {
+fn has_retry_history(tx: &Connection, repo: i64, job: i64) -> crate::Result<bool> {
 	let assigned:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.job_id=?1 AND j.repo_id=?2)",params![job,repo],|r|r.get(0))?;
 	if assigned {
 		return Ok(true);
@@ -237,7 +235,7 @@ fn has_retry_history(tx: &Transaction<'_>, repo: i64, job: i64) -> crate::Result
 }
 
 pub(crate) fn validate_source<E: From<Error>>(
-	tx: &Transaction<'_>, repo: i64, source: Source,
+	tx: &Connection, repo: i64, source: Source,
 	policy: &mut impl FnMut(
 		Phase,
 		&Context,
@@ -329,7 +327,7 @@ pub(crate) fn validate_source<E: From<Error>>(
 	Ok(())
 }
 fn validate_pending_subject<E: From<Error>>(
-	tx: &Transaction<'_>, subject: review_intents::Subject, plan: &Planned,
+	tx: &Connection, subject: review_intents::Subject, plan: &Planned,
 ) -> Result<(), E> {
 	let intent = review_intents::get_subject_raw(tx, plan.repo, subject)?.ok_or_else(invalid)?;
 	super::validate_parent(tx, &intent, &plan.phase.job_kind())?;
@@ -352,16 +350,14 @@ fn validate_pending_subject<E: From<Error>>(
 	Ok(())
 }
 
-#[cfg(test)]
 pub(crate) struct MaintenanceProgress {
 	pub inspected: u32,
 	pub repaired: u32,
 	pub next: Option<quarantine::Cursor>,
 	pub scan_complete: bool,
 }
-#[cfg(test)]
 pub(crate) fn maintain_campaign<E: From<Error>>(
-	tx: &Transaction<'_>, campaign_scope: (i64, i64), now: i64, cursor: Option<quarantine::Cursor>,
+	tx: &Connection, campaign_scope: (i64, i64), now: i64, cursor: Option<quarantine::Cursor>,
 	max_rows: u32, max_repairs: u32,
 	policy: &mut impl FnMut(
 		Phase,
