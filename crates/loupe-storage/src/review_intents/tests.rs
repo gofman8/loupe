@@ -233,6 +233,53 @@ fn logical_revision_tracks_finishing_producer_and_positive_frozen_backoff() {
 	}).unwrap();
 }
 
+fn dependency_continuation_admission(verify: bool) {
+	for class in [ContinuationClass::SourceAnalysisRemaining, ContinuationClass::ExternalDependency]
+	{
+		fixture().with_conn(|conn| transaction::immediate(conn, |tx| {
+			lead(tx, 1)?;
+			ensure_drilldown_intent(&scope(tx, 1), 1, 101, NORMAL, 0)?;
+			child(tx, 110, Some(Subject::Lead(1)), 101, false)?;
+			admit_subject(&scope(tx, 1), Subject::Lead(1), 1, 110, 1)?;
+			let (subject, producer) = if verify {
+				finding(tx, 7, 1, 110)?;
+				ensure_verification_intent(&scope(tx, 1), 7, 110, NORMAL, 2)?;
+				child(tx, 111, Some(Subject::Finding(7)), 110, false)?;
+				admit_subject(&scope(tx, 1), Subject::Finding(7), 1, 111, 3)?;
+				(Subject::Finding(7), 111)
+			} else {
+				tx.execute("UPDATE leads SET status='deferred',defer_reason='remaining work',retry_condition='source_analysis_remaining' WHERE lead_id=1", [])?;
+				(Subject::Lead(1), 110)
+			};
+			tx.execute("UPDATE jobs SET state='succeeded' WHERE id=?1", [producer])?;
+			let intent = continue_subject(&scope(tx, 1), subject, producer, class, 100)?;
+			// Schema-valid corruption cannot turn an external dependency into
+			// admissible work; the source-analysis neighbor remains admissible.
+			tx.execute(&format!("UPDATE {} SET state='pending',block_reason=NULL,not_before=100", subject.table()), [])?;
+			child(tx, 200, Some(subject), producer, true)?;
+			let admitted = admit_subject(&scope(tx, 1), subject, intent.revision, 200, 101);
+			if class == ContinuationClass::ExternalDependency {
+				assert!(admitted.is_err(), "a due timestamp cannot authorize a dependency continuation");
+				assert_eq!(get_subject(&scope(tx, 1), subject)?.unwrap().state, State::Pending);
+			} else {
+				assert!(admitted.is_ok(), "due source-analysis continuation must remain admissible: {admitted:?}");
+				assert_eq!(get_subject(&scope(tx, 1), subject)?.unwrap().state, State::Admitted);
+			}
+			Ok(())
+		})).unwrap();
+	}
+}
+
+#[test]
+fn subject_admission_rejects_dependency_lead_continuation_despite_due_time() {
+	dependency_continuation_admission(false);
+}
+
+#[test]
+fn subject_admission_rejects_dependency_finding_continuation_despite_due_time() {
+	dependency_continuation_admission(true);
+}
+
 #[test]
 fn ownership_closed_subjects_and_first_live_lease_are_checked() {
 	let db = fixture();

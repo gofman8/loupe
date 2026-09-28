@@ -8,6 +8,25 @@ use super::{admission_error, column, invalid, utf8};
 use crate::admission_policy::CampaignPolicyV2;
 
 struct StoredV2Policy;
+
+struct LegacyPolicyCategory;
+impl Validate<&[u8], Db> for LegacyPolicyCategory {
+	type Output = bool;
+	type Error = std::convert::Infallible;
+	fn validate<'v>(
+		self, input: Unvalidated<'v, &[u8]>, _: Mark<'v, Db>,
+	) -> Result<bool, Self::Error> {
+		Ok(input.get().len() <= Payload::MAX_BYTES
+			&& utf8(input.get())
+				.ok()
+				.and_then(|raw| serde_json::from_str::<crate::scheduler::CampaignPolicy>(raw).ok())
+				.is_some_and(|policy| policy.version == 1))
+	}
+}
+/// Classification only: historical execution policy never grants admission.
+pub(crate) fn is_v1(row: &Row<'_>, raw: usize) -> rusqlite::Result<bool> {
+	Ok(column(row, raw)?.validate(LegacyPolicyCategory).unwrap_or_else(|never| match never {}))
+}
 impl Validate<&[u8], Db> for StoredV2Policy {
 	type Output = CampaignPolicyV2;
 	type Error = Error;

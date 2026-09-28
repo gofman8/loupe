@@ -139,6 +139,53 @@ pub fn policy(
 	))
 }
 
+/// The same strict recipe policy, without transaction or persistence access.
+/// Planned variants are host choices; stored text is never reconstructed.
+pub fn admission_policy(
+	phase: Phase, context: &stored::Context, input: loupe_storage::admission_claim::RecipeInput<'_>,
+) -> std::result::Result<
+	loupe_storage::admission_claim::RecipeDecision,
+	loupe_storage::admission_claim::CallbackError<Error>,
+> {
+	use loupe_storage::admission_claim::{
+		CallbackError, Incompatibility, RecipeDecision as D, RecipeInput,
+	};
+	let recipe = match input {
+		RecipeInput::Stored(raw) => raw
+			.and_then(|raw| serde_json::from_str::<Recipe>(raw.expose()).ok())
+			.ok_or(CallbackError::Incompatible(Incompatibility::InvalidData))?,
+		RecipeInput::Planned(decision) => match decision {
+			D::Bootstrap | D::Coverage | D::Incremental => Recipe::Survey {
+				_version: Version1,
+				_assignment_key: AssignmentKey::Ordinary,
+				recipe: match decision {
+					D::Bootstrap => SurveyRecipe::Bootstrap,
+					D::Coverage => SurveyRecipe::Coverage,
+					_ => SurveyRecipe::Incremental,
+				},
+			},
+			D::Drilldown => Recipe::Drilldown { _version: Version1 },
+			D::Verify => Recipe::Verify { _version: Version1 },
+		},
+	};
+	if recipe.phase() != phase {
+		return Err(CallbackError::Incompatible(Incompatibility::InvalidData));
+	}
+	if !recipe.supported(context, Access::Checkout) {
+		return Err(CallbackError::Incompatible(Incompatibility::UnsupportedRecipe));
+	}
+	Ok(match recipe {
+		Recipe::Survey { recipe: SurveyRecipe::Bootstrap, .. } => D::Bootstrap,
+		Recipe::Survey { recipe: SurveyRecipe::Coverage, .. } => D::Coverage,
+		Recipe::Survey { recipe: SurveyRecipe::Incremental, .. } => D::Incremental,
+		Recipe::Drilldown { .. } => D::Drilldown,
+		Recipe::Verify { .. } => D::Verify,
+		Recipe::Survey { .. } => {
+			return Err(CallbackError::Incompatible(Incompatibility::UnsupportedRecipe))
+		},
+	})
+}
+
 #[cfg(test)]
 #[path = "authority_tests.rs"]
 mod tests;

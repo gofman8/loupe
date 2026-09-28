@@ -75,6 +75,7 @@ fn partial_continuation_carries_untouched_members_across_two_handoffs() {
 				hold_units(tx, 3)?;
 				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=101", [])?;
 				let first = freeze_survey_batches(&scope(tx, 1), 101, 0)?.remove(0);
+				validate_pending_batch(tx, 1, first.batch_id)?;
 				child(tx, 110, None, 101, true)?;
 				let original_assignment =
 					admit_exact_batch(&scope(tx, 1), first.batch_id, 110, 60)?;
@@ -93,6 +94,7 @@ fn partial_continuation_carries_untouched_members_across_two_handoffs() {
 				)?;
 				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=110", [])?;
 				let second = freeze_survey_batches(&scope(tx, 1), 110, 62)?;
+				validate_pending_batch(tx, 1, second[0].batch_id)?;
 				assert_eq!(second.len(), 1);
 				let members = batch_holds(&scope(tx, 1), second[0].batch_id)?;
 				assert_eq!(
@@ -135,6 +137,7 @@ fn partial_continuation_carries_untouched_members_across_two_handoffs() {
 				);
 				tx.execute("UPDATE jobs SET state='succeeded' WHERE id=111", [])?;
 				let third = freeze_survey_batches(&scope(tx, 1), 111, 200)?;
+				validate_pending_batch(tx, 1, third[0].batch_id)?;
 				assert_eq!(third.len(), 1, "zero-progress terminalization still needs a handoff");
 				assert_eq!(third[0].logical_sequence, 3);
 				child(tx, 112, None, 111, true)?;
@@ -314,6 +317,15 @@ fn carried_batch_admission_rechecks_original_evidence_and_exact_handoff_epoch() 
 						}
 						Ok(second)
 					})?;
+				assert!(
+					transaction::immediate(conn, |tx| validate_pending_batch(
+						tx,
+						1,
+						batch.batch_id
+					))
+					.is_err(),
+					"maintenance accepted {damage}"
+				);
 				assert!(
 					transaction::immediate(conn, |tx| admit_exact_batch(
 						&scope(tx, 1),

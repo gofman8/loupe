@@ -34,6 +34,10 @@ const PHASE_FINDING_TARGET_SQL: &str = "(
  OR EXISTS(SELECT 1 FROM finding_verification_intents i WHERE i.finding_id=jobs.target_finding_id)
  OR EXISTS(SELECT 1 FROM findings f JOIN jobs p ON p.id=f.job_id WHERE f.id=jobs.target_finding_id AND p.campaign_id IS NOT NULL))";
 
+pub(crate) fn targets_phase_finding(conn: &Connection, repo: i64, job: i64) -> crate::Result<bool> {
+	Ok(conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?2 AND {PHASE_FINDING_TARGET_SQL})"), params![job,repo], |row| row.get(0))?)
+}
+
 /// Widen only when the runtime can authorize and finish the added kinds.
 pub const RUNTIME_KINDS: &[JobKind<DbSource>] = &[JobKind::Scan, JobKind::Verify];
 

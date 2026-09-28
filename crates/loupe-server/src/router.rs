@@ -106,10 +106,10 @@ pub fn router(state: AppState) -> Router {
 		.with_state(state)
 		.layer(axum::middleware::from_fn(
 			|req: axum::extract::Request, next: axum::middleware::Next| async move {
-				let (phase,control)=req.extensions().get::<axum::extract::MatchedPath>()
-     .map(|path|(crate::review::http::is_phase_route(path.as_str()),crate::review::http::is_control_route(path.as_str()))).unwrap_or_default();
+				let (phase,control,lease)=req.extensions().get::<axum::extract::MatchedPath>()
+     .map(|path|(crate::review::http::is_phase_route(path.as_str()),crate::review::http::is_control_route(path.as_str()),path.as_str()=="/v1/jobs/lease")).unwrap_or_default();
 				let resp = next.run(req).await;
-				let mut resp = if phase { crate::review::http::bound_phase_errors(resp).await } else if control {crate::review::http::bound_control_errors(resp).await} else { resp };
+				let mut resp = if lease {crate::review::http::bound_lease_response(resp).await} else if phase { crate::review::http::bound_phase_errors(resp).await } else if control {crate::review::http::bound_control_errors(resp).await} else { resp };
 				#[expect(clippy::expect_used, reason = "decimal formatting of the fixed u16 protocol version produces only ASCII header digits")]
 				let version = PROTOCOL_VERSION.to_string().parse().expect("u16 parses as header value");
 				resp.headers_mut().insert(

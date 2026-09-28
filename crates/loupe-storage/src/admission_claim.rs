@@ -1,33 +1,231 @@
-//! Transactional materialization of one ranked admission candidate.
+//! Validated worker delivery owns one complete admission transaction.
+//! No raw SQL or unvalidated claim-and-commit API escapes this owner.
 //!
-//! Dormant private leaf: compiled under cfg(test) until the validated runtime
-//! consumer owns the complete transaction and delivery callback. No public SQL
-//! or unvalidated claim-and-commit API is exposed in this staged commit.
+//! The public facade intersects advertised kinds with runtime gates and owns
+//! the IMMEDIATE transaction through complete bounded delivery. Its private
+//! materialization leaf never commits or grants standalone delivery authority.
 //!
-//! This leaf does not activate any runtime kind. Callers must use an immediate
-//! transaction, intersect their advertised kinds with runtime gates, and validate
-//! recipes, evidence and the complete delivery envelope before committing. Any
-//! error (including subsequent serialization failure) requires rollback of the
-//! entire candidate attempt. A returned job is not delivery authorization.
-//!
-//! Before calling this leaf, the consumer must reject a ready ordinary execution
+//! Before calling the leaf, validation rejects a ready ordinary execution
 //! retry whose assignment rows and InitializeSurveyBatch checkpoint are both
 //! missing. Otherwise initialization would conceal the lost history by selecting
 //! new work. Unpinned/bootstrap attempts require the consumer's explicit recipe
 //! exception; the storage leaf does not maintain a second recipe parser.
 
 use loupe_core::{JobState, WORKFLOW_CONTRACT_VERSION};
-use loupe_provenance::{Db as DbSource, Source};
+use loupe_provenance::{Db as DbSource, Ingress, Source, Worker};
 type JobKind = loupe_core::JobKind<DbSource>;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::admission::{self, CapacityRefusal, Charged, Selection, WorkClass};
 use crate::admission_candidates::{self, Candidate, CandidateKind, Request};
+#[cfg(test)]
 use crate::admission_policy::CampaignPolicyV2;
-use crate::admission_preparation::{create_preparation, frozen_policy, insert_job, NewJob};
+#[cfg(test)]
+use crate::admission_preparation::create_preparation;
+use crate::admission_preparation::{frozen_policy, insert_job, NewJob};
+use crate::admission_quarantine::{self as quarantine, Source as AdmissionSource};
+use crate::review_authority::{Context, Phase, RecipeText};
 use crate::review_intents::{self, IntentKind, Subject};
 use crate::scheduler::{self, Band, Claimed};
 use crate::{campaigns, jobs, unit_holds, Conflict, Entity, Error, Result};
+
+mod delivery;
+pub(crate) mod validation;
+pub use delivery::{DeliverySnapshot, PhaseDelivery, PhaseSubject};
+pub use quarantine::Reason as Incompatibility;
+
+#[cfg(test)]
+mod validation_tests;
+
+pub const MAX_REPAIRS: u32 = 32;
+
+// debug-ok: recipes are closed host policy categories without model text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipeDecision {
+	Bootstrap,
+	Coverage,
+	Incremental,
+	Drilldown,
+	Verify,
+}
+impl RecipeDecision {
+	pub fn phase(self) -> Phase {
+		match self {
+			Self::Bootstrap | Self::Coverage | Self::Incremental => Phase::Survey,
+			Self::Drilldown => Phase::Drilldown,
+			Self::Verify => Phase::Verify,
+		}
+	}
+}
+
+/// Stored input retains its original SQL mark; planned input is host-owned.
+pub enum RecipeInput<'a> {
+	Stored(Option<&'a loupe_core::text::BoundedText<RecipeText, DbSource>>),
+	Planned(RecipeDecision),
+}
+
+/// Only explicit permanent incompatibility permits quarantine. Unexpected
+/// callback failures abort the entire transaction, including earlier repairs.
+pub enum CallbackError<E> {
+	Incompatible(Incompatibility),
+	Unexpected(E),
+}
+impl<E> std::fmt::Debug for CallbackError<E> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Incompatible(reason) => f.debug_tuple("Incompatible").field(reason).finish(),
+			Self::Unexpected(_) => f.write_str("Unexpected([redacted])"),
+		}
+	}
+}
+
+pub struct DeliveryRequest<'a> {
+	pub worker_id: i64,
+	pub legacy_kinds: &'a [loupe_core::JobKind<Worker>],
+	pub phase_kinds: &'a [loupe_core::JobKind<Worker>],
+	pub policy: &'a scheduler::ClaimPolicy,
+	pub capability_hash: &'a [u8; 32],
+	pub legacy_lease_seconds: i64,
+}
+
+/// Clock, active actor, ranking, validation and bounded delivery all execute
+/// under the same IMMEDIATE lock. Only owned callback output can escape.
+pub fn claim_with_delivery<T, E: From<Error>>(
+	db: &crate::Db, _worker: &Ingress<Worker>, request: &DeliveryRequest<'_>,
+	clock: impl FnOnce() -> i64, repairs_left: &mut u32,
+	policy: &mut impl FnMut(
+		Phase,
+		&Context,
+		RecipeInput<'_>,
+	) -> std::result::Result<RecipeDecision, CallbackError<E>>,
+	deliver: &mut impl FnMut(DeliverySnapshot) -> std::result::Result<T, CallbackError<E>>,
+) -> std::result::Result<Option<T>, E> {
+	if *repairs_left > MAX_REPAIRS {
+		return Err(Error::Conflict(Conflict::CampaignPolicy).into());
+	}
+	let mut remaining = *repairs_left;
+	let output = db
+		.with_conn(|conn| {
+			let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+			let now = clock();
+			let legacy: Vec<_> = request
+				.legacy_kinds
+				.iter()
+				.filter(|kind| {
+					jobs::RUNTIME_KINDS
+						.iter()
+						.any(|allowed| kind.is_known() && kind.as_str() == allowed.as_str())
+				})
+				.cloned()
+				.collect();
+			let phases: Vec<_> = request
+				.phase_kinds
+				.iter()
+				.filter(|kind| {
+					jobs::RUNTIME_KINDS
+						.iter()
+						.any(|allowed| kind.is_known() && kind.as_str() == allowed.as_str())
+						&& scheduler::PHASE_RUNTIME_KINDS
+							.iter()
+							.any(|allowed| kind.as_str() == allowed.as_str())
+				})
+				.cloned()
+				.collect();
+			let req = Request {
+				worker_id: request.worker_id,
+				legacy_kinds: &legacy,
+				phase_kinds: &phases,
+				now,
+				policy: request.policy,
+				limit: 1,
+			};
+			let result = claim_in_transaction(
+				&tx,
+				&req,
+				request.capability_hash,
+				request.legacy_lease_seconds,
+				&mut remaining,
+				policy,
+				deliver,
+			);
+			match result {
+				Ok(value) => {
+					tx.commit()?;
+					Ok(Ok(value))
+				},
+				Err(error) => Ok(Err(error)),
+			}
+		})
+		.map_err(E::from)??;
+	*repairs_left = remaining;
+	Ok(output)
+}
+
+fn claim_in_transaction<T, E: From<Error>, S: Source>(
+	tx: &Transaction<'_>, req: &Request<'_, S>, hash: &[u8; 32], legacy_seconds: i64,
+	repairs_left: &mut u32,
+	policy: &mut impl FnMut(
+		Phase,
+		&Context,
+		RecipeInput<'_>,
+	) -> std::result::Result<RecipeDecision, CallbackError<E>>,
+	deliver: &mut impl FnMut(DeliverySnapshot) -> std::result::Result<T, CallbackError<E>>,
+) -> std::result::Result<Option<T>, E> {
+	let active = tx.query_row("SELECT EXISTS(SELECT 1 FROM workers WHERE id=?1 AND kind='worker' AND revoked_at IS NULL)", [req.worker_id], |row| row.get::<_, bool>(0)).map_err(Error::from)?;
+	if !active || req.now < 0 {
+		return Err(conflict().into());
+	}
+	while *repairs_left > 0 {
+		let Some(candidate) =
+			admission_candidates::ranked_raw(tx, &Request { limit: 1, ..*req })?.into_iter().next()
+		else {
+			return Ok(None);
+		};
+		let source = validation::source(&candidate);
+		tx.execute_batch("SAVEPOINT review_candidate").map_err(Error::from)?;
+		let attempt = (|| -> validation::Result<Option<T>, E> {
+			validation::validate_source(tx, candidate.repo_id, source, policy)?;
+			let selected = match materialize(tx, &candidate, req, hash, legacy_seconds)? {
+				Outcome::Uncommitted(selected) => selected,
+				Outcome::Stale => return Ok(None),
+				Outcome::CapacityRefused(_reason) => return Ok(None),
+			};
+			let snapshot = delivery::snapshot(tx, &selected.job, policy)?;
+			Ok(Some(deliver(snapshot).map_err(validation::Failure::from)?))
+		})();
+		let (target, reason) = match attempt {
+			Ok(Some(value)) => {
+				tx.execute_batch("RELEASE review_candidate").map_err(Error::from)?;
+				return Ok(Some(value));
+			},
+			Ok(None) => {
+				tx.execute_batch("ROLLBACK TO review_candidate; RELEASE review_candidate")
+					.map_err(Error::from)?;
+				return Ok(None);
+			},
+			Err(validation::Failure::Unexpected(error)) => return Err(error),
+			Err(validation::Failure::Defect(reason)) => (source, reason),
+			Err(validation::Failure::Unit(id, reason)) => {
+				if let AdmissionSource::Ordinary(generation) = source {
+					let owned = tx.query_row("SELECT EXISTS(SELECT 1 FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1 AND u.generation_id=?2 AND g.repo_id=?3)", params![id,generation,candidate.repo_id], |row| row.get::<_,bool>(0)).map_err(Error::from)?;
+					if !owned {
+						return Err(Error::ScopeDenied.into());
+					}
+					(AdmissionSource::Unit(id), reason)
+				} else {
+					(source, reason)
+				}
+			},
+		};
+		tx.execute_batch("ROLLBACK TO review_candidate; RELEASE review_candidate")
+			.map_err(Error::from)?;
+		if !quarantine::hold(tx, candidate.repo_id, target, reason, req.now)? {
+			return Err(conflict().into());
+		}
+		*repairs_left -= 1;
+	}
+	Ok(None)
+}
 
 // debug-ok: typed job owners redact content; other alternatives are closed metadata.
 #[derive(Debug)]

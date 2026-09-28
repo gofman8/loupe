@@ -18,7 +18,14 @@ impl AsRef<[u8]> for CredentialBody {
 pub(super) fn lease(
 	value: &LeaseResponse<loupe_provenance::Agent, loupe_provenance::Db>,
 ) -> Result<Response, (StatusCode, String)> {
-	response(value.credential_json(), StatusCode::OK)
+	response(
+		value.credential_json_bounded(crate::review::scheduler::PHASE_LEASE_RESPONSE_LIMIT),
+		StatusCode::OK,
+	)
+}
+
+pub(crate) fn encoded_lease(encoded: Secret<Vec<u8>>) -> Response {
+	owned_response(encoded, StatusCode::OK)
 }
 
 pub(super) fn worker(value: &RegisterWorkerResponse) -> Result<Response, (StatusCode, String)> {
@@ -31,8 +38,12 @@ fn response(
 	let encoded = encoded.map_err(|_| {
 		(StatusCode::INTERNAL_SERVER_ERROR, "credential response encoding failed".to_owned())
 	})?;
-	Ok((status, [(CONTENT_TYPE, "application/json")], Bytes::from_owner(CredentialBody(encoded)))
-		.into_response())
+	Ok(owned_response(encoded, status))
+}
+
+fn owned_response(encoded: Secret<Vec<u8>>, status: StatusCode) -> Response {
+	(status, [(CONTENT_TYPE, "application/json")], Bytes::from_owner(CredentialBody(encoded)))
+		.into_response()
 }
 
 #[cfg(test)]

@@ -24,11 +24,10 @@
 
 pub mod admission;
 pub mod admission_candidates;
-// Dormant until campaign/admission consumers own validation and commit.
-#[cfg(test)]
-mod admission_claim;
+pub mod admission_claim;
 pub mod admission_policy;
 mod admission_preparation;
+mod admission_quarantine;
 mod campaign_work;
 pub mod campaign_workflow;
 pub mod campaigns;

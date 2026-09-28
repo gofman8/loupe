@@ -296,6 +296,22 @@ optional_exit!(
 );
 
 db_field!(StoredDbPayload, db_payload, BoundedJson, policy::Payload, existing);
+agent_field!(
+	StoredReviewFindingTitle,
+	AgentReviewFindingTitle,
+	review_finding_title,
+	BoundedText,
+	policy::ReviewFindingTitle,
+	admission
+);
+agent_field!(
+	StoredReviewFindingDescription,
+	AgentReviewFindingDescription,
+	review_finding_description,
+	BoundedText,
+	policy::ReviewFindingDescription,
+	admission
+);
 optional_exit!(optional_db_payload, db_payload, BoundedJson<policy::Payload, Db>);
 
 db_field!(StoredClientKey, client_key, Identifier, policy::ClientKey, existing);
@@ -341,6 +357,42 @@ optional_exit!(optional_instance, instance, Anchor<policy::InstanceKey, Agent>);
 
 pub(crate) fn job_kind(row: &Row<'_>, index: usize) -> rusqlite::Result<loupe_core::JobKind<Db>> {
 	Ok(loupe_core::JobKind::from_text(job_kind_text(row, index)?))
+}
+
+/// Numeric dependency projection from the original SQL token. Bound the list
+/// during parsing; no text owner, relabelling or normalized JSON is involved.
+pub(crate) fn admission_dependencies(row: &Row<'_>, index: usize) -> rusqlite::Result<Vec<i64>> {
+	use serde::de::{Error as _, SeqAccess, Visitor};
+	use serde::Deserializer as _;
+	if is_null(row, index)? {
+		return Ok(Vec::new());
+	}
+	struct Dependencies;
+	impl<'de> Visitor<'de> for Dependencies {
+		type Value = Vec<i64>;
+		fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			f.write_str("bounded review dependencies")
+		}
+		fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+			let mut values = Vec::new();
+			while let Some(value) = seq.next_element::<i64>()? {
+				if values.len() == 8 {
+					return Err(A::Error::custom("too many review dependencies"));
+				}
+				values.push(value);
+			}
+			Ok(values)
+		}
+	}
+	let raw = row.get_ref(index)?.as_str()?;
+	if raw.len() > loupe_core::text::policy::LEGACY_TEXT_MAX_BYTES {
+		return Err(admission_error(index, invalid()));
+	}
+	let mut decoder = serde_json::Deserializer::from_str(raw);
+	let values =
+		decoder.deserialize_seq(Dependencies).map_err(|_| admission_error(index, invalid()))?;
+	decoder.end().map_err(|_| admission_error(index, invalid()))?;
+	Ok(values)
 }
 
 struct StoredPath;

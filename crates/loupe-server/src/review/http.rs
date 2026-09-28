@@ -138,10 +138,20 @@ pub fn is_control_route(path: &str) -> bool {
 	matches!(path, "/v1/jobs/{id}/complete" | "/v1/jobs/{id}/heartbeat" | "/v1/jobs/{id}/cancel")
 }
 
-pub async fn bound_phase_errors(response: Response) -> Response {
-	bound_errors(response, false).await
+pub async fn bound_lease_response(response: Response) -> Response {
+	let mut response = bound_errors(response, Some(legacy_lease_diagnostic)).await;
+	response
+		.headers_mut()
+		.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+	response
 }
-async fn bound_errors(response: Response, control: bool) -> Response {
+
+pub async fn bound_phase_errors(response: Response) -> Response {
+	bound_errors(response, None).await
+}
+type LegacyDiagnostic = fn(StatusCode, &[u8]) -> Option<String>;
+
+async fn bound_errors(response: Response, diagnostic: Option<LegacyDiagnostic>) -> Response {
 	if !response.status().is_client_error() && !response.status().is_server_error() {
 		return response;
 	}
@@ -157,7 +167,9 @@ async fn bound_errors(response: Response, control: bool) -> Response {
 				.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
 			return Response::from_parts(parts, Body::from(bytes));
 		}
-		if control && let Some(message) = legacy_control_diagnostic(parts.status, &bytes) {
+		if let Some(diagnostic) = diagnostic
+			&& let Some(message) = diagnostic(parts.status, &bytes)
+		{
 			// Reconstruct only closed host messages, never forward untrusted suffixes.
 			let mut response = (parts.status, message).into_response();
 			response
@@ -181,29 +193,34 @@ async fn bound_errors(response: Response, control: bool) -> Response {
 }
 
 pub async fn bound_control_errors(response: Response) -> Response {
-	bound_errors(response, true).await
+	bound_errors(response, Some(legacy_control_diagnostic)).await
 }
 
-/// Preserve the landed legacy diagnostic vocabulary on shared controls only.
-/// Every match is status-bound and exact; no Policy/SQL text or arbitrary
-/// suffix is reflected, even when it starts with a recognized host prefix.
+const LEGACY_DATA_CATEGORIES: &[&str] = &[
+	"missing field",
+	"duplicate field",
+	"invalid type",
+	"unknown field",
+	"unknown variant",
+	"invalid data",
+];
+
+fn legacy_lease_diagnostic(status: StatusCode, bytes: &[u8]) -> Option<String> {
+	let raw = std::str::from_utf8(bytes).ok()?;
+	const MEDIA: &str = "Expected request with Content-Type: application/json";
+	if status == StatusCode::UNSUPPORTED_MEDIA_TYPE && raw == MEDIA {
+		return Some(MEDIA.to_owned());
+	}
+	legacy_request_diagnostic(status, raw)
+}
+
+/// Control-specific diagnostics never become lease or phase diagnostics.
 fn legacy_control_diagnostic(status: StatusCode, bytes: &[u8]) -> Option<String> {
 	let raw = std::str::from_utf8(bytes).ok()?;
-	const CATEGORIES: &[&str] = &[
-		"missing field",
-		"duplicate field",
-		"invalid type",
-		"unknown field",
-		"unknown variant",
-		"invalid data",
-	];
 	let fixed = match status {
 		StatusCode::BAD_REQUEST => &[
 			"invalid heartbeat body: invalid JSON syntax",
-			"Failed to parse the request body as JSON: invalid syntax",
 			"successful scan completion requires non-empty head_sha",
-			"X-Loupe-Protocol must be an integer",
-			"X-Loupe-Protocol must be valid ASCII",
 		][..],
 		StatusCode::CONFLICT => &["successful verify completion requires a submitted verdict"][..],
 		_ => &[],
@@ -211,20 +228,29 @@ fn legacy_control_diagnostic(status: StatusCode, bytes: &[u8]) -> Option<String>
 	if let Some(message) = fixed.iter().find(|message| **message == raw) {
 		return Some((*message).to_owned());
 	}
-	let prefix = match status {
-		StatusCode::BAD_REQUEST => "invalid heartbeat body: ",
-		StatusCode::UNPROCESSABLE_ENTITY => {
-			"Failed to deserialize the JSON body into the target type: "
-		},
-		_ => return None,
-	};
-	if let Some(category) = raw
-		.strip_prefix(prefix)
-		.and_then(|suffix| CATEGORIES.iter().find(|category| **category == suffix))
+	if status == StatusCode::BAD_REQUEST
+		&& let Some(category) = raw
+			.strip_prefix("invalid heartbeat body: ")
+			.and_then(|suffix| LEGACY_DATA_CATEGORIES.iter().find(|category| **category == suffix))
 	{
-		return Some(format!("{prefix}{category}"));
+		return Some(format!("invalid heartbeat body: {category}"));
 	}
+	legacy_request_diagnostic(status, raw)
+}
+
+/// Reconstruct only the finite landed request vocabulary on matched legacy
+/// routes. Every match is status-bound and exact; Policy/SQL text and arbitrary
+/// suffixes are never reflected.
+fn legacy_request_diagnostic(status: StatusCode, raw: &str) -> Option<String> {
 	if status == StatusCode::BAD_REQUEST {
+		const FIXED: &[&str] = &[
+			"Failed to parse the request body as JSON: invalid syntax",
+			"X-Loupe-Protocol must be an integer",
+			"X-Loupe-Protocol must be valid ASCII",
+		];
+		if let Some(message) = FIXED.iter().find(|message| **message == raw) {
+			return Some((*message).to_owned());
+		}
 		for prefix in ["unsupported protocol_version ", "unsupported X-Loupe-Protocol "] {
 			if let Some(suffix) = raw.strip_prefix(prefix)
 				&& let Ok(version) = suffix.parse::<u16>()
@@ -232,6 +258,14 @@ fn legacy_control_diagnostic(status: StatusCode, bytes: &[u8]) -> Option<String>
 			{
 				return Some(format!("{prefix}{version}"));
 			}
+		}
+	} else if status == StatusCode::UNPROCESSABLE_ENTITY {
+		const PREFIX: &str = "Failed to deserialize the JSON body into the target type: ";
+		if let Some(category) = raw
+			.strip_prefix(PREFIX)
+			.and_then(|suffix| LEGACY_DATA_CATEGORIES.iter().find(|category| **category == suffix))
+		{
+			return Some(format!("{PREFIX}{category}"));
 		}
 	}
 	None
@@ -329,6 +363,78 @@ pub fn response(value: &impl Serialize, limit: usize) -> Result<Response> {
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn lease_boundary_preserves_only_known_request_diagnostics() {
+		let mut cases = vec![
+			(
+				StatusCode::UNSUPPORTED_MEDIA_TYPE,
+				"Expected request with Content-Type: application/json".to_owned(),
+			),
+			(
+				StatusCode::BAD_REQUEST,
+				"Failed to parse the request body as JSON: invalid syntax".to_owned(),
+			),
+			(StatusCode::BAD_REQUEST, "unsupported protocol_version 65535".to_owned()),
+			(StatusCode::BAD_REQUEST, "unsupported X-Loupe-Protocol 65535".to_owned()),
+			(StatusCode::BAD_REQUEST, "X-Loupe-Protocol must be an integer".to_owned()),
+			(StatusCode::BAD_REQUEST, "X-Loupe-Protocol must be valid ASCII".to_owned()),
+		];
+		for category in [
+			"missing field",
+			"duplicate field",
+			"invalid type",
+			"unknown field",
+			"unknown variant",
+			"invalid data",
+		] {
+			cases.push((
+				StatusCode::UNPROCESSABLE_ENTITY,
+				format!("Failed to deserialize the JSON body into the target type: {category}"),
+			));
+		}
+		for (status, message) in cases {
+			let response = bound_lease_response((status, message.clone()).into_response()).await;
+			assert_eq!(response.status(), status);
+			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+			let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+			assert_eq!(
+				bytes.as_ref(),
+				message.as_bytes(),
+				"lease boundary must preserve the exact closed request diagnostic"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn lease_boundary_keeps_unknown_control_suffix_oversize_and_auth_errors_closed() {
+		const SENTINEL: &str = "FAKE_UNTRUSTED_LEASE_DIAGNOSTIC";
+		for (status, message) in [
+			(StatusCode::BAD_REQUEST, SENTINEL.to_owned()),
+			(StatusCode::BAD_REQUEST, format!("Failed to parse the request body as JSON: invalid syntax {SENTINEL}")),
+			(StatusCode::UNPROCESSABLE_ENTITY, format!("Failed to deserialize the JSON body into the target type: missing field {SENTINEL}")),
+			(StatusCode::UNSUPPORTED_MEDIA_TYPE, format!("Expected request with Content-Type: application/json {SENTINEL}")),
+			(StatusCode::BAD_REQUEST, "unsupported X-Loupe-Protocol 65536".to_owned()),
+			(StatusCode::BAD_REQUEST, "unsupported X-Loupe-Protocol 065535".to_owned()),
+			(StatusCode::BAD_REQUEST, "unsupported protocol_version +3".to_owned()),
+			(StatusCode::BAD_REQUEST, format!("unsupported protocol_version 65535{SENTINEL}")),
+			(StatusCode::BAD_REQUEST, SENTINEL.repeat(1000)),
+			(StatusCode::FORBIDDEN, "Failed to parse the request body as JSON: invalid syntax".to_owned()),
+			(StatusCode::UNAUTHORIZED, "X-Loupe-Protocol must be an integer".to_owned()),
+			(StatusCode::INTERNAL_SERVER_ERROR, "Expected request with Content-Type: application/json".to_owned()),
+			(StatusCode::BAD_REQUEST, "invalid heartbeat body: missing field".to_owned()),
+			(StatusCode::BAD_REQUEST, "successful scan completion requires non-empty head_sha".to_owned()),
+			(StatusCode::CONFLICT, "successful verify completion requires a submitted verdict".to_owned()),
+		] {
+			let response = bound_lease_response((status, message).into_response()).await;
+			assert_eq!(response.status(), status);
+			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+			let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+			let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+			assert_eq!(value["error"]["detail"], serde_json::Value::Null);
+			assert!(!std::str::from_utf8(&bytes).unwrap().contains(SENTINEL));
+		}
+	}
+
 	#[tokio::test]
 	async fn shared_controls_preserve_only_reconstructed_known_diagnostics() {
 		for (status, message) in [
