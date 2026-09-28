@@ -83,8 +83,51 @@ pub fn create<KeyS: Source>(
 		0
 	};
 	inventory::verify_refs(scope, new.generation_id, new.source_refs.as_slice())?;
-	tx.execute("INSERT INTO review_units (generation_id,client_review_unit_key,title,objective,priority_band,priority_proposal,source_refs,depends_on,closure_criteria,semantic_context,carry_depth,carried_from_review_unit_id,created_by_job_id,created_at)
- SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14 WHERE EXISTS(SELECT 1 FROM review_generations WHERE generation_id=?1 AND repo_id=?15)",params![new.generation_id,new.client_key.expose(),new.title.expose(),new.objective.expose(),new.priority.as_str(),new.priority_proposal.map(BoundedJson::expose),new.source_refs.expose(),new.depends_on.map(BoundedJson::expose),new.closure_criteria.map(BoundedText::expose),new.semantic_context.map(BoundedJson::expose),depth,new.carried_from,new.created_by_job,now,scope.repo_id])
+	insert_admitted(
+		tx,
+		repo,
+		&AdmittedUnit {
+			generation: new.generation_id,
+			key: new.client_key.expose(),
+			title: new.title,
+			objective: new.objective,
+			priority: new.priority,
+			proposal: new.priority_proposal.map(BoundedJson::expose),
+			refs: new.source_refs,
+			dependencies: new.depends_on.map(BoundedJson::expose),
+			closure: new.closure_criteria.map(BoundedText::expose),
+			context: new.semantic_context.map(BoundedJson::expose),
+			carry_depth: depth,
+			carried_from: new.carried_from,
+			created_by_job: new.created_by_job,
+		},
+		now,
+	)
+}
+
+/// Private persistence projection. Semantic text and refs keep their Agent
+/// owners; raw fields come only from admitted content or closed host metadata.
+pub(crate) struct AdmittedUnit<'a> {
+	pub generation: i64,
+	pub key: &'a str,
+	pub title: &'a BoundedText<Title, Agent>,
+	pub objective: &'a BoundedText<Objective, Agent>,
+	pub priority: Priority,
+	pub proposal: Option<&'a str>,
+	pub refs: &'a UnitRefs<Agent>,
+	pub dependencies: Option<&'a str>,
+	pub closure: Option<&'a str>,
+	pub context: Option<&'a str>,
+	pub carry_depth: i64,
+	pub carried_from: Option<i64>,
+	pub created_by_job: Option<i64>,
+}
+pub(crate) fn insert_admitted(
+	tx: &Connection, repo: i64, new: &AdmittedUnit<'_>, now: i64,
+) -> Result<i64> {
+	tx.execute("INSERT INTO review_units (generation_id,client_review_unit_key,title,objective,priority_band,priority_proposal,source_refs,depends_on,closure_criteria,semantic_context,carry_depth,carried_from_review_unit_id,created_by_job_id,created_at,source)
+ SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'agent' WHERE EXISTS(SELECT 1 FROM review_generations WHERE generation_id=?1 AND repo_id=?15)",
+ params![new.generation,new.key,new.title.expose(),new.objective.expose(),new.priority.as_str(),new.proposal,new.refs.expose(),new.dependencies,new.closure,new.context,new.carry_depth,new.carried_from,new.created_by_job,now,repo])
  .map_err(|e|classify(e,"review_units.generation_id, review_units.client_review_unit_key",Conflict::UnitKey))?;
 	Ok(tx.last_insert_rowid())
 }

@@ -28,6 +28,9 @@ mod context;
 #[path = "review_inventory/mod.rs"]
 mod inventory;
 
+#[path = "review_units/mod.rs"]
+mod unit_proposals;
+
 struct Fixture {
 	state: AppState,
 	offline: common::offline::OfflineDatabase,

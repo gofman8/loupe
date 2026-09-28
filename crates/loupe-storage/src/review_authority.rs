@@ -35,8 +35,10 @@ mod context;
 mod envelope;
 mod host;
 mod inventory;
+mod units;
 pub use context::{CapacitySnapshot, LimitsSnapshot};
 pub use envelope::{AssignedUnit, ReviewPreparation};
+pub use units::{UnitProposal, UnitProposalReceipt};
 
 // debug-ok: phase, purpose and policy decisions contain only closed variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

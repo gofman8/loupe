@@ -34,6 +34,10 @@ impl<const MAX: usize, S: Source> std::fmt::Debug for SourceRefs<MAX, S> {
 }
 impl<const MAX: usize, S: Source> SourceRefs<MAX, S> {
 	pub fn new(_: &Mark<'_, S>, refs: Vec<SourceRef<S>>) -> Result<Self, Error> {
+		Self::from_refs(refs)
+	}
+	/// Compose references that already retain the same source; admit no raw text.
+	pub(crate) fn from_refs(refs: Vec<SourceRef<S>>) -> Result<Self, Error> {
 		if refs.len() > MAX {
 			return Err(Error::new("source_refs", Rule::JsonNodes));
 		}

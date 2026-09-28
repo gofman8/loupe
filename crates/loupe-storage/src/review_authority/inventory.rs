@@ -65,7 +65,7 @@ impl PhaseScope<'_, '_> {
 
 	/// Reference authority is not permission to submit another assessment:
 	/// completed results and holds retain exact owned membership/epoch.
-	fn survey_unit_reference(&self, id: i64, epoch: i64) -> Result<bool> {
+	pub(super) fn survey_unit_reference(&self, id: i64, epoch: i64) -> Result<bool> {
 		let membership = if self.bootstrap {
 			"u.created_by_job_id=?3"
 		} else {
