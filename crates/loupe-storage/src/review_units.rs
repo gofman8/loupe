@@ -14,7 +14,7 @@ use crate::{inventory, ownership, Conflict, Entity, Error, Ownership, Result};
 pub const UNIT_COVERED: &str = "EXISTS(SELECT 1 FROM review_unit_results r WHERE r.review_unit_id=u.review_unit_id AND r.invalidated=0 AND r.commit_sha=g.generation_commit_sha AND r.profile_version=g.profile_version AND r.disposition IN ('lead_created','no_lead_found','not_applicable') AND r.corroborates_review_unit_result_id IS NULL AND r.corroborates_inventory_exclusion_id IS NULL)";
 /// Ordinary scheduling eligibility, composed from the same evidence predicate.
 pub static UNIT_NEEDS_WORK: LazyLock<String> = LazyLock::new(|| {
-	format!("u.status='open' AND u.stale=0 AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=u.review_unit_id AND j.state IN ('queued','leased')) AND NOT ({UNIT_COVERED})")
+	format!("u.status='open' AND u.stale=0 AND NOT EXISTS(SELECT 1 FROM review_unit_holds h WHERE h.review_unit_id=u.review_unit_id) AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=u.review_unit_id AND j.state IN ('queued','leased')) AND NOT ({UNIT_COVERED})")
 });
 string_enum!(Status { Open=>"open", Deferred=>"deferred", Retired=>"retired" });
 string_enum!(Priority { Urgent=>"urgent", High=>"high", Normal=>"normal", Background=>"background" });
@@ -176,7 +176,7 @@ pub(crate) fn assign_selected(
 	}
 	let generation: Option<i64> = tx
 		.query_row(
-			"SELECT generation_id FROM jobs WHERE id=?1 AND repo_id=?2 AND state IN ('queued','leased')",
+			"SELECT generation_id FROM jobs WHERE id=?1 AND repo_id=?2 AND state IN ('queued','leased') AND NOT EXISTS(SELECT 1 FROM survey_continuation_batches b WHERE b.admitted_job_id=jobs.id)",
 			params![job,repo],
 			|r| r.get(0),
 		)
@@ -189,7 +189,7 @@ pub(crate) fn assign_selected(
 			return Err(Error::Conflict(Conflict::Assignment));
 		}
 		ownership::unit_in_generation(tx, claim.unit_id, generation, Ownership::Assignment)?;
-		changed(tx.execute("UPDATE review_units SET assignment_epoch=assignment_epoch+1 WHERE review_unit_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=review_units.generation_id AND g.repo_id=?3) AND status='open' AND assignment_epoch=?2 AND assignment_epoch<9223372036854775807 AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=?1 AND j.state IN ('queued','leased'))",params![claim.unit_id,claim.expected_epoch,repo])?,Conflict::Assignment)?;
+		changed(tx.execute("UPDATE review_units SET assignment_epoch=assignment_epoch+1 WHERE review_unit_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=review_units.generation_id AND g.repo_id=?3) AND status='open' AND assignment_epoch=?2 AND assignment_epoch<9223372036854775807 AND NOT EXISTS(SELECT 1 FROM review_unit_holds WHERE review_unit_id=?1) AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=?1 AND j.state IN ('queued','leased'))",params![claim.unit_id,claim.expected_epoch,repo])?,Conflict::Assignment)?;
 	}
 	// A later batch extends the job's ordered set rather than restarting at 0.
 	let start: i64 = tx.query_row(

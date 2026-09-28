@@ -51,6 +51,7 @@ pub mod reports;
 pub mod repos;
 mod review;
 pub mod review_authority;
+pub mod review_intents;
 pub mod review_unit_results;
 pub mod review_units;
 pub mod scheduler;
@@ -62,6 +63,7 @@ pub mod source_refs;
 pub mod terminal_payloads;
 pub mod terminal_receipt;
 pub(crate) mod transaction;
+pub mod unit_holds;
 pub mod workers;
 
 #[cfg(test)]

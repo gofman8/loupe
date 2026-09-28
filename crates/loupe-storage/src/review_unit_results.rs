@@ -195,8 +195,13 @@ fn evidence_row(r: &rusqlite::Row<'_>) -> Result<EvidenceResult> {
 pub fn get_evidence(
 	scope: &crate::scope::RepoScope<'_>, id: i64,
 ) -> Result<StoredEvidence<UnitResultPayloadV1<Agent>>> {
-	let mut statement=scope.conn.prepare(&format!("SELECT {COLUMNS} FROM review_unit_results WHERE review_unit_result_id=?1 AND EXISTS(SELECT 1 FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=review_unit_results.review_unit_id AND g.repo_id=?2)"))?;
-	let mut rows = statement.query(params![id, scope.repo_id])?;
+	get_evidence_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_evidence_raw(
+	conn: &Connection, repo: i64, id: i64,
+) -> Result<StoredEvidence<UnitResultPayloadV1<Agent>>> {
+	let mut statement=conn.prepare(&format!("SELECT {COLUMNS} FROM review_unit_results WHERE review_unit_result_id=?1 AND EXISTS(SELECT 1 FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=review_unit_results.review_unit_id AND g.repo_id=?2)"))?;
+	let mut rows = statement.query(params![id, repo])?;
 	match rows.next()? {
 		Some(row) => Ok(evidence_row(row)?.payload),
 		None => Ok(StoredEvidence::Missing),
