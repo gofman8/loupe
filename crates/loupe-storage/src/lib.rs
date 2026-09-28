@@ -23,6 +23,7 @@
 //! run.
 
 pub mod admission;
+pub mod admission_candidates;
 pub mod admission_policy;
 pub mod campaign_workflow;
 pub mod campaigns;
