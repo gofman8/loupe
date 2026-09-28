@@ -31,8 +31,10 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::{jobs, review_units, Error, Result};
 
+mod context;
 mod envelope;
 mod host;
+pub use context::{CapacitySnapshot, LimitsSnapshot};
 pub use envelope::{AssignedUnit, ReviewPreparation};
 
 // debug-ok: phase, purpose and policy decisions contain only closed variants.

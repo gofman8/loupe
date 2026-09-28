@@ -337,7 +337,7 @@ fn phase_checkpoint_replay_precedes_fresh_subject_checks_and_rolls_back() {
 	.unwrap();
 }
 
-fn identity() -> jobs::LeaseIdentity<'static> {
+pub(super) fn identity() -> jobs::LeaseIdentity<'static> {
 	jobs::LeaseIdentity { job_id: 101, worker_id: 1, capability_hash: &HASH }
 }
 fn seed(db: &crate::Db) {
@@ -362,12 +362,12 @@ fn seed(db: &crate::Db) {
 		Ok(())
 	}).unwrap();
 }
-fn fixture() -> crate::Db {
+pub(super) fn fixture() -> crate::Db {
 	let db = crate::Db::open_in_memory(&MasterKey::for_tests()).unwrap();
 	seed(&db);
 	db
 }
-fn mutate(db: &crate::Db, sql: &str) {
+pub(super) fn mutate(db: &crate::Db, sql: &str) {
 	db.with_conn(|conn| {
 		conn.execute_batch(sql)?;
 		Ok(())

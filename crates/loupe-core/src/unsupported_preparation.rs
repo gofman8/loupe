@@ -68,8 +68,7 @@ impl std::fmt::Debug for UnsupportedPreparation<'_> {
 }
 
 #[cfg(test)]
-#[path = "../tests/support/marked.rs"]
-mod marked;
+use crate::marked;
 #[cfg(test)]
 mod tests {
 	use super::*;

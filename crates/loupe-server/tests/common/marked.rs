@@ -38,6 +38,16 @@ macro_rules! source_fixture {
 			pub fn json<P: JsonPolicy>(raw: &str) -> BoundedJson<P, $source> {
 				fixture(raw, |raw, mark| BoundedJson::new(mark, raw).unwrap())
 			}
+			pub fn identifier<P: loupe_core::text::IdentPolicy>(
+				raw: &str,
+			) -> loupe_core::text::Identifier<P, $source> {
+				fixture(raw, |raw, mark| loupe_core::text::Identifier::new(mark, raw).unwrap())
+			}
+			pub fn anchor<P: loupe_core::text::AnchorPolicy>(
+				raw: &str,
+			) -> loupe_core::text::Anchor<P, $source> {
+				fixture(raw, |raw, mark| loupe_core::text::Anchor::new(mark, raw).unwrap())
+			}
 			pub fn empty_refs<const MAX: usize>(
 			) -> loupe_storage::source_refs::SourceRefs<MAX, $source> {
 				fixture("[]", |_, mark| {

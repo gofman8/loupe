@@ -15,6 +15,7 @@ pub(crate) mod error;
 pub(crate) mod jobs;
 pub(crate) mod query;
 pub(crate) mod registry;
+pub(crate) mod review_context;
 #[cfg(test)]
 mod tests;
 pub(crate) mod text;

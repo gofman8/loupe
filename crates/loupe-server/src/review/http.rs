@@ -46,6 +46,11 @@ impl From<loupe_storage::Error> for ApiError {
 		match error {
 			Error::ScopeDenied | Error::Ownership(_) | Error::NotFound(_, _) => Self::denied(),
 			Error::Conflict(Conflict::Checkpoint) => Self::conflict("checkpoint_conflict"),
+			Error::Conflict(Conflict::CheckpointLimit) => Self::conflict("checkpoint_limit"),
+			Error::Conflict(Conflict::Limits) => Self::conflict("invalid_limits"),
+			Error::Conflict(Conflict::CompatibilityPolicy) => {
+				Self::conflict("compatibility_policy")
+			},
 			Error::Conflict(Conflict::InventoryLimit) => Self::conflict("inventory_limit"),
 			Error::Conflict(Conflict::CampaignPinned) => Self::conflict("checkout_conflict"),
 			Error::Conflict(_) => Self::conflict("state_conflict"),
@@ -96,6 +101,8 @@ pub fn is_phase_route(path: &str) -> bool {
 			| "/v1/jobs/{id}/inventory-batches"
 			| "/v1/jobs/{id}/seal-inventory"
 			| "/v1/jobs/{id}/publish-profile"
+			| "/v1/jobs/{id}/limits"
+			| "/v1/jobs/{id}/lead-candidates"
 	)
 }
 
@@ -144,6 +151,17 @@ pub fn body(headers: &HeaderMap, body: WorkerBody, max_bytes: usize) -> Result<W
 	body.0.as_bytes().validate(BodyLimit(max_bytes))?;
 	Ok(body)
 }
+/// Context GETs use the same quota-charged capture as phase writes. They have
+/// no media-type requirement, but reject any actual body or content encoding.
+pub fn no_body(headers: &HeaderMap, body: WorkerBody) -> Result<()> {
+	require_version(headers)?;
+	if headers.get_all(header::CONTENT_ENCODING).iter().any(|value| value.as_bytes() != b"identity")
+	{
+		return Err(ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "content_encoding"));
+	}
+	body.0.as_bytes().validate(BodyLimit(0)).map_err(|_| ApiError::invalid("GET has no body"))
+}
+
 struct BodyLimit(usize);
 impl Validate<&[u8], Worker> for BodyLimit {
 	type Output = ();
@@ -258,6 +276,28 @@ mod tests {
 			!String::from_utf8_lossy(&bytes).contains("SECRET_PHASE_DIAGNOSTIC"),
 			"phase error echoed untrusted diagnostic"
 		);
+	}
+	#[test]
+	fn context_get_admits_empty_capture_without_media_type() {
+		let mut headers = headers();
+		headers.remove(header::CONTENT_TYPE);
+		assert!(no_body(&headers, crate::test_support::worker_body(b"")).is_ok());
+		assert_eq!(
+			no_body(&headers, crate::test_support::worker_body(b" ")).unwrap_err().status,
+			StatusCode::BAD_REQUEST
+		);
+		headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+		assert_eq!(
+			no_body(&headers, crate::test_support::worker_body(b"")).unwrap_err().status,
+			StatusCode::UNSUPPORTED_MEDIA_TYPE
+		);
+	}
+	#[test]
+	fn context_gets_share_the_registered_phase_error_boundary() {
+		assert!(is_phase_route("/v1/jobs/{id}/limits"));
+		assert!(is_phase_route("/v1/jobs/{id}/lead-candidates"));
+		assert!(!is_phase_route("/v1/repos/{id}/lead-candidates"));
+		assert!(!is_phase_route("/arbitrary/limits"));
 	}
 	#[test]
 	fn scope_denial_is_not_an_internal_error() {

@@ -28,6 +28,7 @@ pub use pending_follow_up::{FollowUpTrigger, PendingFollowUp, ReviewIntent};
 pub use scanner::ScannerDocument;
 pub mod canonical;
 pub mod inventory_manifest;
+pub mod review_candidates;
 pub mod review_metadata;
 pub mod review_payload;
 pub mod review_priority;
@@ -38,6 +39,9 @@ mod error;
 mod finding;
 mod finding_state;
 mod job;
+#[cfg(test)]
+#[path = "../tests/support/marked.rs"]
+mod marked;
 mod repo;
 pub mod report_limits;
 pub mod security_event;

@@ -28,6 +28,7 @@ pub mod campaign_workflow;
 pub mod campaigns;
 pub mod checkpoints;
 mod db;
+pub mod duplicate_candidates;
 pub mod finding_details;
 pub mod findings;
 pub mod generations;
