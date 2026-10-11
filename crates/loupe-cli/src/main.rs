@@ -515,16 +515,15 @@ async fn github_app_set(
 		private_key_pem,
 	};
 	let resp = client.put(url(base, "/v1/github-app")).json(&req).send().await?;
-	if !resp.status().is_success() {
-		anyhow::bail!("server returned {}: {}", resp.status(), resp.text().await?);
-	}
+	server_response(resp, "configure GitHub App").await?;
 	println!("github app {} configured", a.app_id);
 	Ok(())
 }
 
 async fn github_app_show(client: &reqwest::Client, base: &reqwest::Url) -> Result<()> {
 	let resp = client.get(url(base, "/v1/github-app")).send().await?;
-	let body: GithubAppResponse = resp.error_for_status()?.json().await?;
+	let body: GithubAppResponse =
+		serde_json::from_slice(&server_response(resp, "show GitHub App").await?)?;
 	match body.app {
 		Some(app) => println!("app_id={} slug={}", app.app_id, app.slug),
 		None => println!("no GitHub App configured"),
@@ -534,9 +533,7 @@ async fn github_app_show(client: &reqwest::Client, base: &reqwest::Url) -> Resul
 
 async fn github_app_clear(client: &reqwest::Client, base: &reqwest::Url) -> Result<()> {
 	let resp = client.delete(url(base, "/v1/github-app")).send().await?;
-	if !resp.status().is_success() {
-		anyhow::bail!("server returned {}: {}", resp.status(), resp.text().await?);
-	}
+	server_response(resp, "clear GitHub App").await?;
 	println!("github app cleared");
 	Ok(())
 }
@@ -646,11 +643,8 @@ async fn repo_add(client: &reqwest::Client, base: &reqwest::Url, a: RepoAddArgs)
 		require_approval,
 	};
 	let resp = client.post(url(base, "/v1/repos")).json(&req).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("register repo: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
-	let body: RegisterRepoResponse = resp.json().await?;
+	let body: RegisterRepoResponse =
+		serde_json::from_slice(&server_response(resp, "register repo").await?)?;
 	println!("repo_id={}", body.repo_id);
 	Ok(())
 }
@@ -661,7 +655,8 @@ async fn repo_list(
 	let req = client.get(url(base, "/v1/repos"));
 	let req = if let Some(limit) = limit { req.query(&[("limit", limit)]) } else { req };
 	let resp = req.send().await?;
-	let body: ListReposResponse = resp.error_for_status()?.json().await?;
+	let body: ListReposResponse =
+		serde_json::from_slice(&server_response(resp, "list repos").await?)?;
 	if as_json {
 		println!("{}", repo_list_json(&body)?);
 		return Ok(());
@@ -713,7 +708,7 @@ fn reporting_label(reporting: Option<&ReportingSummary>) -> String {
 
 async fn repo_rm(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.delete(url(base, &format!("/v1/repos/{id}"))).send().await?;
-	resp.error_for_status()?;
+	server_response(resp, "remove repo").await?;
 	Ok(())
 }
 
@@ -744,10 +739,7 @@ async fn repo_update(
 		inherit_require_approval: a.inherit_approval,
 	};
 	let resp = client.patch(url(base, &format!("/v1/repos/{}", a.id))).json(&req).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("update repo: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
+	server_response(resp, "update repo").await?;
 	Ok(())
 }
 
@@ -760,10 +752,7 @@ async fn repo_rotate_pat(
 		.json(&req)
 		.send()
 		.await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("rotate repo PAT: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
+	server_response(resp, "rotate repo PAT").await?;
 	Ok(())
 }
 
@@ -781,14 +770,7 @@ async fn repo_set_github_reporting(
 		.json(&req)
 		.send()
 		.await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!(
-			"set GitHub reporting: {} — {}",
-			status,
-			resp.text().await.unwrap_or_default()
-		);
-	}
+	server_response(resp, "set GitHub reporting").await?;
 	Ok(())
 }
 
@@ -800,11 +782,7 @@ async fn repo_scan(
 		.json(&ScanRequest { protocol_version: PROTOCOL_VERSION, incremental })
 		.send()
 		.await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("scan: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
-	let body: ScanResponse = resp.json().await?;
+	let body: ScanResponse = serde_json::from_slice(&server_response(resp, "scan").await?)?;
 	println!("job_id={}", body.job_id);
 	Ok(())
 }
@@ -817,11 +795,8 @@ async fn worker_register(
 		.json(&RegisterWorkerRequest { protocol_version: PROTOCOL_VERSION, name: a.name })
 		.send()
 		.await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("register worker: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
-	let bundle: RegisterWorkerResponse = resp.json().await?;
+	let bundle: RegisterWorkerResponse =
+		serde_json::from_slice(&server_response(resp, "register worker").await?)?;
 	if a.emit_env {
 		for (name, value) in worker_env_assignments(base, &bundle) {
 			println!("{name}={value}");
@@ -929,7 +904,7 @@ fn server_cert_env_assignments(bundle: &loupe_tls::CertBundle) -> Vec<(&'static 
 
 async fn worker_rm(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.delete(url(base, &format!("/v1/workers/{id}"))).send().await?;
-	resp.error_for_status()?;
+	server_response(resp, "remove worker").await?;
 	Ok(())
 }
 
@@ -937,7 +912,7 @@ async fn job_list(client: &reqwest::Client, base: &reqwest::Url, limit: Option<i
 	let req = client.get(url(base, "/v1/jobs"));
 	let req = if let Some(limit) = limit { req.query(&[("limit", limit)]) } else { req };
 	let resp = req.send().await?;
-	let jobs: Vec<JobInfo> = resp.error_for_status()?.json().await?;
+	let jobs: Vec<JobInfo> = serde_json::from_slice(&server_response(resp, "list jobs").await?)?;
 	for j in jobs.into_iter().rev() {
 		println!(
 			"{:>4}\trepo={}\tkind={:?}\tstate={:?}\tattempts={}\thead={:?}",
@@ -949,29 +924,21 @@ async fn job_list(client: &reqwest::Client, base: &reqwest::Url, limit: Option<i
 
 async fn job_get(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.get(url(base, &format!("/v1/jobs/{id}"))).send().await?;
-	let job: JobInfo = resp.error_for_status()?.json().await?;
+	let job: JobInfo = serde_json::from_slice(&server_response(resp, "get job").await?)?;
 	println!("{}", serde_json::to_string_pretty(&job)?);
 	Ok(())
 }
 
 async fn job_retry(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.post(url(base, &format!("/v1/jobs/{id}/retry"))).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("retry job: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
-	let job: JobInfo = resp.json().await?;
+	let job: JobInfo = serde_json::from_slice(&server_response(resp, "retry job").await?)?;
 	println!("job_id={} state={:?} attempts={}", job.job_id, job.state, job.attempts);
 	Ok(())
 }
 
 async fn job_cancel(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.post(url(base, &format!("/v1/jobs/{id}/cancel"))).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("cancel job: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
-	let job: JobInfo = resp.json().await?;
+	let job: JobInfo = serde_json::from_slice(&server_response(resp, "cancel job").await?)?;
 	println!("job_id={} state={:?} attempts={}", job.job_id, job.state, job.attempts);
 	Ok(())
 }
@@ -982,7 +949,8 @@ async fn finding_list(
 	let req = client.get(url(base, &format!("/v1/repos/{repo_id}/findings")));
 	let req = if let Some(limit) = limit { req.query(&[("limit", limit)]) } else { req };
 	let resp = req.send().await?;
-	let body: ListFindingsResponse = resp.error_for_status()?.json().await?;
+	let body: ListFindingsResponse =
+		serde_json::from_slice(&server_response(resp, "list findings").await?)?;
 	for f in body.findings.into_iter().rev() {
 		let loc = match (f.file_path.as_deref(), f.line_start) {
 			(Some(p), Some(l)) => format!("{p}:{l}"),
@@ -1009,7 +977,8 @@ async fn finding_search(
 ) -> Result<()> {
 	let url = url(base, &format!("/v1/repos/{repo_id}/findings/search"));
 	let resp = client.get(url).query(&[("q", query), ("limit", &limit.to_string())]).send().await?;
-	let body: ListFindingsResponse = resp.error_for_status()?.json().await?;
+	let body: ListFindingsResponse =
+		serde_json::from_slice(&server_response(resp, "search findings").await?)?;
 	if body.findings.is_empty() {
 		println!("(no matches)");
 		return Ok(());
@@ -1032,7 +1001,8 @@ async fn finding_show(
 	client: &reqwest::Client, base: &reqwest::Url, id: i64, as_json: bool,
 ) -> Result<()> {
 	let resp = client.get(url(base, &format!("/v1/findings/{id}"))).send().await?;
-	let detail: FindingDetail = resp.error_for_status()?.json().await?;
+	let detail: FindingDetail =
+		serde_json::from_slice(&server_response(resp, "get finding").await?)?;
 	if as_json {
 		println!("{}", serde_json::to_string_pretty(&detail)?);
 	} else {
@@ -1043,10 +1013,7 @@ async fn finding_show(
 
 async fn finding_approve(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.post(url(base, &format!("/v1/findings/{id}/approve"))).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("approve finding: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
+	server_response(resp, "approve finding").await?;
 	Ok(())
 }
 
@@ -1054,10 +1021,7 @@ async fn finding_retry_report(
 	client: &reqwest::Client, base: &reqwest::Url, id: i64,
 ) -> Result<()> {
 	let resp = client.post(url(base, &format!("/v1/findings/{id}/retry-report"))).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("retry report: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
+	server_response(resp, "retry report").await?;
 	Ok(())
 }
 
@@ -1072,11 +1036,8 @@ async fn finding_retry_verify(
 		limit: args.limit,
 	};
 	let resp = client.post(url(base, "/v1/findings/retry-verify")).json(&req).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("retry verify: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
-	let body: RetryVerifyResponse = resp.json().await?;
+	let body: RetryVerifyResponse =
+		serde_json::from_slice(&server_response(resp, "retry verify").await?)?;
 	let label = if body.dry_run { "would_revive" } else { "revived" };
 	println!(
 		"dry_run={} matched={} {}={} requeued_jobs={} created_jobs={} left_queued_or_leased={}",
@@ -1093,12 +1054,24 @@ async fn finding_retry_verify(
 
 async fn finding_reject(client: &reqwest::Client, base: &reqwest::Url, id: i64) -> Result<()> {
 	let resp = client.post(url(base, &format!("/v1/findings/{id}/reject"))).send().await?;
-	let status = resp.status();
-	if !status.is_success() {
-		anyhow::bail!("reject finding: {} — {}", status, resp.text().await.unwrap_or_default());
-	}
+	server_response(resp, "reject finding").await?;
 	Ok(())
 }
+
+/// Bound successful and error bodies before decoding or displaying them.
+async fn server_response(resp: reqwest::Response, action: &str) -> Result<Vec<u8>> {
+	let status = resp.status();
+	let bytes = loupe_http::read_response_bytes(resp)
+		.await
+		.map_err(|error| anyhow::anyhow!("{action}: server returned {status}: {error}"))?;
+	if !status.is_success() {
+		anyhow::bail!("{action}: {status} — {}", String::from_utf8_lossy(&bytes));
+	}
+	Ok(bytes)
+}
+
+#[cfg(test)]
+mod response_tests;
 
 #[cfg(test)]
 mod tests {

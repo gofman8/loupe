@@ -10,6 +10,7 @@ crates/
   loupe-core      shared types: Finding, Severity, Verdict, RepoSpec,
                   ReportingDestination
   loupe-proto     wire-format DTOs + protocol versioning
+  loupe-http      shared bounded response transport for worker, CLI, web
   loupe-tls       internal CA + cert minting + fingerprint helpers
   loupe-storage   SQLCipher-encrypted SQLite DAO surface, FTS5 index,
                   migrations, secrets table
@@ -32,6 +33,33 @@ convenience: it
 holds the same admin certificate `loupectl` uses and proxies the same
 routes, so it adds no new authority to the system and no new trust root.
 It binds loopback only, for the reasons in README §9.
+
+### Client response budget
+
+The worker, CLI, and web clients share `loupe-http::MAX_RESPONSE_BYTES =
+16 * 1024 * 1024` (16 MiB) for successful and error responses. The transport
+reader rejects an oversized declared length before reading and checks each
+streamed chunk before copying it. Neither buffer length nor requested buffer
+capacity exceeds the budget. HTTP framing buffers and decoded DTO allocations
+are separate from this collected-body budget. JSON decoding stays in the
+clients, so `loupe-proto` remains independent of HTTP transport.
+
+This is an explicit transport budget: there is no finite largest legitimate
+response today. Admin lists can grow without bound, and even a worker search
+limited to 100 findings can exceed it because legacy summary fields have no
+uniform size cap. Oversized responses fail explicitly without truncation;
+pagination remains future work.
+
+A conservative single-object fixture reserves 262,144 bytes each for a PoC
+and patch and 16,384 description characters. With six-byte JSON escaping of
+every character, those fields occupy 3,244,032 bytes before metadata
+(`6 * (262144 + 262144 + 16384)`). Strict LLM submissions have a tighter
+combined description/PoC limit of 60,000 characters. The 16 MiB budget gives
+this conservative fixture room for metadata and lease repository/scanner
+configuration; arbitrarily large configuration is still subject to the same
+transport budget. Transport boundary regressions use valid JSON with trailing
+whitespace at the exact budget and one byte over, including chunked responses
+without Content-Length.
 
 ## Component diagram
 

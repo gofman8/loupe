@@ -29,6 +29,7 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 loupe-core = { version = "0.1.0", path = "../loupe-core" }
+loupe-http = { version = "0.1.0", path = "../loupe-http" }
 loupe-proto = { version = "0.1.0", path = "../loupe-proto" }
 loupe-tls = { version = "0.1.0", path = "../loupe-tls" }
 regex = { workspace = true }

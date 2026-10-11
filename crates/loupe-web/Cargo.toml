@@ -22,6 +22,7 @@ base64 = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 loupe-proto = { version = "0.1.0", path = "../loupe-proto" }
+loupe-http = { version = "0.1.0", path = "../loupe-http" }
 rand_core = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

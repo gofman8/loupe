@@ -8,6 +8,7 @@
 //! banner instead of a wall of opaque 400s.
 
 use anyhow::{Context, Result};
+use loupe_http::read_response_bytes;
 use loupe_proto::{PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER};
 use reqwest::{Method, StatusCode, Url};
 
@@ -114,7 +115,11 @@ impl AdminClient {
 
 		let status = resp.status();
 		if !status.is_success() {
-			let body = resp.text().await.unwrap_or_else(|e| format!("<unreadable body: {e}>"));
+			let bytes = read_response_bytes(resp).await.map_err(|error| UpstreamError {
+				status: Some(status),
+				message: format!("reading upstream body: {error}"),
+			})?;
+			let body = String::from_utf8_lossy(&bytes);
 			let message = body.trim();
 			let message = if message.is_empty() {
 				format!("server returned {status}")
@@ -126,10 +131,10 @@ impl AdminClient {
 		check_protocol_header(&resp)?;
 
 		// 204 and empty bodies are normal on the mutating routes.
-		let text = resp
-			.text()
+		let bytes = read_response_bytes(resp)
 			.await
 			.map_err(|e| UpstreamError::transport(format!("reading upstream body: {e}")))?;
+		let text = String::from_utf8_lossy(&bytes);
 		if text.trim().is_empty() {
 			return Ok((status, None));
 		}

@@ -3,6 +3,7 @@
 //! over mTLS.
 
 use anyhow::{anyhow, Context, Result};
+use loupe_http::read_response_bytes;
 use loupe_proto::{
 	CompleteRequest, FindingDetail, FindingsBatch, HeartbeatRequest, HeartbeatResponse,
 	JobCapability, LeaseRequest, LeaseResponse, ListFindingsResponse, LlmFindingSubmission,
@@ -50,7 +51,7 @@ impl ServerClient {
 			.await
 			.context("lease request")?;
 		let resp = ensure_ok(resp).await?;
-		resp.json().await.context("decoding lease response")
+		serde_json::from_slice(&resp).context("decoding lease response")
 	}
 
 	pub async fn heartbeat(
@@ -65,7 +66,7 @@ impl ServerClient {
 			.await
 			.context("heartbeat request")?;
 		let resp = ensure_ok(resp).await?;
-		resp.json().await.context("decoding heartbeat")
+		serde_json::from_slice(&resp).context("decoding heartbeat")
 	}
 
 	pub async fn submit_findings(
@@ -136,7 +137,7 @@ impl ServerClient {
 			.await
 			.context("search request")?;
 		let resp = ensure_ok(resp).await?;
-		resp.json().await.context("decoding search response")
+		serde_json::from_slice(&resp).context("decoding search response")
 	}
 
 	/// Fetch the full detail view for one finding by id. Used by the
@@ -153,7 +154,7 @@ impl ServerClient {
 			.await
 			.context("get_finding request")?;
 		let resp = ensure_ok(resp).await?;
-		resp.json().await.context("decoding finding detail")
+		serde_json::from_slice(&resp).context("decoding finding detail")
 	}
 
 	fn url(&self, path: &str) -> Url {
@@ -182,11 +183,13 @@ fn build_identity(cert_pem: &str, key_pem: &str) -> Result<reqwest::Identity> {
 		.map_err(|e| anyhow!("building reqwest identity from PEM: {e}"))
 }
 
-async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
+async fn ensure_ok(resp: reqwest::Response) -> Result<Vec<u8>> {
 	if !resp.status().is_success() {
 		let status = resp.status();
-		let body =
-			resp.text().await.unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
+		let bytes = read_response_bytes(resp)
+			.await
+			.map_err(|error| anyhow!("server returned {status}: {error}"))?;
+		let body = String::from_utf8_lossy(&bytes);
 		let body = body.trim();
 		if body.is_empty() {
 			return Err(anyhow!("server returned {status}"));
@@ -207,7 +210,7 @@ async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
 			"server protocol mismatch: worker speaks {PROTOCOL_VERSION}, server sent {server_version}"
 		));
 	}
-	Ok(resp)
+	read_response_bytes(resp).await.map_err(|error| anyhow!("reading server response: {error}"))
 }
 
 #[cfg(test)]

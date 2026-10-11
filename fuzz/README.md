@@ -181,6 +181,11 @@ restriction. Accepted bytes are checked against their BLAKE3 hash.
 an independent value tree for checking relative path resolution and accepted
 root keys after that loader succeeds.
 
+`loupe-http` owns the shared 16 MiB response-body budget. `loupe-worker`,
+`reqwest` and `tokio` let the response target call real worker client methods
+against loopback chunked HTTP. It checks all four typed responses and errors,
+including exact-budget and oversized streams without Content-Length.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -226,6 +231,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
 | `tls_fingerprint` | Exact SHA-256 of arbitrary DER bytes and repeatability |
 | `tls_pem` | Certificate/key/root parsing, successful CA reload, valid fixture admission and malformed-label refusal |
+| `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
 
 `storage_source_refs` takes one policy byte (even: 32 items, odd: 64),
 followed by JSON reference bytes. Inputs up to 128 KiB exercise both sides of

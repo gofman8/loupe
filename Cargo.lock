@@ -888,6 +888,7 @@ dependencies = [
  "base64",
  "clap",
  "loupe-core",
+ "loupe-http",
  "loupe-proto",
  "loupe-tls",
  "reqwest",
@@ -906,6 +907,16 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-general-category",
  "unicode-normalization",
+]
+
+[[package]]
+name = "loupe-http"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -993,6 +1004,7 @@ dependencies = [
  "base64",
  "blake3",
  "clap",
+ "loupe-http",
  "loupe-proto",
  "loupe-server",
  "loupe-storage",
@@ -1025,6 +1037,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "loupe-core",
+ "loupe-http",
  "loupe-proto",
  "loupe-server",
  "loupe-storage",
