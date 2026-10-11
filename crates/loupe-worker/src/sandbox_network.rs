@@ -395,6 +395,18 @@ fn resolve_hosts(hosts: &[String]) -> Result<BTreeSet<Ipv4Addr>> {
 fn build_network_policy(
 	mode: SandboxNetworkMode, allowed: &BTreeSet<Ipv4Addr>, tools: &NetworkTools,
 ) -> Result<String> {
+	let (routes, addresses) = if mode == SandboxNetworkMode::Public {
+		(connected_ipv4_routes(&tools.ip)?, host_ipv4_addresses(&tools.ip)?)
+	} else {
+		(BTreeSet::new(), BTreeSet::new())
+	};
+	Ok(render_network_policy(mode, allowed, &routes, &addresses))
+}
+
+fn render_network_policy(
+	mode: SandboxNetworkMode, allowed: &BTreeSet<Ipv4Addr>, routes: &BTreeSet<String>,
+	addresses: &BTreeSet<Ipv4Addr>,
+) -> String {
 	let mut policy = String::new();
 	let default_policy = if mode == SandboxNetworkMode::Public { "accept" } else { "drop" };
 	policy.push_str("table inet loupe_sandbox {\n\tchain output {\n");
@@ -412,10 +424,10 @@ fn build_network_policy(
 		for route in PUBLIC_DENYLIST {
 			policy.push_str(&format!("\t\tip daddr {route} reject\n"));
 		}
-		for route in connected_ipv4_routes(&tools.ip)? {
+		for route in routes {
 			policy.push_str(&format!("\t\tip daddr {route} reject\n"));
 		}
-		for address in host_ipv4_addresses(&tools.ip)? {
+		for address in addresses {
 			policy.push_str(&format!("\t\tip daddr {address} reject\n"));
 		}
 		policy.push_str("\t\tip6 daddr ::/0 reject\n");
@@ -427,7 +439,20 @@ fn build_network_policy(
 		policy.push_str("\t\treject\n");
 	}
 	policy.push_str("\t}\n}\n");
-	Ok(policy)
+	policy
+}
+
+/// Pure rendering used by the supervisor, without command or namespace I/O.
+#[cfg(fuzzing)]
+pub(crate) mod fuzzing {
+	use super::*;
+
+	pub fn network_policy(
+		mode: SandboxNetworkMode, allowed: &BTreeSet<Ipv4Addr>, routes: &BTreeSet<String>,
+		addresses: &BTreeSet<Ipv4Addr>,
+	) -> String {
+		render_network_policy(mode, allowed, routes, addresses)
+	}
 }
 
 fn connected_ipv4_routes(ip: &Path) -> Result<BTreeSet<String>> {

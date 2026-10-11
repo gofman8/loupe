@@ -35,6 +35,7 @@ GEN_TEST worker_broker_policy
 GEN_TEST worker_broker_usage
 GEN_TEST worker_extract_json
 GEN_TEST worker_mcp_submission
+GEN_TEST worker_network_host
 GEN_TEST worker_server_response
 mkdir -p ../../runners/src/bin
 for old in ../../runners/src/bin/*_target.rs; do

@@ -22,6 +22,11 @@ use tokio::process::Command;
 /// Path to the bwrap binary. Resolved once and cached.
 const BWRAP_BIN: &str = "bwrap";
 
+#[cfg(fuzzing)]
+pub mod fuzzing {
+	pub use crate::sandbox_network::fuzzing::network_policy;
+}
+
 /// Public host data needed by dynamically linked agent CLIs and libc
 /// identity lookups. Keep this list to individual files: mounting the
 /// containing `/etc` tree would expose Loupe credentials and arbitrary
@@ -72,9 +77,13 @@ pub fn validate_network_host(host: &str) -> Result<()> {
 	if host.parse::<std::net::Ipv4Addr>().is_ok() {
 		return Ok(());
 	}
-	if host.parse::<std::net::Ipv6Addr>().is_ok()
-		|| host.contains(|character: char| {
-			character.is_whitespace() || matches!(character, '/' | ':' | '*' | ',')
+	if host.len() > 253
+		|| !host.split('.').all(|label| {
+			!label.is_empty()
+				&& label.len() <= 63
+				&& label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+				&& label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+				&& label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 		}) {
 		anyhow::bail!("invalid sandbox network hostname or IPv4 address: `{host}`");
 	}
@@ -541,6 +550,36 @@ fn smoketest_with_builder(builder: SandboxBuilder) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn network_hosts_enforce_rfc1123_label_boundaries() {
+		for host in ["API.Example-2.test", "2.example", "192.0.2.1", " api.example "] {
+			assert!(super::validate_network_host(host).is_ok(), "valid host rejected: {host}");
+		}
+		let label63 = "a".repeat(63);
+		let total253 =
+			[label63.as_str(), label63.as_str(), label63.as_str(), &"b".repeat(61)].join(".");
+		assert!(super::validate_network_host(&label63).is_ok());
+		assert!(super::validate_network_host(&total253).is_ok());
+		for host in [
+			"a;test".into(),
+			"a\"test".into(),
+			"-a.test".into(),
+			"a-.test".into(),
+			"a..test".into(),
+			"a.test.".into(),
+			"a_b.test".into(),
+			"é.test".into(),
+			"::1".into(),
+			"a".repeat(64),
+			format!("{total253}b"),
+		] {
+			assert!(
+				super::validate_network_host(&host).is_err(),
+				"invalid network host accepted: {host}"
+			);
+		}
+	}
+
 	use std::io::Write;
 
 	use super::*;

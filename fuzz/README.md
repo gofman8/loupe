@@ -246,6 +246,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_broker_usage` | Independent JSON/SSE accounting, response header filtering and an empty tracing baseline |
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
+| `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
 | `web_api` | Actual browser guards, no upstream call on rejected headers, JSON-enclosed diagnostics and bounded responses |
 
@@ -297,6 +298,13 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+`worker_network_host` takes raw UTF-8 hosts up to 16 KiB and derives typed
+IPv4 addresses/routes from the same bytes. Hostnames have at most 253 bytes,
+labels of 1..63 bytes, alphanumeric edges and alphanumeric/hyphen interiors.
+The complete nft output must match the golden rule template. Its tabs,
+quotes and underscores belong to the fixed syntax, including the table name
+and loopback rule; dynamic fields contain only typed addresses and routes.
 
 The broker policy target interprets raw bytes as provider JSON, header lines
 and up to 129 little-endian u64 words for output reservations. Its 128 KiB
