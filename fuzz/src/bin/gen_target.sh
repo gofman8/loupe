@@ -14,6 +14,7 @@ GEN_TEST() {
 }
 # One line per target, alphabetical. Optional second argument: module prefix.
 GEN_TEST core_canonical
+GEN_TEST core_state_machine
 GEN_TEST core_text_bounded
 GEN_TEST core_text_ident
 GEN_TEST core_text_json

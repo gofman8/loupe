@@ -606,6 +606,74 @@ mod tests {
 	}
 
 	#[test]
+	fn verdict_summary_is_scoped_and_independent_of_insertion_order() {
+		// This is an invariant test on the existing EXISTS-based aggregation.
+		// Insert each complete multiset before one rollup; terminal states are
+		// deliberately not revisited as individual verdicts arrive.
+		let (db, repo_id, job_id) = fixture();
+		let permutations = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+		let cases = [
+			(
+				["confirmed", "dismissed", "inconclusive"],
+				false,
+				false,
+				Some(FindingState::Dismissed),
+			),
+			(
+				["confirmed", "inconclusive", "confirmed"],
+				false,
+				false,
+				Some(FindingState::Confirmed),
+			),
+			(
+				["confirmed", "inconclusive", "confirmed"],
+				false,
+				true,
+				Some(FindingState::AwaitingApproval),
+			),
+			(
+				["confirmed", "inconclusive", "confirmed"],
+				true,
+				false,
+				Some(FindingState::Dismissed),
+			),
+			(["inconclusive", "inconclusive", "inconclusive"], false, false, None),
+			(
+				["inconclusive", "inconclusive", "inconclusive"],
+				true,
+				true,
+				Some(FindingState::Dismissed),
+			),
+		];
+		db.with_conn(|conn| {
+			// Both positive verdict kinds on another finding must be ignored.
+			let foreign = insert_or_ignore(conn, repo_id, job_id, &sample("foreign-rollup"), true, 0)?.unwrap();
+			for verdict in ["confirmed", "dismissed"] {
+				conn.execute("INSERT INTO finding_verifications (finding_id, verdict, created_at) VALUES (?1, ?2, 0)", (foreign, verdict))?;
+			}
+			for (case, (verdicts, terminal, approval, expected)) in cases.into_iter().enumerate() {
+				for (permutation, order) in permutations.into_iter().enumerate() {
+					let finding = sample(&format!("rollup-{case}-{permutation}"));
+					let id = insert_or_ignore(conn, repo_id, job_id, &finding, true, 0)?.unwrap();
+					conn.execute("UPDATE findings SET state = 'validating' WHERE id = ?1", [id])?;
+					for index in order {
+						conn.execute("INSERT INTO finding_verifications (finding_id, verdict, created_at) VALUES (?1, ?2, 0)", (id, verdicts[index]))?;
+					}
+					assert_eq!(roll_up_verdicts_for_finding(conn, id, terminal, approval, 42)?, expected,
+						"SQL verdict summary changed with permutation {order:?} in case {case}");
+					let (state, confirmed_at, dismissed_at): (String, Option<i64>, Option<i64>) = conn.query_row(
+						"SELECT state, confirmed_at, dismissed_at FROM findings WHERE id = ?1", [id],
+						|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+					assert_eq!(state, expected.unwrap_or(FindingState::Validating).as_str());
+					assert_eq!(confirmed_at, (expected == Some(FindingState::Confirmed)).then_some(42));
+					assert_eq!(dismissed_at, (expected == Some(FindingState::Dismissed)).then_some(42));
+				}
+			}
+			Ok(())
+		}).unwrap();
+	}
+
+	#[test]
 	fn insert_then_list_round_trip() {
 		let (db, repo_id, job_id) = fixture();
 		let f = sample("fp1");
