@@ -239,6 +239,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `server_config` | Actual file loader, owner-list rejection, root keys, and exact relative path resolution |
 | `server_report_email` | Exact header boundary, CR/LF admission and finding-content isolation from headers |
 | `server_report_github` | Title normalization, title/body character caps and observed S3 fence-containment cases |
+| `server_request_parsers` | Protocol headers, state/kind filters, legacy clone URLs and exact FTS stripping/token admission |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
 | `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
@@ -303,6 +304,13 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+`server_request_parsers` selects one of five parsers with byte zero and sends
+the remaining bytes to it. Bit 7 selects an absent protocol/state/kind field.
+Protocol versions allow the existing unsigned-decimal leading plus; clone
+URLs retain their permissive legacy grammar. See [server target contracts](SERVER-TARGETS.md)
+for these parsers, configuration and reporting boundaries, including the
+still-pending GitHub response target.
 
 The report targets pass JSON findings to the actual renderers. Email input
 also supplies `from`, `to` and `subject`, whose newline checks must match

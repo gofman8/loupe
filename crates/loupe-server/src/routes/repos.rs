@@ -432,7 +432,7 @@ pub async fn delete(
 /// URLs the host/owner triple is synthesized as
 /// `("local", "local", <last-path-component>)` so the rest of the
 /// schema (which requires non-empty values) stays happy.
-fn parse_github_clone_url(url: &str) -> Option<(String, String, String)> {
+pub fn parse_github_clone_url(url: &str) -> Option<(String, String, String)> {
 	if let Some(path) = url.strip_prefix("file://") {
 		let trimmed = path.trim_end_matches('/');
 		let last = trimmed.rsplit('/').find(|s| !s.is_empty())?;

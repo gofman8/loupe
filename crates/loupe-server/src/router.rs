@@ -101,7 +101,7 @@ pub fn router(state: AppState) -> Router {
 		))
 }
 
-fn request_protocol_error(value: Option<&HeaderValue>) -> Option<String> {
+pub fn request_protocol_error(value: Option<&HeaderValue>) -> Option<String> {
 	let value = value?;
 	let raw = match value.to_str() {
 		Ok(v) => v,

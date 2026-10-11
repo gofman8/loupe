@@ -92,7 +92,7 @@ fn positive_limit(limit: Option<i64>) -> Result<Option<i64>, (StatusCode, String
 /// Parse the `state=` filter. Rejects unknown values loudly rather than
 /// silently returning everything — a typo'd filter that looks like it
 /// worked is worse than an error.
-fn parse_states(raw: Option<&str>) -> Result<Vec<JobState>, (StatusCode, String)> {
+pub fn parse_states(raw: Option<&str>) -> Result<Vec<JobState>, (StatusCode, String)> {
 	let Some(raw) = raw else {
 		return Ok(Vec::new());
 	};
@@ -117,7 +117,7 @@ fn parse_states(raw: Option<&str>) -> Result<Vec<JobState>, (StatusCode, String)
 	Ok(states)
 }
 
-fn parse_kind(raw: Option<&str>) -> Result<Option<JobKind>, (StatusCode, String)> {
+pub fn parse_kind(raw: Option<&str>) -> Result<Option<JobKind>, (StatusCode, String)> {
 	raw.map(|k| {
 		let kind: JobKind = k.parse().expect("infallible kind parser");
 		if kind.is_known() {
