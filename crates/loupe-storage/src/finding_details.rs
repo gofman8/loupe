@@ -5,6 +5,7 @@ use rusqlite::{params, Transaction};
 
 use crate::identity::Identity;
 use crate::review::{classify, is_unique, standalone, string_enum};
+use crate::scope::{Assignment, Scope, Subject, SubjectKind};
 use crate::{ownership, Conflict, Error, Ownership, Result};
 string_enum!(Confidence { Low=>"low", Medium=>"medium", High=>"high" });
 string_enum!(SubmittedRung { L2=>"L2", L3=>"L3" });
@@ -64,9 +65,9 @@ pub fn insert_review_details(tx: &Transaction<'_>, new: &NewReview<'_>, now: i64
 	}
 }
 pub fn insert_attempt_details(tx: &Transaction<'_>, new: &NewAttempt<'_>, now: i64) -> Result<()> {
-	ownership::require(tx,"SELECT EXISTS(SELECT 1 FROM finding_verifications v JOIN findings f ON f.id=v.finding_id WHERE v.id=?1 AND f.repo_id=?2)",params![new.verification_id,new.repo_id],Ownership::Verification)?;
+	ownership::require(tx,"SELECT f.repo_id FROM finding_verifications v JOIN findings f ON f.id=v.finding_id WHERE v.id=?1",[new.verification_id],Scope::repository(new.repo_id),Ownership::Verification,ownership::repository_row)?;
 	if let Some(proof) = new.verification_proof {
-		ownership::require(tx,"SELECT EXISTS(SELECT 1 FROM verification_proofs WHERE verification_proof_id=?1 AND verification_id=?2 AND repo_id=?3)",params![proof,new.verification_id,new.repo_id],Ownership::VerificationProof)?;
+		ownership::require(tx,"SELECT repo_id,verification_id FROM verification_proofs WHERE verification_proof_id=?1",[proof],Scope { assignment: Some(Assignment::Verification(new.verification_id)), ..Scope::repository(new.repo_id) },Ownership::VerificationProof,|r| Ok(Subject { kind: SubjectKind::Assigned(Assignment::Verification(r.get(1)?)), ..Subject::repository(r.get(0)?) }))?;
 	}
 	if new.e2e_applicability == Applicability::NotApplicable && new.e2e_rationale.is_none() {
 		return Err(

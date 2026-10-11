@@ -48,10 +48,14 @@ pub fn insert(tx: &Transaction<'_>, new: &NewResult<'_>, now: i64) -> Result<i64
 		return Err(Error::Conflict(Conflict::Corroboration));
 	}
 	if let Some(id) = new.corroborates_result {
-		ownership::require(tx,"SELECT EXISTS(SELECT 1 FROM review_unit_results r JOIN review_units u ON u.review_unit_id=r.review_unit_id WHERE r.review_unit_result_id=?1 AND u.generation_id=?2 AND r.corroborates_review_unit_result_id IS NULL AND r.corroborates_inventory_exclusion_id IS NULL)",params![id,new.generation_id],Ownership::CorroboratedResult)?;
+		let scope =
+			ownership::generation_scope(tx, new.generation_id, Ownership::CorroboratedResult)?;
+		ownership::require(tx,"SELECT g.repo_id,u.generation_id FROM review_unit_results r JOIN review_units u ON u.review_unit_id=r.review_unit_id JOIN review_generations g ON g.generation_id=u.generation_id WHERE r.review_unit_result_id=?1 AND r.corroborates_review_unit_result_id IS NULL AND r.corroborates_inventory_exclusion_id IS NULL",[id],scope,Ownership::CorroboratedResult,ownership::generation_row)?;
 	}
 	if let Some(id) = new.corroborates_exclusion {
-		ownership::require(tx,"SELECT EXISTS(SELECT 1 FROM generation_inventory WHERE inventory_entry_id=?1 AND generation_id=?2 AND disposition='excluded')",params![id,new.generation_id],Ownership::CorroboratedExclusion)?;
+		let scope =
+			ownership::generation_scope(tx, new.generation_id, Ownership::CorroboratedExclusion)?;
+		ownership::require(tx,"SELECT g.repo_id,i.generation_id FROM generation_inventory i JOIN review_generations g ON g.generation_id=i.generation_id WHERE i.inventory_entry_id=?1 AND i.disposition='excluded'",[id],scope,Ownership::CorroboratedExclusion,ownership::generation_row)?;
 	}
 	inventory::verify_refs(tx, new.generation_id, new.inspected_refs.as_slice())?;
 	tx.execute("INSERT INTO review_unit_results (review_unit_id,produced_by_job_id,commit_sha,profile_version,disposition,inspected_refs,counterevidence,proof_gaps,result_payload,result_digest,corroborates_review_unit_result_id,corroborates_inventory_exclusion_id,created_at)

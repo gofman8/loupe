@@ -6,6 +6,32 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use crate::review::{is_unique, parsed, standalone, string_enum};
 use crate::{Conflict, Error, Result};
 string_enum!(Operation { SubmitReviewUnit=>"submit_review_unit", SubmitLead=>"submit_lead", SubmitUnitResult=>"submit_unit_result", SubmitObservation=>"submit_observation", StageArtifact=>"stage_proof_artifact", RecordExecution=>"record_execution", ValidateFixPatch=>"validate_fix_patch", SubmitSiblingLead=>"submit_sibling_lead", InitializeSurveyBatch=>"initialize_survey_batch" });
+/// Stored bytes stay borrowed so a malformed digest cannot be truncated or
+/// padded into an apparently valid replay. Operation identity is checked even
+/// though the client key is also operation-qualified.
+pub struct Stored<'a> {
+	pub operation: &'a str,
+	pub digest: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replay {
+	Miss,
+	Hit,
+	Conflict,
+}
+
+pub fn replay_decision(
+	stored: Option<&Stored<'_>>, operation: Operation, digest: &[u8; 32],
+) -> Replay {
+	match stored {
+		None => Replay::Miss,
+		Some(stored) if stored.operation == operation.as_str() && stored.digest == digest => {
+			Replay::Hit
+		},
+		Some(_) => Replay::Conflict,
+	}
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recorded {
 	Recorded,
@@ -60,13 +86,12 @@ pub fn lookup(
 			},
 		)
 		.optional()?;
-	let Some((stored_op, stored_digest, response)) = record else {
-		return Ok(None);
-	};
-	if stored_op != op.as_str() || stored_digest != digest {
-		return Err(Error::Conflict(Conflict::Checkpoint));
+	let stored = record.as_ref().map(|(operation, digest, _)| Stored { operation, digest });
+	match replay_decision(stored.as_ref(), op, digest) {
+		Replay::Miss => Ok(None),
+		Replay::Hit => Ok(record.map(|(_, _, response)| response)),
+		Replay::Conflict => Err(Error::Conflict(Conflict::Checkpoint)),
 	}
-	Ok(Some(response))
 }
 pub fn record_or_replay(
 	tx: &Transaction<'_>, job: i64, op: Operation, key: &Identifier<ClientKey>, digest: &[u8; 32],

@@ -88,7 +88,7 @@ pub fn enqueue_phase(tx: &Transaction<'_>, new: &NewPhaseJob<'_>, now: i64) -> R
 		ownership::finding(tx, finding, new.repo_id, Ownership::JobFinding)?;
 	}
 	if let Some(parent) = new.continuation_of_job_id {
-		ownership::require(tx, "SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?2 AND campaign_id=?3 AND kind=?4 AND state IN ('succeeded','failed','cancelled'))", params![parent,new.repo_id,new.campaign_id,new.kind.as_str()], Ownership::JobContinuation)?;
+		ownership::require(tx, "SELECT repo_id,campaign_id FROM jobs WHERE id=?1 AND kind=?2 AND state IN ('succeeded','failed','cancelled')", params![parent,new.kind.as_str()], crate::scope::Scope { campaign: Some(new.campaign_id), ..crate::scope::Scope::repository(new.repo_id) }, Ownership::JobContinuation, |r| Ok(crate::scope::Subject { campaign: r.get(1)?, ..crate::scope::Subject::repository(r.get(0)?) }))?;
 	}
 	let policy = CampaignPolicy::from_snapshot(&campaign.effective_policy)?;
 	let limit = if new.handoff && new.kind != JobKind::Survey {

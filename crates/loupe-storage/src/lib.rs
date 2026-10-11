@@ -26,6 +26,7 @@ mod review;
 pub mod review_unit_results;
 pub mod review_units;
 pub mod scheduler;
+mod scope;
 pub mod secrets;
 pub mod source_refs;
 pub mod terminal_receipt;
