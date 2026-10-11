@@ -43,5 +43,6 @@ pub mod worker_network_host;
 pub mod worker_network_parsers;
 pub mod worker_regex_secrets;
 pub mod worker_repo_cache;
+pub mod worker_sandbox_args;
 pub mod worker_server_response;
 pub mod worker_source_discovery;

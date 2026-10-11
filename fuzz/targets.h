@@ -32,5 +32,6 @@ void worker_network_host_run(const unsigned char* data, size_t data_len);
 void worker_network_parsers_run(const unsigned char* data, size_t data_len);
 void worker_regex_secrets_run(const unsigned char* data, size_t data_len);
 void worker_repo_cache_run(const unsigned char* data, size_t data_len);
+void worker_sandbox_args_run(const unsigned char* data, size_t data_len);
 void worker_server_response_run(const unsigned char* data, size_t data_len);
 void worker_source_discovery_run(const unsigned char* data, size_t data_len);

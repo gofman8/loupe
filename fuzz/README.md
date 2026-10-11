@@ -314,6 +314,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_network_parsers` | Actual PID, uid_map, route and address parsers, typed-serde PID forms, identity-pair and complete-set checks |
 | `worker_regex_secrets` | Actual scanner walk, independent byte-match/line oracle, size/cancellation/symlink behavior and metadata-only finding Debug |
 | `worker_repo_cache` | Exact cursor magic/version/body, round trips and status/UTF-8/whitespace behavior of git origin parsing |
+| `worker_sandbox_args` | Exact namespace/safety flags, supervisor framing, explicit environment names and bind operands, including flag-shaped values |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
 | `worker_source_discovery` | Actual manifest/glob/exclusion parsing, canonical containment, sorted unique paths and complete known-fixture selection |
 | `web_api` | Actual browser guards, no upstream call on rejected headers, JSON-enclosed diagnostics and bounded responses |
@@ -438,17 +439,16 @@ saturating maximum of total tokens and input-plus-output tokens. Header
 fixtures use `hyper`; `tracing` and `tracing-subscriber` capture diagnostics
 and require the pure accounting and filtering paths to emit none.
 
-## Pending S1 targets
+`worker_sandbox_args` projects raw JSON into the real builder's command without
+spawning it. It checks the complete option/operand sequence, supervisor and
+bubblewrap separators, explicit environment variables and binary binds. A
+separate fixture directory keeps arbitrary entrypoint names from colliding
+with the package installation. Flag-shaped values remain operands in the
+oracle; the target does not mistake those values for security options.
 
-The branch currently has 33 real targets plus smoke. One additional target
-remains required for S1. Its candidate and counterexample are preserved,
-and its correction is in progress under
-the approved twelve-repair allowance. Passing product tests or campaigns does not
-waive a failed harness or integration gate.
-
-| Required target | Held correction and remaining coverage |
-|---|---|
-| `worker_sandbox_args` | Remove the `node_modules` fixture collision; then verify exact namespace/safety flags, supervisor framing, environment names and bind operands. |
+All 34 main-surface S1 targets plus smoke are registered. Each real target has
+a retained corpus, a clean short campaign and a detected guard mutation.
+The broader ingress gaps below remain separate from this named target set.
 
 ## Remaining ingress and later work
 

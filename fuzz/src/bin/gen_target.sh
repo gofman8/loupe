@@ -45,6 +45,7 @@ GEN_TEST worker_network_host
 GEN_TEST worker_network_parsers
 GEN_TEST worker_regex_secrets
 GEN_TEST worker_repo_cache
+GEN_TEST worker_sandbox_args
 GEN_TEST worker_server_response
 GEN_TEST worker_source_discovery
 mkdir -p ../../runners/src/bin
