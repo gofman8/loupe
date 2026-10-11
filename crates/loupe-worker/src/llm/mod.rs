@@ -89,6 +89,17 @@ impl std::fmt::Display for JobAgent {
 	}
 }
 
+mod cli_output;
+
+/// Exercise the production collector with arbitrary streams in the fuzz build.
+#[cfg(fuzzing)]
+pub async fn fuzz_collect_cli_output(
+	reader: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<(Vec<u8>, bool)> {
+	let output = cli_output::collect_cli_output(reader).await?;
+	Ok((output.bytes, output.truncated))
+}
+
 const CLI_STREAM_OMISSION: &str = " ... ";
 
 /// Collapse a CLI output stream into a single log-line snippet while

@@ -25,6 +25,7 @@ publish = ["crates-io"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

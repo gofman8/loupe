@@ -22,9 +22,9 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
 
+use super::cli_output::{collect_cli_output, MAX_CLI_OUTPUT_BYTES};
 use super::mcp::{
 	bind_mcp_into_sandbox, McpBroker, McpContext, SANDBOX_BKB_MCP_BIN, SANDBOX_LOUPE_BIN,
 };
@@ -331,10 +331,6 @@ impl LlmBackend for ClaudeCliBackend {
 
 		let cancel = req.cancel.clone();
 		let run_outcome = timeout(req.timeout, async {
-			let mut stdout_buf = Vec::new();
-			let mut stderr_buf = Vec::new();
-			let mut so = stdout_handle;
-			let mut se = stderr_handle;
 			let wait_fut = async {
 				tokio::select! {
 					biased;
@@ -345,12 +341,12 @@ impl LlmBackend for ClaudeCliBackend {
 					res = child.wait() => res.map_err(Into::into),
 				}
 			};
-			let (status, _, _) = tokio::join!(
+			let (status, stdout, stderr) = tokio::join!(
 				wait_fut,
-				so.read_to_end(&mut stdout_buf),
-				se.read_to_end(&mut stderr_buf),
+				collect_cli_output(stdout_handle),
+				collect_cli_output(stderr_handle),
 			);
-			Result::<_>::Ok((status?, stdout_buf, stderr_buf))
+			Result::<_>::Ok((status?, stdout?, stderr?))
 		})
 		.await;
 
@@ -398,6 +394,9 @@ impl LlmBackend for ClaudeCliBackend {
 			Err(_) => return Err(anyhow!("claude CLI timed out after {:?}", req.timeout)),
 		};
 
+		let output_truncated = stdout.truncated || stderr.truncated;
+		let stdout = stdout.bytes;
+		let stderr = stderr.bytes;
 		if !status.success() {
 			let stderr_text = String::from_utf8_lossy(&stderr);
 			let stdout_text = String::from_utf8_lossy(&stdout);
@@ -428,6 +427,11 @@ impl LlmBackend for ClaudeCliBackend {
 		broker_outcome?;
 		model_broker_outcome?;
 
+		if output_truncated {
+			return Err(anyhow!(
+				"claude CLI output exceeds {MAX_CLI_OUTPUT_BYTES} bytes per stream"
+			));
+		}
 		let text = String::from_utf8(stdout)
 			.map_err(|e| anyhow!("claude CLI stdout was not UTF-8: {e}"))?;
 		// Debug instrumentation hooks (no-ops when env vars unset):
@@ -499,6 +503,102 @@ fn claude_invocation_args(agent: &CliModelConfig, prompt: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+	#[cfg(unix)]
+	async fn run_output_fixture(
+		stdout_bytes: usize, stderr_bytes: usize, exit_code: u8,
+	) -> (Result<LlmResponse>, bool) {
+		use std::os::unix::fs::PermissionsExt;
+		let workdir = tempfile::tempdir().unwrap();
+		let script = workdir.path().join("output-fixture");
+		let finished = workdir.path().join("finished");
+		std::fs::write(&script, format!(
+			"#!/bin/sh\nhead -c {stdout_bytes} /dev/zero | tr '\\000' x\nprintf 'stdout-tail-diagnostic'\nhead -c {stderr_bytes} /dev/zero | tr '\\000' x >&2\nprintf 'stderr-tail-diagnostic' >&2\ntouch {}\nexit {exit_code}\n",
+			sh_single_quote(&finished),
+		)).unwrap();
+		std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+		let backend = ClaudeCliBackend::with_bin(script.to_string_lossy())
+			.with_sandbox_disabled_for_tests()
+			.with_model_broker_context(test_model_broker("/bin/true"));
+		let result = backend
+			.run(LlmRequest {
+				prompt: "fixture".into(),
+				workdir: workdir.path().to_owned(),
+				timeout: Duration::from_secs(5),
+				cancel: CancellationToken::new(),
+				repo_id: None,
+				job_id: None,
+				job_capability: None,
+				finding_id: None,
+			})
+			.await;
+		(result, finished.exists())
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn stdout_collection_has_a_budget_and_drains_the_pipe() {
+		// Concurrent test forks can inherit a writable script descriptor and cause ETXTBSY.
+		if !in_env(
+			"llm::claude_cli::tests::stdout_collection_has_a_budget_and_drains_the_pipe",
+			"output-fixture",
+			&[],
+		) {
+			return;
+		}
+		let (result, finished) = run_output_fixture(1024 * 1024 + 65536, 0, 0).await;
+		assert!(finished, "collector must drain the child pipe to avoid deadlock: {result:?}");
+		assert!(result.is_err(), "CLI accepted stdout beyond collection budget");
+		assert!(result.unwrap_err().to_string().contains("output exceeds"));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn stderr_collection_has_a_budget_and_drains_the_pipe() {
+		if !in_env(
+			"llm::claude_cli::tests::stderr_collection_has_a_budget_and_drains_the_pipe",
+			"output-fixture",
+			&[],
+		) {
+			return;
+		}
+		let (result, finished) = run_output_fixture(0, 1024 * 1024 + 65536, 0).await;
+		assert!(finished, "collector must drain the child pipe to avoid deadlock: {result:?}");
+		assert!(result.is_err(), "CLI accepted stderr beyond collection budget");
+		assert!(result.unwrap_err().to_string().contains("output exceeds"));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn oversized_failed_output_keeps_bounded_head_and_actionable_tail() {
+		if !in_env(
+			"llm::claude_cli::tests::oversized_failed_output_keeps_bounded_head_and_actionable_tail",
+			"output-fixture",
+			&[],
+		) {
+			return;
+		}
+		let (result, finished) =
+			run_output_fixture(1024 * 1024 + 65536, 1024 * 1024 + 65536, 1).await;
+		assert!(finished, "both pipes must drain concurrently: {result:?}");
+		let error = result.unwrap_err().to_string();
+		assert!(error.contains("stdout-tail-diagnostic"));
+		assert!(error.contains("stderr-tail-diagnostic"));
+		for stream in ["stdout", "stderr"] {
+			let start = error.find(&format!("{stream}(chars=")).unwrap();
+			let count = error[start..]
+				.split_once('=')
+				.unwrap()
+				.1
+				.split_once(')')
+				.unwrap()
+				.0
+				.parse::<usize>()
+				.unwrap();
+			assert!(count <= 1024 * 1024, "{stream} retained more than collection budget: {count}");
+		}
+	}
+
 	use std::path::Path;
 	use std::time::Duration;
 
