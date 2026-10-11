@@ -6,6 +6,7 @@ void core_state_machine_run(const unsigned char* data, size_t data_len);
 void core_text_bounded_run(const unsigned char* data, size_t data_len);
 void core_text_ident_run(const unsigned char* data, size_t data_len);
 void core_text_json_run(const unsigned char* data, size_t data_len);
+void core_text_repo_path_run(const unsigned char* data, size_t data_len);
 void proto_dto_run(const unsigned char* data, size_t data_len);
 void proto_version_run(const unsigned char* data, size_t data_len);
 void server_capability_header_run(const unsigned char* data, size_t data_len);

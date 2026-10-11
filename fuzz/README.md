@@ -232,6 +232,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
 | `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
 | `core_text_json` | Duplicate-preserving reference tree, depth/node/byte budgets, composed key/leaf rules, entry-point equivalence and redaction |
+| `core_text_repo_path` | Strict path invariants and independent legacy DTO/MCP acceptance, preserving documented disagreements |
 | `proto_dto` | All 36 public DTO types and enum variants, field-preserving round trips, capability redaction and independent LLM submission admission |
 | `proto_version` | Inclusive protocol windows, inverted-window rejection and exact mismatch fields and diagnostics |
 | `server_capability_header` | Exact header-text/length admission, unchanged hash bytes and closed denial diagnostics |
@@ -271,6 +272,12 @@ rules rather than imposing a new validation policy.
 `proto_version` consumes six little-endian bytes for the client, minimum
 and maximum u16 versions. A widened interval oracle checks both endpoints,
 inverted windows and integer boundaries; shorter inputs are ignored.
+
+`core_text_repo_path` preserves the legacy validators' different contracts.
+Its corpus records nine legacy-accepted classes rejected by strict RepoPath,
+plus whitespace-only input accepted by strict RepoPath but rejected by both
+legacy validators. MCP's lexical core remains on the actual submission path;
+filesystem containment stays separate. This target adds no path tightening.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.

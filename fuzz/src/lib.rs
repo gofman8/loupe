@@ -16,6 +16,7 @@ pub mod core_state_machine;
 pub mod core_text_bounded;
 pub mod core_text_ident;
 pub mod core_text_json;
+pub mod core_text_repo_path;
 pub mod proto_dto;
 pub mod proto_version;
 pub mod server_capability_header;

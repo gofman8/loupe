@@ -19,6 +19,7 @@ GEN_TEST core_state_machine
 GEN_TEST core_text_bounded
 GEN_TEST core_text_ident
 GEN_TEST core_text_json
+GEN_TEST core_text_repo_path
 GEN_TEST proto_dto
 GEN_TEST proto_version
 GEN_TEST server_capability_header

@@ -90,6 +90,25 @@ fn arg_u32(args: &Value, key: &str) -> Result<u32> {
 }
 
 fn normalize_submitted_file(workdir: &Path, file: &str) -> Result<String> {
+	let rel = PathBuf::from(normalize_path_component_rules(file)?);
+	let workdir = workdir.canonicalize().with_context(|| {
+		format!("canonicalizing workdir {} before validating submitted path", workdir.display())
+	})?;
+	let candidate = workdir.join(&rel);
+	if candidate.exists() {
+		let canonical = candidate
+			.canonicalize()
+			.with_context(|| format!("canonicalizing submitted file {}", candidate.display()))?;
+		if !canonical.starts_with(&workdir) {
+			anyhow::bail!("`file` resolves outside the workdir: {}", rel.display());
+		}
+	}
+	Ok(rel.to_string_lossy().into_owned())
+}
+
+/// Legacy lexical normalization, independent of filesystem containment.
+/// Keep its acceptance distinct from `RepoPath` until legacy paths migrate.
+pub fn normalize_path_component_rules(file: &str) -> Result<String> {
 	let stripped = file.strip_prefix("/workdir/").unwrap_or(file);
 	let path = Path::new(stripped);
 	if stripped.trim().is_empty() {
@@ -112,19 +131,6 @@ fn normalize_submitted_file(workdir: &Path, file: &str) -> Result<String> {
 	}
 	if rel.as_os_str().is_empty() {
 		anyhow::bail!("`file` must name a file inside the workdir");
-	}
-
-	let workdir = workdir.canonicalize().with_context(|| {
-		format!("canonicalizing workdir {} before validating submitted path", workdir.display())
-	})?;
-	let candidate = workdir.join(&rel);
-	if candidate.exists() {
-		let canonical = candidate
-			.canonicalize()
-			.with_context(|| format!("canonicalizing submitted file {}", candidate.display()))?;
-		if !canonical.starts_with(&workdir) {
-			anyhow::bail!("`file` resolves outside the workdir: {}", rel.display());
-		}
 	}
 
 	Ok(rel.to_string_lossy().into_owned())
