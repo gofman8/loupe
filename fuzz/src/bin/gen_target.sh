@@ -24,6 +24,8 @@ GEN_TEST proto_dto
 GEN_TEST proto_version
 GEN_TEST server_capability_header
 GEN_TEST server_config
+GEN_TEST server_report_email
+GEN_TEST server_report_github
 GEN_TEST smoke
 GEN_TEST storage_identity
 GEN_TEST storage_policy_snapshot

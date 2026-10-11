@@ -100,14 +100,14 @@ impl Reporter for EmailReporter {
 	}
 }
 
-fn validate_header_value(name: &str, value: &str) -> Result<()> {
+pub fn validate_header_value(name: &str, value: &str) -> Result<()> {
 	if value.bytes().any(|b| matches!(b, b'\r' | b'\n')) {
 		bail!("{name} header contains a newline");
 	}
 	Ok(())
 }
 
-fn render_message(
+pub fn render_message(
 	from: &str, to: &[String], subject: &str, repo: &RepoRow, findings: &[ReportFinding],
 ) -> String {
 	let mut out = String::new();

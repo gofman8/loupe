@@ -237,6 +237,8 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `proto_version` | Inclusive protocol windows, inverted-window rejection and exact mismatch fields and diagnostics |
 | `server_capability_header` | Exact header-text/length admission, unchanged hash bytes and closed denial diagnostics |
 | `server_config` | Actual file loader, owner-list rejection, root keys, and exact relative path resolution |
+| `server_report_email` | Exact header boundary, CR/LF admission and finding-content isolation from headers |
+| `server_report_github` | Title normalization, title/body character caps and observed S3 fence-containment cases |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
 | `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
@@ -301,6 +303,14 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+The report targets pass JSON findings to the actual renderers. Email input
+also supplies `from`, `to` and `subject`, whose newline checks must match
+admission and whose header block must stay independent of finding content.
+GitHub titles are capped at 100 Unicode scalar values and body admission at
+65,536. Static `escape-*` seeds preserve closing-fence escapes and a large
+email body for S3; these targets do not claim containment or an email-body
+cap that the current renderers do not provide.
 
 `worker_source_discovery` uses byte zero for inside/outside source-root and
 build-script symlinks; remaining NUL-separated fields contain root/member

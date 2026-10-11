@@ -279,7 +279,7 @@ fn severity_label(severity: Severity) -> LabelSpec {
 	}
 }
 
-fn render_title(finding: &Finding) -> String {
+pub fn render_title(finding: &Finding) -> String {
 	compact_title(&finding.title)
 }
 
@@ -312,7 +312,7 @@ pub(crate) fn validate_finding_body(
 	validate_body(&render_body(repo, report_finding))
 }
 
-fn validate_body(body: &str) -> Result<(), String> {
+pub fn validate_body(body: &str) -> Result<(), String> {
 	let chars = body.chars().count();
 	if chars > GITHUB_ISSUE_BODY_MAX_CHARS {
 		return Err(format!(
@@ -324,7 +324,7 @@ fn validate_body(body: &str) -> Result<(), String> {
 	Ok(())
 }
 
-fn render_body(repo: &RepoRow, report_finding: &ReportFinding) -> String {
+pub fn render_body(repo: &RepoRow, report_finding: &ReportFinding) -> String {
 	let finding = &report_finding.finding;
 	let mut out = String::new();
 	out.push_str(&format!("## Finding {}\n\n", format_finding_id(report_finding.id)));
