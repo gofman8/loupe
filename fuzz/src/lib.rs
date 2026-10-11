@@ -10,4 +10,5 @@ compile_error!("Fuzz targets need cfg=fuzzing");
 
 pub mod utils;
 
+pub mod core_text_bounded;
 pub mod smoke;

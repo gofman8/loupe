@@ -146,6 +146,10 @@ rust-fuzz organisation, the same as `cargo-fuzz` and `libfuzzer-sys`)
 and `serde_json` (already a product dependency). Anything else needs a
 sentence here saying why.
 
+`unicode-general-category` and `unicode-normalization` let text targets
+independently check character categories and NFC instead of calling the
+validator being tested. They use the same Unicode data as the product.
+
 The initial lockfile uses `arbitrary` 1.5.0 and `libfuzzer-sys` 0.4.13.
 `arbitrary` is confined to this unpublished workspace: derive it for local
 input models that select product operations, rather than adding fuzz-only
@@ -166,6 +170,12 @@ metadata, source discovery and network command output; these are parsing
 boundaries even when their producer is authenticated or runs locally.
 
 ## Surfaces that need targets
+
+Implemented targets (each corpus includes valid and malformed inputs):
+
+| Target | Assertions |
+|---|---|
+| `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.

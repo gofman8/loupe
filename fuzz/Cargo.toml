@@ -6,6 +6,9 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
+loupe-core = { path = "../crates/loupe-core" }
+unicode-general-category = { version = "1.1", default-features = false }
+unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
 # Product crates are added here as targets appear, one line per crate,
 # by path into the product workspace.
 # loupe-core = { path = "../crates/loupe-core" }
