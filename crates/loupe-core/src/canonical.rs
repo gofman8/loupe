@@ -18,11 +18,16 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
 
 struct Ordered<'a>(&'a Value);
 
+/// The object-ordering decision, shared by recursive serialization and proofs.
+pub(crate) fn ordered_fields(fields: &serde_json::Map<String, Value>) -> BTreeMap<&String, &Value> {
+	fields.iter().collect()
+}
+
 impl Serialize for Ordered<'_> {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		match self.0 {
 			Value::Object(fields) => serializer.collect_map(
-				fields.iter().map(|(key, value)| (key, Ordered(value))).collect::<BTreeMap<_, _>>(),
+				ordered_fields(fields).into_iter().map(|(key, value)| (key, Ordered(value))),
 			),
 			Value::Array(values) => serializer.collect_seq(values.iter().map(Ordered)),
 			value => value.serialize(serializer),
