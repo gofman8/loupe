@@ -137,6 +137,21 @@ sudo podman run --rm --privileged \
 These checks run as the image's worker user and use the same container
 privilege setting as deployment. They do not require provider credentials.
 
+## Server Configuration
+
+To configure worker request budgets or other TOML-only server settings, place
+the server TOML file in the host's persistent server data directory. Make it
+readable by container UID 10001, then set the path as seen inside the container:
+
+```bash
+export LOUPE_CONFIG=/var/lib/loupe/server.toml
+```
+
+The deploy helper persists this setting in `server.conf`, and the launcher
+passes it to the server. The default host directory is
+`/var/lib/loupe-container/server`, mounted at `/var/lib/loupe` in the container.
+The helper does not upload the TOML file; provision it before deploying.
+
 ## Bootstrap Server Secrets
 
 Run server init in the container and capture the emitted env locally:

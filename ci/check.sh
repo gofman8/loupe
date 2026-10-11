@@ -17,6 +17,9 @@ trap 'rm -rf "$SCRATCH"' EXIT
 
 say() { printf '\n== %s\n' "$*"; }
 
+say "server container deployment"
+bash contrib/docker/test-server-container.sh
+
 say "fmt (nightly)"
 rustup run nightly cargo fmt --all -- --check
 (cd fuzz && rustup run nightly cargo fmt --all -- --check)
