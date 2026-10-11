@@ -154,6 +154,9 @@ validator being tested. They use the same Unicode data as the product.
 only in the fuzz workspace to expose insertion order: otherwise its sorted
 map would mask a missing sort in the production canonicalizer.
 
+`serde` supports independent duplicate-preserving JSON trees in the budget
+oracle, before any map insertion could discard repeated keys.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -188,6 +191,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `core_canonical` | Independent sorted serialization, reordered/whitespace-equivalent JSON, idempotence, bounded output and BLAKE3 digest |
 | `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
 | `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
+| `core_text_json` | Duplicate-preserving reference tree, depth/node/byte budgets, composed key/leaf rules, entry-point equivalence and redaction |
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.

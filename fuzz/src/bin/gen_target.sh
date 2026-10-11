@@ -16,6 +16,7 @@ GEN_TEST() {
 GEN_TEST core_canonical
 GEN_TEST core_text_bounded
 GEN_TEST core_text_ident
+GEN_TEST core_text_json
 GEN_TEST smoke
 mkdir -p ../../runners/src/bin
 for old in ../../runners/src/bin/*_target.rs; do

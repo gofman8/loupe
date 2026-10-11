@@ -219,6 +219,7 @@ dependencies = [
  "arbitrary",
  "blake3",
  "loupe-core",
+ "serde",
  "serde_json",
  "unicode-general-category",
  "unicode-normalization",
