@@ -16,5 +16,6 @@ pub mod core_text_bounded;
 pub mod core_text_ident;
 pub mod core_text_json;
 pub mod smoke;
+pub mod storage_identity;
 pub mod storage_policy_snapshot;
 pub mod storage_source_refs;

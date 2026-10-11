@@ -199,6 +199,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
 | `core_text_json` | Duplicate-preserving reference tree, depth/node/byte budgets, composed key/leaf rules, entry-point equivalence and redaction |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
+| `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
 
 `storage_source_refs` takes one policy byte (even: 32 items, odd: 64),
@@ -211,6 +212,13 @@ by policy JSON. `BoundedJson<Payload>` applies the raw input and JSON budgets
 before snapshot decoding. The oracle checks validated retry delays in u128
 at the supplied count and fixed overflow boundaries; unknown job kinds must
 never acquire a phase policy. This uses the same storage path dependency.
+
+`storage_identity` takes JSON with `family`, `anchor` and optional `instance`
+strings, capped at 64 KiB. Both anchor policies pass through normalization
+before fingerprinting. A separate byte recognizer checks transient IDs and
+location/hash exclusions; Unicode helpers check NFC, case and whitespace.
+Equivalent spellings must share fingerprints, while different families must
+have different framed bytes. The target does not assume collision freedom.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
