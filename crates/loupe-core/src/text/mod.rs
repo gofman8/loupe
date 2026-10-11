@@ -91,34 +91,46 @@ fn characters(field: &'static str, text: &str, multiline: bool) -> Result<(), Er
 			continue;
 		}
 		let cp = c as u32;
-		if matches!(
-			get_general_category(c),
-			G::Control
-				| G::Format
-				| G::Unassigned
-				| G::PrivateUse
-				| G::LineSeparator
-				| G::ParagraphSeparator
-		) || (0xfdd0..=0xfdef).contains(&cp)
-			|| cp & 0xffff >= 0xfffe
-		{
+		if rejects_code_point(cp) {
 			return Err(Error { field, rule: Rule::Character, code_point: Some(cp) });
 		}
 	}
 	Ok(())
 }
 
-fn limits<P: TextPolicy>(text: &str) -> Result<(), Error> {
-	if text.chars().count() > P::MAX_CHARS {
-		return Err(Error::new(P::FIELD, Rule::Chars));
+/// The character policy, independent of UTF-8 decoding and multiline exceptions.
+pub(crate) fn rejects_code_point(cp: u32) -> bool {
+	let Some(c) = char::from_u32(cp) else { return true };
+	matches!(
+		get_general_category(c),
+		G::Control
+			| G::Format
+			| G::Unassigned
+			| G::PrivateUse
+			| G::LineSeparator
+			| G::ParagraphSeparator
+	) || (0xfdd0..=0xfdef).contains(&cp)
+		|| cp & 0xffff >= 0xfffe
+}
+
+/// Count UTF-8 leading bytes; callers supply the bytes of a valid `str`.
+/// Preserve the character-limit error before the byte-limit error.
+pub(crate) fn count_within(text: &[u8], max_chars: usize, max_bytes: usize) -> Result<(), Rule> {
+	if text.iter().filter(|byte| **byte & 0xc0 != 0x80).count() > max_chars {
+		return Err(Rule::Chars);
 	}
-	if text.len() > P::MAX_BYTES {
-		return Err(Error::new(P::FIELD, Rule::Bytes));
+	if text.len() > max_bytes {
+		return Err(Rule::Bytes);
 	}
 	Ok(())
 }
 
-fn normalized(raw: &str) -> String {
+fn limits<P: TextPolicy>(text: &str) -> Result<(), Error> {
+	count_within(text.as_bytes(), P::MAX_CHARS, P::MAX_BYTES)
+		.map_err(|rule| Error::new(P::FIELD, rule))
+}
+
+pub(crate) fn normalized(raw: &str) -> String {
 	raw.replace("\r\n", "\n").replace('\r', "\n").nfc().collect()
 }
 
@@ -215,7 +227,7 @@ impl RepoPath {
 		if raw.len() > 512 {
 			return Err(Error::new("path", Rule::Bytes));
 		}
-		if raw.contains('\\') || raw.split('/').any(|part| matches!(part, "" | "." | "..")) {
+		if !is_repo_path(raw.as_bytes()) {
 			return Err(Error::new("path", Rule::Path));
 		}
 		Ok(Self(raw.to_owned()))
@@ -223,6 +235,13 @@ impl RepoPath {
 	pub fn expose(&self) -> &str {
 		&self.0
 	}
+}
+
+/// Path structure after the constructor's character and byte-limit checks.
+pub(crate) fn is_repo_path(raw: &[u8]) -> bool {
+	!raw.contains(&b'\\')
+		&& !raw.contains(&0)
+		&& !raw.split(|byte| *byte == b'/').any(|part| matches!(part, b"" | b"." | b".."))
 }
 
 macro_rules! text_impls {
