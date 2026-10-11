@@ -199,11 +199,18 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
 | `core_text_json` | Duplicate-preserving reference tree, depth/node/byte budgets, composed key/leaf rules, entry-point equivalence and redaction |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
+| `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
 
 `storage_source_refs` takes one policy byte (even: 32 items, odd: 64),
 followed by JSON reference bytes. Inputs up to 128 KiB exercise both sides of
 the 64 KiB raw and canonical limits. The corpus includes item-count, path-byte
 and serialized-size boundaries, malformed JSON and decomposed path spelling.
+
+`storage_policy_snapshot` takes a little-endian u32 attempt count followed
+by policy JSON. `BoundedJson<Payload>` applies the raw input and JSON budgets
+before snapshot decoding. The oracle checks validated retry delays in u128
+at the supplied count and fixed overflow boundaries; unknown job kinds must
+never acquire a phase policy. This uses the same storage path dependency.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.

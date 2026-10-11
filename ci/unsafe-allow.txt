@@ -19,3 +19,4 @@ fuzz/src/core_canonical.rs fuzz entry point: the C entry point takes a raw point
 fuzz/src/core_text_json.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/core_state_machine.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/storage_source_refs.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
+fuzz/src/storage_policy_snapshot.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
