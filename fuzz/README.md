@@ -250,6 +250,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
 | `worker_repo_cache` | Exact cursor magic/version/body, round trips and status/UTF-8/whitespace behavior of git origin parsing |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
+| `worker_source_discovery` | Actual manifest/glob/exclusion parsing, canonical containment, sorted unique paths and complete known-fixture selection |
 | `web_api` | Actual browser guards, no upstream call on rejected headers, JSON-enclosed diagnostics and bounded responses |
 
 `storage_source_refs` takes one policy byte (even: 32 items, odd: 64),
@@ -300,6 +301,16 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+`worker_source_discovery` uses byte zero for inside/outside source-root and
+build-script symlinks; remaining NUL-separated fields contain root/member
+Cargo manifests and an exclusion pattern. Bit 3 instead passes all remaining
+bytes directly to the root manifest. A 64 KiB input cap bounds fixture work.
+Known fixtures assert complete legitimate selection as well as containment;
+the canonical check does not make concurrent filesystem changes atomic.
+`runner::submodule_paths` remains owned by runner integration tests, including
+`checkout_tolerates_submodule_gitlinks`; generated git2 tree cases remain in
+that integration-test backlog.
 
 `worker_repo_cache` passes raw bytes through the persisted cursor decoder
 and the actual git-origin output parser. It preserves legacy opaque SHA and

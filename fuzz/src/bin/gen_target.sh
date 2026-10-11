@@ -39,6 +39,7 @@ GEN_TEST worker_mcp_submission
 GEN_TEST worker_network_host
 GEN_TEST worker_repo_cache
 GEN_TEST worker_server_response
+GEN_TEST worker_source_discovery
 mkdir -p ../../runners/src/bin
 for old in ../../runners/src/bin/*_target.rs; do
 	[ -e "$old" ] || continue

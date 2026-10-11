@@ -162,6 +162,9 @@ fn default_excludes() -> Vec<String> {
 /// per-file size cap. `.git` and any excluded directory is skipped
 /// wholesale.
 pub(crate) fn walk_source_files(workdir: &Path, cfg: &ScannerConfig) -> Vec<PathBuf> {
+	let Ok(canonical_workdir) = workdir.canonicalize() else {
+		return Vec::new();
+	};
 	let roots = discover_roots(workdir, cfg);
 	let mut out = Vec::new();
 
@@ -169,16 +172,27 @@ pub(crate) fn walk_source_files(workdir: &Path, cfg: &ScannerConfig) -> Vec<Path
 		collect_from_root(workdir, cfg, &mut out);
 	} else {
 		for file in roots.files {
-			collect_file(&file, cfg, &mut out);
+			if is_within_workdir(&file, &canonical_workdir) {
+				collect_file(&file, cfg, &mut out);
+			}
 		}
 		for root in roots.roots {
-			collect_from_root(&root, cfg, &mut out);
+			if is_within_workdir(&root, &canonical_workdir) {
+				collect_from_root(&root, cfg, &mut out);
+			}
 		}
 	}
 
 	out.sort();
 	out.dedup();
 	out
+}
+
+// WalkDir does not follow nested symlinks, but it follows a symlink used as
+// its root. Package src directories and direct build.rs files therefore need
+// this check before traversal or collection. Preserve in-workdir symlinks.
+fn is_within_workdir(path: &Path, canonical_workdir: &Path) -> bool {
+	path.canonicalize().map(|path| path.starts_with(canonical_workdir)).unwrap_or(false)
 }
 
 #[derive(Default)]
@@ -263,6 +277,26 @@ fn manifest_has_package(cargo_toml: &Path) -> bool {
 fn parse_manifest(cargo_toml: &Path) -> Option<toml::Value> {
 	let text = std::fs::read_to_string(cargo_toml).ok()?;
 	toml::from_str(&text).ok()
+}
+
+/// Fuzz-only access to production manifest parsing and source selection.
+#[cfg(fuzzing)]
+pub mod fuzz_support {
+	use std::path::{Path, PathBuf};
+
+	pub fn parse_manifest(path: &Path) -> Option<toml::Value> {
+		super::parse_manifest(path)
+	}
+
+	pub fn workspace_excludes(path: &Path) -> Option<Vec<String>> {
+		super::parse_workspace(path).map(|workspace| workspace.exclude)
+	}
+
+	pub fn walk(workdir: &Path, excludes: &[String]) -> Vec<PathBuf> {
+		let mut cfg = super::ScannerConfig::default();
+		cfg.exclude_path_substrings.extend_from_slice(excludes);
+		super::walk_source_files(workdir, &cfg)
+	}
 }
 
 fn read_string_array(table: &toml::Value, key: &str) -> Vec<String> {
@@ -487,6 +521,60 @@ mod tests {
 
 	fn rel_names(root: &Path, files: Vec<PathBuf>) -> Vec<String> {
 		files.iter().map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned()).collect()
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn rejects_build_files_symlinked_outside_workdir() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().join("repo");
+		let outside = tree.path().join("outside");
+		write_crate(&root, &[("src/local.rs", "fn local() {}")]);
+		std::fs::create_dir(&outside).unwrap();
+		std::fs::write(outside.join("secret.rs"), "private source").unwrap();
+		std::fs::write(outside.join("build.rs"), "private build script").unwrap();
+		std::os::unix::fs::symlink(outside.join("build.rs"), root.join("build.rs")).unwrap();
+		let files = walk_source_files(&root, &ScannerConfig::default());
+		assert!(files.contains(&root.join("src/local.rs")), "retain legitimate source");
+		assert!(
+			files.iter().all(|path| path.canonicalize().unwrap().starts_with(&root)),
+			"source discovery selected a build script outside the workdir"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn rejects_source_roots_symlinked_outside_workdir() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().join("repo");
+		let outside = tree.path().join("outside");
+		write_crate(&root, &[]);
+		std::fs::create_dir(&outside).unwrap();
+		std::fs::write(outside.join("secret.rs"), "private source").unwrap();
+		std::fs::remove_dir(root.join("src")).unwrap();
+		std::os::unix::fs::symlink(&outside, root.join("src")).unwrap();
+		let files = walk_source_files(&root, &ScannerConfig::default());
+		assert!(
+			files.iter().all(|path| path.canonicalize().unwrap().starts_with(&root)),
+			"source discovery selected a source root outside the workdir"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn retains_source_roots_and_build_files_symlinked_inside_workdir() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path();
+		write_crate(root, &[]);
+		std::fs::create_dir(root.join("internal")).unwrap();
+		std::fs::write(root.join("internal/local.rs"), "fn local() {}").unwrap();
+		std::fs::write(root.join("internal/build.rs"), "fn main() {}").unwrap();
+		std::fs::remove_dir(root.join("src")).unwrap();
+		std::os::unix::fs::symlink(root.join("internal"), root.join("src")).unwrap();
+		std::os::unix::fs::symlink(root.join("internal/build.rs"), root.join("build.rs")).unwrap();
+		let files = walk_source_files(root, &ScannerConfig::default());
+		assert!(files.contains(&root.join("src/local.rs")));
+		assert!(files.contains(&root.join("build.rs")));
 	}
 
 	#[test]
