@@ -146,6 +146,25 @@ rust-fuzz organisation, the same as `cargo-fuzz` and `libfuzzer-sys`)
 and `serde_json` (already a product dependency). Anything else needs a
 sentence here saying why.
 
+The initial lockfile uses `arbitrary` 1.5.0 and `libfuzzer-sys` 0.4.13.
+`arbitrary` is confined to this unpublished workspace: derive it for local
+input models that select product operations, rather than adding fuzz-only
+traits to production types. For parsers, pass the original bytes directly;
+for a sequence of operations, consume `ByteSource` or `Unstructured` until
+exhaustion, with an explicit operation/allocation bound.
+
+The first verified toolchain was stable Rust 1.95.0, nightly 1.97.0
+(`b954122bb`, 2026-05-20), and cargo-fuzz 0.13.2. This host installs Cargo
+tools in `/tmp/cargo-home/bin`, which must be on `PATH`; it has no `bfd.h`,
+so libFuzzer is the active engine. Corpus replay needs neither that engine
+nor nightly. The smoke campaign completed 7,554,177 runs with 34 covered
+edges, and malformed-corpus checks were verified to fail before repair.
+
+The ingress backlog below was checked against main `db99745` before adding
+targets. The source inventory includes response accounting, repository
+metadata, source discovery and network command output; these are parsing
+boundaries even when their producer is authenticated or runs locally.
+
 ## Surfaces that need targets
 
 Each becomes a target when the code is covered; the list is the
@@ -169,3 +188,9 @@ backlog, kept current by the stage briefs.
 | Dashboard request handling, CLI rendering | browser, server | single-shot |
 | Phase (v2) DTOs, typed evidence, inventory manifest, candidates, admission | worker, agent | single-shot, round trip (after the v2 endpoints land) |
 | Prompt builder, report builder, canary scanner, citation check | agent, repo | single-shot, no-escape (Stage S3) |
+| Provider JSON/SSE token accounting and response headers | provider | single-shot, independent usage/header oracle |
+| Job filters, clone URLs, protocol headers, FTS query escaping | operator, worker | single-shot, parser-specific shape |
+| Repository cursor and origin parsing | repo | single-shot, exact framing and round trip |
+| Workspace manifests and source discovery | repo | bounded filesystem fixture and independent inventory |
+| Regex scanner file content | repo | bounded filesystem fixture and match offsets |
+| Network supervisor command output and nft input | sandbox, config | single-shot, syntax and golden output |
