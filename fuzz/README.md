@@ -177,6 +177,10 @@ authentication credential. Seeds vary each PEM field independently.
 header admission includes HTAB and exactly 43 bytes, without an alphabet
 restriction. Accepted bytes are checked against their BLAKE3 hash.
 
+`tempfile` isolates the actual configuration loader's files. `toml` supplies
+an independent value tree for checking relative path resolution and accepted
+root keys after that loader succeeds.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -216,6 +220,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `proto_dto` | All 36 public DTO types and enum variants, field-preserving round trips, capability redaction and independent LLM submission admission |
 | `proto_version` | Inclusive protocol windows, inverted-window rejection and exact mismatch fields and diagnostics |
 | `server_capability_header` | Exact header-text/length admission, unchanged hash bytes and closed denial diagnostics |
+| `server_config` | Actual file loader, owner-list rejection, root keys, and exact relative path resolution |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
 | `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |

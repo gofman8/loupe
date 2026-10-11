@@ -18,6 +18,7 @@ pub mod core_text_json;
 pub mod proto_dto;
 pub mod proto_version;
 pub mod server_capability_header;
+pub mod server_config;
 pub mod smoke;
 pub mod storage_identity;
 pub mod storage_policy_snapshot;
