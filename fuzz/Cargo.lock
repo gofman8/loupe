@@ -1006,6 +1006,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-general-category",
  "unicode-normalization",
+ "url",
 ]
 
 [[package]]

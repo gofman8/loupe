@@ -462,6 +462,20 @@ impl WorkerConfig {
 	}
 }
 
+/// Access to merge/validation without process startup, used only by fuzzing.
+#[cfg(fuzzing)]
+pub mod fuzzing {
+	use super::*;
+	pub fn merge(file: FileConfig) -> Result<WorkerConfig> {
+		let mut config = WorkerConfig::default();
+		config.apply_file(file)?;
+		Ok(config)
+	}
+	pub fn validate(config: &WorkerConfig) -> Result<()> {
+		config.validate()
+	}
+}
+
 impl Default for WorkerConfig {
 	fn default() -> Self {
 		let scanner_defaults = LlmScannerConfig::default();

@@ -33,6 +33,7 @@ GEN_TEST tls_pem
 GEN_TEST web_api
 GEN_TEST worker_broker_policy
 GEN_TEST worker_broker_usage
+GEN_TEST worker_config
 GEN_TEST worker_extract_json
 GEN_TEST worker_mcp_submission
 GEN_TEST worker_network_host

@@ -244,6 +244,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `tls_pem` | Certificate/key/root parsing, successful CA reload, valid fixture admission and malformed-label refusal |
 | `worker_broker_policy` | Both provider policies, denied tools and request headers, exact output reservation accounting |
 | `worker_broker_usage` | Independent JSON/SSE accounting, response header filtering and an empty tracing baseline |
+| `worker_config` | Actual file load/merge/validation, absolute resolved paths, model/effort/host policy and nonzero resource limits |
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
@@ -298,6 +299,13 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+`worker_config` writes raw TOML, capped at 128 KiB, to an absolute temporary
+path and calls the real loader. Independent checks cover its merge and
+validation decisions, relative path resolution, host policy and resource
+limits. The `url` dependency checks the configured provider endpoint's URL
+shape; sandbox startup and process environment behavior remain integration
+test responsibilities.
 
 `worker_network_host` takes raw UTF-8 hosts up to 16 KiB and derives typed
 IPv4 addresses/routes from the same bytes. Hostnames have at most 253 bytes,

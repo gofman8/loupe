@@ -36,3 +36,4 @@ fuzz/src/worker_extract_json.rs fuzz entry point: the C entry point takes a raw 
 fuzz/src/worker_broker_policy.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/worker_broker_usage.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/worker_network_host.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
+fuzz/src/worker_config.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
