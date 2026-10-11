@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+# Behavioral checks use disposable repositories and fake compiler/fuzzer tools.
+# Each case runs in a separate invocation; subshell setup cannot affect another.
+# shellcheck disable=SC2031
+set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SOURCE=${LOUPE_TOOLING_SOURCE:-$SCRIPT_DIR}
+TEST_ROOT=$(mktemp -d /tmp/loupe-tooling-selftest.XXXXXX)
+PIDS=()
+cleanup() {
+	for pid in "${PIDS[@]}"; do
+		kill -TERM -- "-$pid" 2>/dev/null || true
+		kill -KILL -- "-$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	done
+	rm -rf "$TEST_ROOT"
+}
+trap cleanup EXIT
+fail() { echo "FAIL: $*" >&2; exit 1; }
+wait_for() {
+	local i
+	for ((i=0; i<150; i++)); do
+		if "$@"; then return 0; fi
+		sleep 0.02
+	done
+	fail "timed out waiting for $*"
+}
+fixture() {
+	CASE=$TEST_ROOT/$1
+	mkdir -p "$CASE/repo" "$CASE/bin" "$CASE/state" "$CASE/local" "$CASE/locks"
+	cp -a "$SOURCE" "$CASE/repo/ci"
+	mkdir -p "$CASE/repo/fuzz/src/bin" "$CASE/repo/fuzz/runners" "$CASE/repo/fuzz/test_cases/alpha"
+	printf 'GEN_TEST alpha\nGEN_TEST beta\n' > "$CASE/repo/fuzz/src/bin/gen_target.sh"
+	: > "$CASE/repo/fuzz/test_cases/alpha/empty"
+	cat > "$CASE/bin/git" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+if [[ ${1:-} == -C ]]; then cd "$2"; shift 2; fi
+case "$1 $2" in
+'rev-parse --abbrev-ref') echo main ;;
+'rev-parse --show-toplevel') echo "$FIXTURE/repo" ;;
+'rev-parse --git-common-dir') echo "$FIXTURE/repo/.git" ;;
+'rev-parse --path-format=absolute') echo "$FIXTURE/repo/.git" ;;
+'rev-parse --short') echo abc123 ;;
+'rev-parse '* ) echo abc123 ;;
+'worktree add') dest=$4; mkdir -p "$dest"; cp -a "$FIXTURE/repo/." "$dest/" ;;
+'checkout '* ) : ;;
+'status '* ) if [[ ${STAGED_GENERATED:-0} == 1 ]]; then echo 'A  runners/src/bin/alpha_target.rs'; fi ;;
+'diff '* ) [[ ${CI_GENERATED_DIFF:-0} == 0 ]] ;;
+'ls-files '* ) : ;;
+*) echo "unexpected git call $*" >&2; exit 2 ;;
+esac
+STUB
+	cat > "$CASE/bin/rustup" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+shift 2
+exec "$@"
+STUB
+	cat > "$CASE/bin/taskset" <<'STUB'
+#!/usr/bin/env bash
+shift 2
+exec "$@"
+STUB
+	cat > "$CASE/bin/nice" <<'STUB'
+#!/usr/bin/env bash
+shift 2
+exec "$@"
+STUB
+	printf '#!/bin/sh\nexit 0\n' > "$CASE/bin/cargo-kani"
+	cat > "$CASE/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FIXTURE/state/cargo-args"
+if [[ $1 == metadata ]]; then
+	if [[ ${METADATA_FAIL:-0} != 0 ]]; then
+		echo 'fixture dependency resolution failed' >&2
+		exit 17
+	fi
+	if [[ " $* " != *' --no-deps '* ]]; then
+		if [[ ${METADATA_UNCACHED:-0} == 1 && " $* " == *' --offline '* ]]; then
+			echo 'fixture platform dependency needs a download' >&2
+			exit 17
+		fi
+		if [[ -n ${METADATA_TOOL:-} ]]; then
+			printf '{"packages":[{"name":"%s"}]}\n' "$METADATA_TOOL"
+			exit 0
+		fi
+	fi
+	printf '%s\n' '{"packages":[{"id":"a","name":"loupe-cli","targets":[{"kind":["bin"]}]},{"id":"b","name":"loupe-core","targets":[{"kind":["lib"]}]},{"id":"outside","name":"loupe-unrelated","targets":[{"kind":["lib"]}]}],"workspace_members":["a","b"]}'
+	exit 0
+fi
+if [[ $1 == check && "$*" == *'loupe-cli --lib'* ]]; then exit 18; fi
+[[ $1 == fuzz || $1 == kani ]] || exit 0
+printf '%s\n' "$CARGO_TARGET_DIR" >> "$FIXTURE/state/targets"
+printf '%s\n' "$CARGO_BUILD_JOBS" >> "$FIXTURE/state/jobs"
+ulimit -v >> "$FIXTURE/state/memory"
+case ${FUZZ_MODE:-clean} in
+hold)
+	printf '%s\n' "$$" > "$FIXTURE/state/child"
+	# Descendant remains in the fuzzer's process group.
+	sleep 30 &
+	grandchild=$!
+	printf '%s\n' "$grandchild" > "$FIXTURE/state/grandchild"
+	trap 'kill "$grandchild" 2>/dev/null || true; wait "$grandchild" 2>/dev/null || true; exit 0' TERM INT
+	wait "$grandchild"
+	;;
+fail) exit 23 ;;
+find)
+	for arg in "$@"; do
+		case "$arg" in -artifact_prefix=*) mkdir -p "${arg#*=}"; : > "${arg#*=}crash-one";; esac
+	done
+	exit 77 ;;
+timeout) exit 124 ;;
+no_verdict) echo '0 harnesses selected' ;;
+failed_verdict) echo 'VERIFICATION:- FAILED' ;;
+success_then_failure) printf 'VERIFICATION:- SUCCESSFUL\nVERIFICATION:- FAILED\n' ;;
+stubborn)
+	trap '' TERM INT
+	printf '%s\n' "$$" > "$FIXTURE/state/child"
+	sleep 30 &
+	printf '%s\n' "$!" > "$FIXTURE/state/grandchild"
+	wait
+	;;
+leaking_harness)
+	if [[ $* == *kani::first* ]]; then
+		sleep 30 &
+		printf '%s\n' "$!" > "$FIXTURE/state/leftover"
+		wait
+	else
+		old=$(cat "$FIXTURE/state/leftover")
+		state=$(ps -o stat= -p "$old" || true)
+		case "$state" in ''|Z*) : ;; *) : > "$FIXTURE/state/overlap" ;; esac
+		: > "$FIXTURE/state/second-ran"
+		echo 'VERIFICATION:- SUCCESSFUL'
+	fi
+	;;
+clean) sleep 0.1; echo 'VERIFICATION:- SUCCESSFUL' ;;
+esac
+STUB
+	chmod +x "$CASE/bin/"* "$CASE/repo/ci/"*.sh
+	export FIXTURE=$CASE PATH="$CASE/bin:$ORIGINAL_PATH"
+	export LOUPE_LOCAL=$CASE/local LOUPE_LOCK_DIR=$CASE/locks
+	export LOUPE_FUZZ_CPU=0 LOUPE_FUZZ_SLICE=1 LOUPE_FUZZ_RETRY=1 LOUPE_KANI_POLL=1
+	export CARGO_BUILD_JOBS=1
+	unset CARGO_TARGET_DIR LOUPE_FUZZ_PINNED LOUPE_KANI_MANAGED
+}
+start_fuzz() {
+	setsid "$CASE/repo/ci/fuzz-continuous.sh" main > "$CASE/output" 2>&1 &
+	PID=$!; PIDS+=("$PID")
+}
+start_kani() {
+	mkdir -p "$CASE/repo/crates/loupe-core/kani"
+	printf '#[kani::proof]\nfn sample() {}\n' > "$CASE/repo/crates/loupe-core/kani/mod.rs"
+	setsid "$CASE/repo/ci/kani-continuous.sh" main > "$CASE/output" 2>&1 &
+	PID=$!; PIDS+=("$PID")
+}
+generation_fixture() {
+	mkdir -p "$CASE/repo/fuzz/runners/src/bin"
+	printf 'current runner\n' > "$CASE/repo/fuzz/runners/src/bin/alpha_target.rs"
+	printf 'current header\n' > "$CASE/repo/fuzz/targets.h"
+	printf '#!/bin/sh\nexit 0\n' > "$CASE/repo/fuzz/test-harness.sh"
+	cat > "$CASE/repo/fuzz/src/bin/gen_target.sh" <<'STUB'
+#!/bin/sh
+case "${GENERATION_MODE:-unchanged}" in
+edit) printf 'regenerated runner\n' > ../../runners/src/bin/alpha_target.rs ;;
+add) printf 'new runner\n' > ../../runners/src/bin/beta_target.rs ;;
+delete) rm ../../runners/src/bin/alpha_target.rs ;;
+header) printf 'regenerated header\n' > ../../targets.h ;;
+esac
+STUB
+	chmod +x "$CASE/repo/fuzz/src/bin/gen_target.sh"
+	export LOUPE_KANI=0 CI=false
+}
+stop_fuzz() {
+	kill -TERM "$PID"
+	local rc=0
+	wait "$PID" || rc=$?
+	[[ $rc == 143 || $rc == 0 ]] || fail "unexpected shutdown status $rc"
+}
+ORIGINAL_PATH=$PATH
+case ${1:-all} in
+env)
+	fixture env
+	unset LOUPE_LOCK_DIR
+	(cd "$CASE/repo"; . ci/env.sh; [[ ${LOUPE_LOCK_DIR:-} == "/tmp/loupe-locks-$(id -u)" ]]) || fail 'default lock directory is not machine-wide'
+	;;
+metadata)
+	fixture metadata
+	(cd "$CASE/repo"; ci/check.sh) > "$CASE/output" 2>&1 || fail 'gate rejected bin-only member'
+	grep -q '^check --quiet -p loupe-core --lib$' "$CASE/state/cargo-args" || fail 'library member omitted'
+	grep -q '^check --quiet -p loupe-cli --all-targets$' "$CASE/state/cargo-args" || fail 'binary member omitted'
+	! grep -q '^check .*loupe-unrelated' "$CASE/state/cargo-args" || fail 'nonmember checked'
+	;;
+metadata_error)
+	fixture metadata_error
+	if (cd "$CASE/repo"; METADATA_FAIL=1 ci/check.sh) > "$CASE/output" 2>&1; then fail 'metadata failure passed gate'; fi
+	;;
+metadata_uncached)
+	fixture metadata_uncached
+	if ! (cd "$CASE/repo"; . ci/gates.sh; METADATA_UNCACHED=1 gate_no_tool_deps .) > "$CASE/output" 2>&1; then
+		cat "$CASE/output"
+		fail 'dependency gate rejected an uncached platform dependency'
+	fi
+	;;
+metadata_dependency_error)
+	fixture metadata_dependency_error
+	if (cd "$CASE/repo"; . ci/gates.sh; METADATA_FAIL=1 gate_no_tool_deps .) > "$CASE/output" 2>&1; then
+		fail 'dependency metadata failure passed gate'
+	fi
+	grep -q 'fixture dependency resolution failed' "$CASE/output" || fail 'dependency metadata diagnostic was hidden'
+	;;
+metadata_tools)
+	fixture metadata_tools
+	for tool in loupe-fuzz loupe-fuzz-runners; do
+		if (cd "$CASE/repo"; . ci/gates.sh; METADATA_TOOL=$tool gate_no_tool_deps .) > "$CASE/output" 2>&1; then
+			fail "dependency gate accepted $tool"
+		fi
+		grep -q "a product crate depends on a tool crate:.*$tool" "$CASE/output" || fail 'tool dependency failed for an unrelated reason'
+	done
+	;;
+generated_staged)
+	fixture generated_staged
+	generation_fixture
+	STAGED_GENERATED=1 "$CASE/repo/ci/check.sh" --full > "$CASE/output" 2>&1 || fail 'correct staged generated files rejected'
+	;;
+generated_changes)
+	for mode in edit add delete header; do
+		fixture "generated_$mode"
+		generation_fixture
+		if GENERATION_MODE=$mode "$CASE/repo/ci/check.sh" --full > "$CASE/output" 2>&1; then
+			fail "generation $mode went undetected"
+		fi
+		grep -q 'generated fuzz targets are stale' "$CASE/output" || fail "generation $mode failed for an unrelated reason"
+	done
+	;;
+generated_ci)
+	fixture generated_ci
+	generation_fixture
+	if CI=true CI_GENERATED_DIFF=1 "$CASE/repo/ci/check.sh" --full > "$CASE/output" 2>&1; then
+		fail 'CI accepted generated output differing from HEAD'
+	fi
+	;;
+short_lock)
+	fixture short_lock
+	exec 8> "$LOUPE_LOCK_DIR/fuzz.lock"
+	flock 8
+	FUZZ_MODE=clean timeout -k 1 0.4 "$CASE/repo/ci/fuzz.sh" alpha_target 1 > "$CASE/output" 2>&1 || true
+	[[ ! -f $CASE/state/targets ]] || fail 'short campaign bypassed shared lock'
+	;;
+kill_after)
+	fixture kill_after
+	cat > "$CASE/bin/timeout" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FIXTURE/state/timeout-args"
+exit 0
+STUB
+	chmod +x "$CASE/bin/timeout"
+	"$CASE/repo/ci/fuzz.sh" alpha_target 1 > "$CASE/output" 2>&1
+	grep -q -- '-k 30' "$CASE/state/timeout-args" || fail 'short fuzz lacks forced kill'
+	start_fuzz
+	wait_for test -f "$CASE/state/timeout-args"
+	sleep 0.1
+	grep -q -- '-k 30' "$CASE/state/timeout-args" || fail 'continuous fuzz lacks forced kill'
+	;;
+target_dir)
+	fixture target_dir
+	export FUZZ_MODE=hold CARGO_TARGET_DIR=/tmp/loupe-explicit-selftest
+	start_fuzz
+	wait_for test -f "$CASE/state/targets"
+	[[ $(head -1 "$CASE/state/targets") == "$CARGO_TARGET_DIR" ]] || fail 'continuous fuzz overrides target directory'
+	stop_fuzz
+	;;
+default_targets)
+	fixture default_targets
+	export FUZZ_MODE=hold
+	start_fuzz
+	wait_for test -s "$CASE/state/targets"
+	[[ $(head -1 "$CASE/state/targets") == /tmp/cargo-target-loupe-fuzz-continuous-main ]] || fail 'fuzz default build path is not under /tmp'
+	stop_fuzz
+	rm "$CASE/state/targets"
+	start_kani
+	wait_for test -s "$CASE/state/targets"
+	[[ $(head -1 "$CASE/state/targets") == /tmp/cargo-target-loupe-kani-continuous-main ]] || fail 'Kani default build path is not under /tmp'
+	stop_fuzz
+	;;
+empty_targets)
+	fixture empty_targets
+	printf 'GEN_TEST smoke\n' > "$CASE/repo/fuzz/src/bin/gen_target.sh"
+	start_fuzz
+	wait_for test -s "$LOUPE_LOCAL/fuzz-continuous/FAILED.log"
+	grep -q 'ERROR no fuzz targets' "$LOUPE_LOCAL/fuzz-continuous/FAILED.log" || fail 'empty campaign not reported'
+	[[ ! -f $CASE/state/targets ]] || fail 'empty campaign ran a target'
+	sleep 0.2
+	[[ $(wc -l < "$LOUPE_LOCAL/fuzz-continuous/FAILED.log") -le 2 ]] || fail 'empty campaign spins'
+	stop_fuzz
+	;;
+singleton)
+	fixture singleton
+	export FUZZ_MODE=hold
+	start_fuzz
+	wait_for test -f "$CASE/state/child"
+	first=$PID
+	for branch in main another; do
+		rc=0
+		timeout -k 1 0.5 "$CASE/repo/ci/fuzz-continuous.sh" "$branch" >> "$CASE/duplicate-output" 2>&1 || rc=$?
+		[[ $rc == 3 ]] || fail "duplicate campaign on $branch exited $rc instead of 3"
+	done
+	PID=$first; stop_fuzz
+	;;
+cleanup)
+	fixture cleanup
+	export FUZZ_MODE=hold
+	start_fuzz
+	wait_for test -f "$CASE/state/grandchild"
+	child=$(cat "$CASE/state/child"); grandchild=$(cat "$CASE/state/grandchild")
+	stop_fuzz
+	! kill -0 "$child" 2>/dev/null || fail 'fuzzer survived campaign shutdown'
+	! kill -0 "$grandchild" 2>/dev/null || fail 'fuzzer descendant survived campaign shutdown'
+	;;
+failure)
+	fixture failure
+	export FUZZ_MODE=fail
+	start_fuzz
+	wait_for test -s "$LOUPE_LOCAL/fuzz-continuous/FAILED.log"
+	grep -q 'ERROR.*exit 23' "$LOUPE_LOCAL/fuzz-continuous/FAILED.log" || fail 'build failure lacks status'
+	[[ $(cat "$LOUPE_LOCAL/fuzz-continuous/next") == alpha ]] || fail 'failed build advanced rotation'
+	[[ $(wc -l < "$CASE/state/targets") -le 2 ]] || fail 'failed build retries without backoff'
+	stop_fuzz
+	;;
+find)
+	fixture find
+	export FUZZ_MODE=find
+	start_fuzz
+	wait_for test -s "$LOUPE_LOCAL/fuzz-continuous/FOUND.log"
+	grep -q 'alpha.*crash-one' "$LOUPE_LOCAL/fuzz-continuous/FOUND.log" || fail 'artifact missing target/path'
+	stop_fuzz
+	;;
+timeout)
+	fixture timeout
+	export FUZZ_MODE=timeout
+	start_fuzz
+	wait_for test -s "$LOUPE_LOCAL/fuzz-continuous/FAILED.log"
+	grep -q 'TIMEOUT' "$LOUPE_LOCAL/fuzz-continuous/FAILED.log" || fail 'timeout misclassified'
+	stop_fuzz
+	;;
+kani)
+	fixture kani
+	cat > "$CASE/repo/ci/kani.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "$CARGO_TARGET_DIR" > "$FIXTURE/state/targets"
+exit 23
+STUB
+	export CARGO_TARGET_DIR=/tmp/loupe-kani-explicit-selftest
+	setsid "$CASE/repo/ci/kani-continuous.sh" main > "$CASE/output" 2>&1 &
+	PID=$!; PIDS+=("$PID")
+	wait_for test -s "$CASE/state/targets"
+	[[ $(cat "$CASE/state/targets") == "$CARGO_TARGET_DIR" ]] || fail 'continuous Kani overrides target directory'
+	wait_for test -s "$LOUPE_LOCAL/kani-continuous/FAILED.log"
+	grep -q 'ERROR.*exit 23' "$LOUPE_LOCAL/kani-continuous/FAILED.log" || fail 'silent Kani setup failure'
+	stop_fuzz
+	;;
+kani_failure)
+	fixture kani_failure
+	printf '#!/bin/sh\nexit 23\n' > "$CASE/repo/ci/kani.sh"
+	start_kani
+	wait_for test -s "$LOUPE_LOCAL/kani-continuous/FAILED.log"
+	grep -q 'ERROR.*exit 23' "$LOUPE_LOCAL/kani-continuous/FAILED.log" || fail 'Kani setup error was not classified'
+	stop_fuzz
+	;;
+kani_cleanup)
+	fixture kani_cleanup
+	export FUZZ_MODE=hold
+	start_kani
+	wait_for test -f "$CASE/state/grandchild"
+	child=$(cat "$CASE/state/child"); grandchild=$(cat "$CASE/state/grandchild")
+	stop_fuzz
+	! kill -0 "$child" 2>/dev/null || fail 'Kani child survived campaign shutdown'
+	! kill -0 "$grandchild" 2>/dev/null || fail 'Kani descendant survived campaign shutdown'
+	;;
+kani_singleton)
+	fixture kani_singleton
+	export FUZZ_MODE=hold
+	start_kani
+	wait_for test -f "$CASE/state/child"
+	rc=0
+	timeout -k 1 0.5 "$CASE/repo/ci/kani-continuous.sh" main >> "$CASE/duplicate-output" 2>&1 || rc=$?
+	[[ $rc == 3 ]] || fail "duplicate Kani campaign exited $rc instead of 3"
+	stop_fuzz
+	;;
+kani_slots)
+	fixture kani_slots
+	exec 7> "$LOUPE_LOCK_DIR/kani.lock"
+	exec 8> "$LOUPE_LOCK_DIR/kani.lock.1"
+	flock 7; flock 8
+	FUZZ_MODE=clean timeout -k 1 0.4 "$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1 || true
+	[[ ! -f $CASE/state/targets ]] || fail 'Kani bypassed shared slots'
+	;;
+kani_slot_cap|kani_memory_cap|kani_memory_arg_cap)
+	fixture "$1"
+	args=(-p loupe-core --exact --harness kani::sample)
+	case $1 in
+	kani_slot_cap) export LOUPE_KANI_SLOTS=3 ;;
+	kani_memory_cap) export LOUPE_KANI_MEM_GB=13 ;;
+	kani_memory_arg_cap) args+=(--mem-gb 13) ;;
+	esac
+	rc=0
+	"$CASE/repo/ci/kani.sh" "${args[@]}" > "$CASE/output" 2>&1 || rc=$?
+	[[ $rc == 2 ]] || fail "Kani accepted excessive resource override ($1; exit $rc)"
+	[[ ! -f $CASE/state/targets ]] || fail 'Kani spawned a tool above its resource ceiling'
+	;;
+kani_lower_limits)
+	fixture kani_lower_limits
+	LOUPE_KANI_SLOTS=1 LOUPE_KANI_MEM_GB=1 "$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1 || fail 'Kani rejected lower resource limits'
+	[[ $(cat "$CASE/state/memory") == 1048576 ]] || fail 'Kani did not apply lower memory limit'
+	;;
+kani_verdict)
+	for mode in no_verdict failed_verdict success_then_failure; do
+		fixture "kani_$mode"
+		rc=0
+		FUZZ_MODE=$mode "$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1 || rc=$?
+		[[ $rc != 0 ]] || fail "Kani accepted exit 0 with $mode"
+		grep -qE ' (ERROR|FAILED)' "$CASE/output" || fail "Kani $mode lacks failure summary"
+	done
+	;;
+kani_harness_cleanup)
+	fixture kani_harness_cleanup
+	mkdir -p "$CASE/repo/crates/loupe-core/kani"
+	printf '#[kani::proof]\nfn first() {}\n#[kani::proof]\nfn second() {}\n' > "$CASE/repo/crates/loupe-core/kani/mod.rs"
+	FUZZ_MODE=leaking_harness LOUPE_KANI_MANAGED=1 setsid "$CASE/repo/ci/kani.sh" --workspace --timeout 1 > "$CASE/output" 2>&1 &
+	PID=$!; PIDS+=("$PID")
+	rc=0; wait "$PID" || rc=$?
+	[[ $rc != 0 ]] || fail 'timed out first harness reported success'
+	[[ -f $CASE/state/second-ran ]] || fail 'second harness did not execute'
+	[[ ! -f $CASE/state/overlap ]] || fail 'first harness descendant overlapped second harness'
+	;;
+kani_cleanup_stubborn)
+	fixture kani_cleanup_stubborn
+	export FUZZ_MODE=stubborn
+	start_kani
+	wait_for test -f "$CASE/state/grandchild"
+	child=$(cat "$CASE/state/child"); grandchild=$(cat "$CASE/state/grandchild")
+	stop_fuzz
+	for pid in "$child" "$grandchild"; do
+		state=$(ps -o stat= -p "$pid" || true)
+		case "$state" in ''|Z*) : ;; *) fail 'TERM-resistant Kani descendant survived campaign shutdown' ;; esac
+	done
+	;;
+all)
+	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_lower_limits kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
+		"$SCRIPT_DIR/tooling-selftest.sh" "$name"
+	done
+	;;
+*) fail "unknown test $1" ;;
+esac
+echo "PASS: ${1:-all}"

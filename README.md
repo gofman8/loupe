@@ -135,6 +135,17 @@ test suites; the LLM-backend live test skips automatically when
 `claude` is not on PATH, and the bubblewrap integration tests skip
 when `bwrap` is missing.
 
+Before every commit, run `ci/check.sh` with stable Rust, nightly Rust
+(including rustfmt), and `jq` installed. It checks formatting, lints,
+each crate independently, documentation, and tests. Build output defaults
+to a branch-specific directory under `/tmp`; set `CARGO_TARGET_DIR` to a
+fresh directory there when invoking Cargo directly.
+
+`ci/check.sh --full` adds fuzz corpus replay, generated-runner checks,
+available Kani harnesses, and ignored integration tests. Fuzz replay needs
+only stable Rust. Campaigns additionally need `cargo-fuzz`, Bash and
+util-linux. See [fuzzing](fuzz/README.md) and the [campaign runbook](ci/README.md).
+
 For release validation and crates.io publication, see
 [the release guide](contrib/releasing.md).
 
@@ -802,13 +813,14 @@ worker's config.
 
 ## Continuous integration
 
-GitHub Actions (`.github/workflows/ci.yml`) runs three jobs on every
+GitHub Actions (`.github/workflows/ci.yml`) runs four jobs on every
 push and pull request:
 
 - **fmt** — `cargo fmt --all -- --check` on a nightly toolchain.
 - **clippy** — `cargo clippy --workspace --all-targets --all-features
   -- -D warnings` on stable.
 - **test** — `cargo test --workspace --all-targets` on stable.
+- **fuzz-replay** — replay committed seeds and verify generated runners.
 
 ## Layout
 

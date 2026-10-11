@@ -1,0 +1,10 @@
+# Kani harnesses that reach no verdict within the wrapper's limits
+# (timeout or the memory cap) after the tuning described in the stage
+# brief ("Verdict table"), where the bounds tried and what covers the
+# property instead (fuzz targets, corpus and unit tests) are recorded.
+# ci/kani.sh skips them by default and reports them as SKIPPED;
+# LOUPE_KANI_ALL=1 runs them anyway. An entry that names no existing
+# harness is an error. Remove a line when its harness is made to
+# verify.
+#
+# <crate> <harness>

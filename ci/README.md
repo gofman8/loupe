@@ -1,0 +1,70 @@
+# Local validation and campaigns
+
+Run `ci/check.sh` before committing. `ci/check.sh --full` also runs
+`sh fuzz/test-harness.sh`, committed corpus replay, generator checks,
+available Kani proofs and ignored integration tests. The Rust checks need
+stable and nightly toolchains. Workspace enumeration requires `jq`.
+Generator checks compare files before and after regeneration, so correct
+staged additions pass locally. With `CI=true`, generated files must also
+match `HEAD` and have no untracked additions.
+
+Campaign scripts require Bash, GNU coreutils (`timeout`, `nice`, `date`),
+and util-linux (`flock`, `setsid`, `taskset`). Fuzzing needs `cargo-fuzz`
+and nightly; Kani needs `cargo-kani`. `ci/tooling-selftest.sh` exercises
+the scripts with disposable fixtures and stub tools, without compiling or
+starting a real campaign. It checks member selection, locks, status reporting,
+build paths, retry behavior, and shutdown of spawned processes.
+
+`ci/env.sh` defaults build output to `/tmp/cargo-target-loupe-<branch>`;
+continuous campaigns use `/tmp/cargo-target-loupe-<kind>-<branch>`. An
+explicit `CARGO_TARGET_DIR` wins. Supply a fresh task-specific directory
+under `/tmp` when starting a new task. Compiler concurrency defaults to six
+jobs and is capped at six; the continuous fuzzer always uses one.
+
+`LOUPE_LOCAL` defaults to the invoking worktree's `.local` directory and
+holds persistent corpus, detached worktrees and logs. Locks live separately
+under `LOUPE_LOCK_DIR`, default `/tmp/loupe-locks-<uid>`, so every worktree
+uses the same locks. Keep this setting consistent across processes that
+must coordinate. Kani may override its slot directory using
+`LOUPE_KANI_LOCK_DIR` for compatibility with other repositories.
+
+`ci/fuzz.sh <target> [seconds]` serializes short campaigns on `fuzz.lock`.
+The default is 120 seconds, with a 2 GiB libFuzzer RSS limit and a wall-time
+allowance for compilation. Timeout sends TERM, then KILL after 30 seconds.
+
+`ci/fuzz-continuous.sh [branch]` runs one campaign per repository and also
+owns a lock for its branch. Another start exits 3. It uses a separate lock
+from short campaigns, runs at niceness 19 on `LOUPE_FUZZ_CPU` (default the
+last numbered core), and rotates targets in 300-second slices. Set the CPU
+explicitly when another campaign occupies that core. Corpus and rotation
+state survive restarts. Branch changes are picked up between slices.
+
+Fuzz state lives under `$LOUPE_LOCAL/fuzz-continuous`. `FOUND.log` records
+new artifacts with commit, target and path; `FAILED.log` records timeouts,
+build failures and setup errors with their exit status and log path.
+`progress.log` distinguishes clean slices and finds. Failed builds retain
+the current target and retry after `LOUPE_FUZZ_RETRY` seconds (default 30),
+refreshing the branch before retrying. Empty target lists also wait.
+
+`ci/kani-continuous.sh [branch]` owns a branch singleton lock and uses
+`ci/kani.sh` for the machine-wide slots (default and maximum two), address-space
+limit (default and maximum 12 GiB), and per-harness timeout. Environment
+variables and `--mem-gb` may lower these ceilings; larger values exit 2
+before starting tools. Its state lives under
+`$LOUPE_LOCAL/kani-continuous`. It records wrapper failures even if no
+verdict was printed, and retries unsuccessful tips after `LOUPE_KANI_POLL`
+seconds (default 120). Successful tips wait for the branch to change.
+An exit status of zero counts as a proof only with an explicit successful
+verification verdict. Missing verdicts and failed checks remain failures.
+
+To stop a campaign, send TERM to its script PID and wait for it to exit;
+for a shell-started background process, use `kill -TERM "$campaign_pid"`
+then `wait "$campaign_pid"`. Shutdown signals the active process group,
+allows five seconds for cleanup, then kills remaining members and reaps
+the direct child before releasing the locks. Each Kani harness owns a separate
+group, which is cleaned before the next harness runs. Under a continuous
+campaign, the Kani wrapper uses a shorter two-second cleanup grace so its
+compiler and solver stop before the parent's escalation. Restart only after
+that wait completes, using the
+same local-state and lock directories. Review `FOUND.log` and `FAILED.log`
+before each commit batch and handoff.

@@ -1,0 +1,72 @@
+[package]
+name = "loupe-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+# Product crates are added here as targets appear, one line per crate,
+# by path into the product workspace.
+# loupe-core = { path = "../crates/loupe-core" }
+# loupe-proto = { path = "../crates/loupe-proto" }
+# loupe-storage = { path = "../crates/loupe-storage" }
+# loupe-server = { path = "../crates/loupe-server" }
+# loupe-worker = { path = "../crates/loupe-worker" }
+# loupe-tls = { path = "../crates/loupe-tls" }
+# loupe-cli = { path = "../crates/loupe-cli" }
+# loupe-web = { path = "../crates/loupe-web" }
+# Targets mint labelled values the way ingress modules do (Stage S3).
+# loupe-provenance = { path = "../crates/loupe-provenance", features = ["ingress"] }
+
+# Structure-aware inputs for typed, stateful targets (see README,
+# "Dependencies"). Fuzz workspace only; never a product dependency.
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# Prevent this from interfering with the product workspace.
+[workspace]
+members = [".", "runners"]
+
+# Same policy as the root workspace. The harness needs `unsafe` for the
+# extern "C" entry points; every such site needs an allow that
+# ci/unsafe-allow.txt lists.
+[workspace.lints.rust]
+unused_must_use = "deny"
+unsafe_code = "deny"
+# When adding a new cfg attribute, ensure that it is added to this list.
+unexpected_cfgs = { level = "forbid", check-cfg = ["cfg(fuzzing)"] }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# `&s[a..b]` on a str panics on a non-boundary; use `get`, `split_at_checked`
+# or `char_indices`.
+string_slice = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+undocumented_unsafe_blocks = "deny"
+# The workspace rustfmt formats doc-comment code with hard tabs.
+tabs_in_doc_comments = "allow"
+
+[lints]
+workspace = true
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug-assertions = true
+overflow-checks = true
+
+# When replaying a large corpus, -O1 offers a nice speedup.
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[lib]
+name = "loupe_fuzz"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]

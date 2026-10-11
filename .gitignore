@@ -5,6 +5,7 @@ Cargo.lock.bak
 /LOUPE.md
 
 # Local config & state
+.local/
 .env
 .env.*
 !.env.example
