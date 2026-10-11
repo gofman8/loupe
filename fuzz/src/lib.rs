@@ -37,6 +37,7 @@ pub mod worker_broker_policy;
 pub mod worker_broker_usage;
 pub mod worker_config;
 pub mod worker_extract_json;
+pub mod worker_mcp_rpc;
 pub mod worker_mcp_submission;
 pub mod worker_network_host;
 pub mod worker_network_parsers;

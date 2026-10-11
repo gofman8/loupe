@@ -26,6 +26,7 @@ void worker_broker_policy_run(const unsigned char* data, size_t data_len);
 void worker_broker_usage_run(const unsigned char* data, size_t data_len);
 void worker_config_run(const unsigned char* data, size_t data_len);
 void worker_extract_json_run(const unsigned char* data, size_t data_len);
+void worker_mcp_rpc_run(const unsigned char* data, size_t data_len);
 void worker_mcp_submission_run(const unsigned char* data, size_t data_len);
 void worker_network_host_run(const unsigned char* data, size_t data_len);
 void worker_network_parsers_run(const unsigned char* data, size_t data_len);

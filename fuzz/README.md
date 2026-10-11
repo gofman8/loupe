@@ -308,6 +308,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_broker_usage` | Independent JSON/SSE accounting, response header filtering and an empty tracing baseline |
 | `worker_config` | Actual file load/merge/validation, absolute resolved paths, model/effort/host policy and nonzero resource limits |
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
+| `worker_mcp_rpc` | Real dispatcher/catalogues, request IDs and notifications, stateful verdict/patch order, independent finding admission and metadata-only logs |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
 | `worker_network_parsers` | Actual PID, uid_map, route and address parsers, typed-serde PID forms, identity-pair and complete-set checks |
@@ -355,6 +356,13 @@ filesystem containment stays separate. This target adds no path tightening.
 span against an independent character-based quote and escape oracle. Balanced
 invalid JSON remains accepted by this retained helper, which has no production
 caller. This uses the existing `loupe-worker` dependency without new libraries.
+
+`worker_mcp_rpc` drives the actual session over bounded request bytes and
+models both discovery and verification tool catalogues. Independent checks
+cover valid fixture paths and line ranges, finding fields, tool identifiers,
+notifications, protocol refusal, verdict/patch ordering and closed log schemas.
+The corpus retains ordinary and side-fixture files, inside/outside symlinks,
+malformed requests, and the two former fixture-path oracle counterexamples.
 
 `worker_mcp_submission` consumes little-endian u32 start/end lines, a
 little-endian u16 path length capped at 2048 bytes, UTF-8 path bytes and the
@@ -432,15 +440,14 @@ and require the pure accounting and filtering paths to emit none.
 
 ## Pending S1 targets
 
-The branch currently has 32 real targets plus smoke. Two additional targets
-remain required for S1; none is deferred or dropped. Their candidates and
-counterexamples are preserved and their corrections are in progress under
+The branch currently has 33 real targets plus smoke. One additional target
+remains required for S1. Its candidate and counterexample are preserved,
+and its correction is in progress under
 the approved twelve-repair allowance. Passing product tests or campaigns does not
 waive a failed harness or integration gate.
 
 | Required target | Held correction and remaining coverage |
 |---|---|
-| `worker_mcp_rpc` | Include valid side-fixture paths in its oracle; then verify the actual dispatcher, both catalogues, IDs/notifications, verdict/patch ordering, reference parsing and metadata-only logs. Verdict parsing belongs here, not to CLI stdout. |
 | `worker_sandbox_args` | Remove the `node_modules` fixture collision; then verify exact namespace/safety flags, supervisor framing, environment names and bind operands. |
 
 ## Remaining ingress and later work
