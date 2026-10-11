@@ -38,7 +38,8 @@ Layout:
 
 ## Running
 
-All commands from `fuzz/`. The `fuzzing` cfg is required so product
+Corpus commands below run from `fuzz/`; `ci/` commands run from the repository
+root. The `fuzzing` cfg is required so product
 crates can swap deterministic stand-ins for randomness and time when
 they need to.
 
@@ -55,16 +56,16 @@ RUSTFLAGS="--cfg=fuzzing" cargo test --lib
 RUSTFLAGS="--cfg=fuzzing" cargo test --manifest-path runners/Cargo.toml --features stdin_fuzz --bins
 ```
 
-libFuzzer (needs nightly; `-s none` skips the sanitizer rebuild of std,
-which is enough for pure Rust targets):
+libFuzzer needs nightly and cargo-fuzz. This host uses the installed tool in
+`/tmp/cargo-home/bin`. From the repository root:
 
 ```sh
-cargo install --force cargo-fuzz
-cd runners && RUSTFLAGS="--cfg=fuzzing" rustup run nightly cargo fuzz run -s none --features libfuzzer_fuzz smoke_target -- -max_total_time=150
+export PATH="/tmp/cargo-home/bin:$PATH"
+ci/fuzz.sh core_text_bounded_target 120
 ```
 
-In this repository, run campaigns through `ci/fuzz.sh <target>
-[seconds]` instead: it takes the machine-wide fuzz lock, seeds from
+Run short campaigns through `ci/fuzz.sh <name>_target [seconds]`: it takes the
+machine-wide fuzz lock, seeds from
 `test_cases/`, and applies the RSS and wall-time caps. If the link step
 fails under the release profile's LTO, `ci/fuzz.sh` already sets
 `CARGO_PROFILE_RELEASE_LTO=false`. Run one campaign at a time.
@@ -80,11 +81,68 @@ test and the input committed as a seed, in one commit, on the branch
 where it was found. The campaign starts as soon as the first targets
 exist and keeps running while the rest of the work goes on.
 
+The runner refreshes the committed branch tip and target list between slices;
+uncommitted integration work is never its input. Restart the process after
+changing its scripts. Its singleton lock prevents a second continuous process
+for this repository. Keep the default shared lock directory; choosing another
+directory would bypass host coordination.
+
+### Continuous runbook
+
+The initial implementation uses branch `2026-10-security-first`, worktree
+`/home/tnull/worktrees/loupe/2026-10-security-harness`, CPU15, nice19 and
+300-second slices. Before starting on another host, select an available CPU.
+From that worktree, the detached launch used is:
+
+```sh
+export PATH="/tmp/cargo-home/bin:$PATH"
+mkdir -p .local
+setsid -f bash -c '
+  echo $$ > .local/fuzz-continuous.pid
+  exec env CARGO_TARGET_DIR=/tmp/cargo-target-loupe-fuzz-continuous-2026-10-security-first \
+    LOUPE_FUZZ_CPU=15 LOUPE_FUZZ_SLICE=300 \
+    ci/fuzz-continuous.sh 2026-10-security-first
+' </dev/null >>.local/fuzz-launch.log 2>&1
+```
+
+The PID file identifies the launch. Check its current command before sending
+a signal, since an old PID file can outlive its process:
+
+```sh
+campaign_pid=$(cat .local/fuzz-continuous.pid)
+ps -p "$campaign_pid" -o pid,psr,ni,args
+# After verifying that this is the campaign shown above:
+kill -TERM "$campaign_pid"
+```
+
+The wrapper terminates its active child process group too. Wait for it to exit
+before relaunching. Logs and corpus survive; do not delete them to obtain a
+clean status. The active paths under the worktree are:
+
+| Path | Contents |
+|---|---|
+| `.local/fuzz-continuous/progress.log` | Commit, target, result and log for completed slices |
+| `.local/fuzz-continuous/FOUND.log` | Newly discovered crash artifacts, if any |
+| `.local/fuzz-continuous/FAILED.log` | Timeouts, build failures and other unsuccessful slices |
+| `.local/fuzz-continuous/last-<target>.log` | Most recent build and execution output for that target |
+| `.local/fuzz-continuous/corpus/<target>/` | Persistent seed and generated corpus |
+| `.local/fuzz-continuous/crashes/<target>/` | Preserved crashing inputs |
+| `.local/wt/fuzz-2026-10-security-first/` | Detached checkout of the committed input |
+
+Record the commit and exact input for each finding. Reproduce it through the
+stdin runner, distinguish product bugs from bad test oracles, and preserve the
+failing input and pre-fix assertion before repairing it. A TIMEOUT is not a
+clean run: the whole-command watchdog includes initial compilation. Preserve
+its log before a retry overwrites `last-<target>.log`, then repeat the slice
+after determining whether compilation or the input exhausted the budget.
+
+### Other engines and reproduction
+
 honggfuzz and AFL++ work through the same runner features
 (`cargo hfuzz run`, `cargo afl fuzz`); see the engines' own
 documentation. honggfuzz needs binutils development headers (`bfd.h`).
 
-Reproduce a crash from bytes, no files needed:
+From `fuzz/`, reproduce a crash from bytes, no files needed:
 
 ```sh
 printf '\x02\x05\x00\x01' | RUSTFLAGS="--cfg=fuzzing" \
@@ -220,7 +278,7 @@ targets. The source inventory includes response accounting, repository
 metadata, source discovery and network command output; these are parsing
 boundaries even when their producer is authenticated or runs locally.
 
-## Surfaces that need targets
+## Targets and coverage
 
 Implemented targets (each corpus includes valid and malformed inputs):
 
@@ -302,9 +360,6 @@ an internal symlink and an escaping symlink. Fuzzed names are materialized only
 inside the fixture. The existing `tempfile` and `loupe-worker` dependencies
 exercise actual containment and submission code without a server or sandbox.
 
-Each becomes a target when the code is covered; the list is the
-backlog, kept current by the stage briefs.
-
 `server_request_parsers` selects one of five parsers with byte zero and sends
 the remaining bytes to it. Bit 7 selects an absent protocol/state/kind field.
 Protocol versions allow the existing unsigned-decimal leading plus; clone
@@ -358,27 +413,56 @@ saturating maximum of total tokens and input-plus-output tokens. Header
 fixtures use `hyper`; `tracing` and `tracing-subscriber` capture diagnostics
 and require the pure accounting and filtering paths to emit none.
 
-| Surface | Source | Target shape |
-|---|---|---|
-| Wire DTOs, both directions | worker, operator, server | single-shot, round trip |
-| Agent text validators (`BoundedText`, `Identifier`, `RepoPath`, `BoundedJson`, `SourceRefs`) | agent | single-shot, oracle re-check |
-| Canonical JSON and digests | worker | single-shot, idempotence |
-| Job and finding state machines, verdict rollup | server | stateful (`arbitrary`) |
-| Scheduler and admission policy snapshots | db, config | single-shot |
-| MCP JSON-RPC dispatcher and tool arguments | sandbox | stateful over `ByteSource` |
-| Model-broker request policy, header stripping, output ceiling | sandbox, provider | single-shot and stream |
-| CLI stdout parsing (`extract_json_object`, verdicts) | sandbox | single-shot |
-| Sandbox argv builder, network host validation, nft rules | config | single-shot, golden set |
-| Worker and server configuration | config | single-shot |
-| Report renderers (issue body and title, email message) | agent, db | single-shot, no-escape |
-| Job-capability header parsing | worker | single-shot |
-| Certificate fingerprinting, PEM loading | config | single-shot |
-| Dashboard request handling, CLI rendering | browser, server | single-shot |
-| Phase (v2) DTOs, typed evidence, inventory manifest, candidates, admission | worker, agent | single-shot, round trip (after the v2 endpoints land) |
-| Prompt builder, report builder, canary scanner, citation check | agent, repo | single-shot, no-escape (Stage S3) |
-| Provider JSON/SSE token accounting and response headers | provider | single-shot, independent usage/header oracle |
-| Job filters, clone URLs, protocol headers, FTS query escaping | operator, worker | single-shot, parser-specific shape |
-| Repository cursor and origin parsing | repo | single-shot, exact framing and round trip |
-| Workspace manifests and source discovery | repo | bounded filesystem fixture and independent inventory |
-| Regex scanner file content | repo | bounded filesystem fixture and match offsets |
-| Network supervisor command output and nft input | sandbox, config | single-shot, syntax and golden output |
+## Pending S1 targets
+
+The branch currently has 29 real targets plus smoke. Five additional targets
+remain required for S1; none is deferred or dropped. Their candidates and
+counterexamples are preserved while the plan's consumed six-repair allowance
+awaits an explicit extension. Passing product tests or campaigns does not
+waive a failed harness or integration gate.
+
+| Required target | Held correction and remaining coverage |
+|---|---|
+| `worker_mcp_rpc` | Include valid side-fixture paths in its oracle; then verify the actual dispatcher, both catalogues, IDs/notifications, verdict/patch ordering, reference parsing and metadata-only logs. Verdict parsing belongs here, not to CLI stdout. |
+| `worker_sandbox_args` | Remove the `node_modules` fixture collision; then verify exact namespace/safety flags, supervisor framing, environment names and bind operands. |
+| `worker_network_parsers` | Model typed-serde PID sequence and ignored-field forms; then cover actual PID, uid_map, route and address byte parsers. Hostname/nft coverage does not replace these parsers. |
+| `server_github_response` | Correct ignored-field UTF-8 semantics; then integrate L8 and verify app, installation, token, issue and label responses with closed error diagnostics. |
+| `worker_regex_secrets` | Move its test module after exported items to satisfy all-target Clippy without suppressing the lint; then integrate L11 and verify actual scanner matches/lines and metadata-only Finding Debug. Its clean campaign does not satisfy the failed integration gate. |
+
+## Remaining ingress and later work
+
+The source inventory includes custom boundaries beyond the named S1 targets.
+The table identifies their owners and limits; it does not claim complete
+coverage merely because a nearby parser is fuzzed. Unassigned malformed-input
+or resource-limit coverage remains an explicit gap in the broad ingress rule.
+
+| Surface | Existing owner and remaining scope |
+|---|---|
+| git2 submodule extraction | [runner.rs](../crates/loupe-worker/src/runner.rs), `checkout_tolerates_submodule_gitlinks`, owns real gitlink-tree tests as assigned by S1 target 24b. Generated malformed-tree cases remain an integration-test backlog. |
+| Clone/fetch/checkout and Git failures | [repo_cache.rs](../crates/loupe-worker/src/repo_cache.rs) and runner tests cover fetch/reclone/checkout behavior. The cursor/origin target does not cover all Git transport failures or filesystem effects; S3 owns Repo provenance and diagnostic sinks. Arbitrary failure-output coverage remains unassigned. |
+| Raw database rows and secret BLOB reads | Storage round-trip/migration tests own database fixtures. The three storage targets cover named value parsers, not every row decoder or corruption error. S2 owns scope decisions; S3 owns secret holders and Db decoding. General corrupt-row parser coverage remains unassigned. |
+| CLI/env/startup loaders | CLI, web-config, server-main and provider-auth tests own PEM/base64 precedence and credential loading. TOML targets and `tls_pem` do not cover their combined argv/env behavior. S3 owns Config minting and Secret migration; arbitrary combined-loader coverage remains unassigned. |
+| Sendmail status/stderr and pipe interaction | [email_dispatch.rs](../crates/loupe-server/tests/email_dispatch.rs) covers successful stdin delivery; renderer tests reject header injection. No dedicated failure/backpressure target or process-output budget is specified. S3's renderer/log work alone does not establish those properties. |
+| Reporter HTTP collection | GitHub HTTP integration tests and the held response target own response decoding. Reporter `.bytes()`/`.text()` collection is outside L3's three clients and remains uncapped; its transport budget is an unresolved contract. S3 owns Reporter ingress. |
+| CLI collection and Git diagnostics | Both CLI backend tests exercise L5's one-MiB retention, drain, head/tail and deadlines. L2 tests UTF-8-safe Git display truncation after collection, not a Git pipe-allocation limit. S3 owns labels and disclosure; bounded buffers do not imply redacted logs. |
+| HTTP/TLS and DAO authorization orchestration | Server auth/health/jobs and storage scope/lease integration tests own full request/database behavior. Header/DTO/TLS targets cover named custom parsers. S2 adds authority/scope proofs while retaining SQL-boundary tests; S3 adds ingress labels. |
+| Broker relay and stream effects | [model_broker.rs](../crates/loupe-worker/src/llm/model_broker.rs) tests output termination, token exhaustion, authenticated routing and redirect isolation. Policy/accounting targets complement those tests. S2/S3 add proofs and labels. |
+
+The worker response target reaches four real decoders and errors over chunked
+HTTP. L3's shared [loupe-http reader](../crates/loupe-http/src/lib.rs) also
+serves CLI and web, whose own regressions cover their response paths. Its
+16 MiB limit is a transport budget; valid oversized lists fail explicitly.
+Pagination remains future work. `web_api` already reaches the real router,
+browser guards and extraction errors; those are not missing S1 targets.
+
+S3 owns prompt data blocks, report containment and destination caps, labelled
+logging/Debug, canary scanning and citation checks. The report `escape-*`
+seeds are its acceptance inputs. The retained JSON-span helper has no current
+production caller and is not evidence about the active MCP verdict path.
+
+After B4 actually lands, S1 items 30–35 add the ten `proto_review_<module>`
+DTO targets; `core_review_payload`, inventory-manifest, candidate and priority
+targets; `storage_admission_policy`; `server_review_authority`; and router
+body-cap integration tests. Existing review storage/schema modules do not
+mean that this phase ingress or its targets have landed. Artifact-export
+coverage gets an owner when Stage C introduces that boundary.
