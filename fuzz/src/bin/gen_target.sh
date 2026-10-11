@@ -14,6 +14,7 @@ GEN_TEST() {
 }
 # One line per target, alphabetical. Optional second argument: module prefix.
 GEN_TEST core_text_bounded
+GEN_TEST core_text_ident
 GEN_TEST smoke
 mkdir -p ../../runners/src/bin
 for old in ../../runners/src/bin/*_target.rs; do

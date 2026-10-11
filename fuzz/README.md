@@ -176,6 +176,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | Target | Assertions |
 |---|---|
 | `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
+| `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
