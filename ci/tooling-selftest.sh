@@ -430,6 +430,12 @@ kani_lower_limits)
 	LOUPE_KANI_SLOTS=1 LOUPE_KANI_MEM_GB=1 "$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1 || fail 'Kani rejected lower resource limits'
 	[[ $(cat "$CASE/state/memory") == 1048576 ]] || fail 'Kani did not apply lower memory limit'
 	;;
+kani_stubbing)
+	fixture kani_stubbing
+	"$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1
+	grep -q '^kani -Z stubbing -p loupe-core --exact --harness kani::sample$' "$CASE/state/cargo-args" ||
+		fail 'Kani wrapper omitted explicit proof stubbing support'
+	;;
 kani_verdict)
 	for mode in no_verdict failed_verdict success_then_failure no_covers unsatisfied_cover unreachable_cover empty_covers; do
 		fixture "kani_$mode"
@@ -463,7 +469,7 @@ kani_cleanup_stubborn)
 	done
 	;;
 all)
-	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_required kani_lower_limits kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
+	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_required kani_lower_limits kani_stubbing kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
 		"$SCRIPT_DIR/tooling-selftest.sh" "$name"
 	done
 	;;

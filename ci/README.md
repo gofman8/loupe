@@ -58,6 +58,9 @@ An exit status of zero counts as a proof only with an explicit successful
 verification verdict and at least one cover property, with every cover
 satisfied. Kani's overall success alone does not exclude unreachable covers.
 Missing verdicts and failed checks remain failures.
+The wrapper enables Kani's explicit per-proof stubbing feature. Harness
+attributes name any replaced dependency; these substitutions and their
+limits must be stated alongside the invariant and bounds.
 
 To stop a campaign, send TERM to its script PID and wait for it to exit;
 for a shell-started background process, use `kill -TERM "$campaign_pid"`

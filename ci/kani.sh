@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# The only way Kani runs in this repository.
-#
 # CBMC can take tens of gigabytes on an unbounded harness, and several
 # Kani runs at once can exhaust a host. This wrapper: takes one of
 # LOUPE_KANI_SLOTS machine-wide slots (default and maximum 2), so at most that many
@@ -8,8 +6,7 @@
 # directory at the same place; caps the address space of everything it
 # spawns (default and maximum 12 GiB per run, so two runs fit beside builds); runs
 # one harness per cargo invocation so a failure names its harness;
-# applies a per-harness timeout; and writes verdicts to a log the
-# stage brief records.
+# applies a per-harness timeout; and writes verdicts under LOUPE_LOCAL.
 #
 #   ci/kani.sh -p <crate> [--exact --harness kani::<name>]  [--mem-gb N] [--timeout S]
 #   ci/kani.sh --workspace
@@ -45,8 +42,8 @@ case "$MEM_GB" in
 [1-9]|1[0-2]) ;;
 *) echo "Kani memory must not exceed 12 GiB" >&2; exit 2 ;;
 esac
-# Slot 0 keeps the plain lock name so an older single-lock caller still
-# counts against the limit. LOUPE_KANI_LOCK_DIR lets several projects
+# Slot 0 shares the plain lock name so single-lock callers also count
+# against the limit. LOUPE_KANI_LOCK_DIR lets several projects
 # on one host share the slots.
 LOCK_DIR="${LOUPE_KANI_LOCK_DIR:-$LOUPE_LOCK_DIR}"
 LOCK_BASE="$LOCK_DIR/kani.lock"
@@ -121,7 +118,9 @@ for entry in $LIST; do
 	set +e
 	# RUN contains the wrapper's whitespace-separated Cargo arguments.
 	# shellcheck disable=SC2086
-	run_child timeout -k 30 --foreground "$TIMEOUT" cargo kani $RUN > "$log" 2>&1
+	# Enable explicit per-proof stubs, including panic sentinels proving
+	# expensive processing is unreachable before an admission check.
+	run_child timeout -k 30 --foreground "$TIMEOUT" cargo kani -Z stubbing $RUN > "$log" 2>&1
 	status=$?
 	set -e
 	# Tell the three ways a harness can fail apart: they need different
