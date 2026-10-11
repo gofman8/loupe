@@ -21,6 +21,9 @@ say "fmt (nightly)"
 rustup run nightly cargo fmt --all -- --check
 (cd fuzz && rustup run nightly cargo fmt --all -- --check)
 
+say "no production environment forwarding"
+gate_no_forward_env . || exit 1
+
 say "clippy (stable, warnings are errors)"
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 # The runner binaries have a main only when a backend feature is chosen.

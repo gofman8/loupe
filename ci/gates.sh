@@ -16,6 +16,42 @@ rust_files() {
 	(cd "$1" && find . \( -name target -o -name .local -o -name .git \) -prune -o -name '*.rs' -type f -print | sed 's|^\./||' | sort)
 }
 
+# Until sandbox values carry provenance, host environment forwarding has no
+# production caller. This lexical gate catches ordinary calls and references;
+# deliberately obscured macro/name resolution remains a code-review concern.
+gate_no_forward_env() {
+	root=$1
+	rc=0
+	for f in $(rust_files "$root/crates"); do
+		case "$f" in */src/*.rs) ;; *) continue ;; esac
+		if awk -f "$GATES_DIR/strip-rust.awk" "$root/crates/$f" | awk '
+			{ source = source " " $0 }
+			END {
+				# Skip only explicitly test-gated items, balancing their body so
+				# production items after a test module are still inspected.
+				while (match(source, /#[[:space:]]*\[[[:space:]]*cfg[[:space:]]*\([[:space:]]*test[[:space:]]*\)[[:space:]]*\]/)) {
+					production = production substr(source, 1, RSTART - 1)
+					source = substr(source, RSTART + RLENGTH)
+					depth = 0; opened = 0
+					for (i = 1; i <= length(source); i++) {
+						c = substr(source, i, 1)
+						if (c == "{") { depth++; opened = 1 }
+						if (c == "}" && --depth == 0 && opened) break
+						if (c == ";" && !opened) break
+					}
+					source = substr(source, i + 1)
+				}
+				production = production source
+				gsub(/fn[[:space:]]+forward_env[[:space:]]*\(/, "fn forwarding_definition(", production)
+				print production
+			}' | grep -qE '(^|[^[:alnum:]_])forward_env[[:space:]]*\(|::[[:space:]]*forward_env([^[:alnum:]_]|$)'; then
+			echo "$f: production environment forwarding is forbidden"
+			rc=1
+		fi
+	done
+	return "$rc"
+}
+
 # Files that can carry unsafe code: every .rs file whose code (comments,
 # strings and character literals stripped) contains the `unsafe`
 # keyword, so a macro body that expands to `unsafe` counts where it is

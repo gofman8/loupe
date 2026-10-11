@@ -29,6 +29,7 @@ fixture() {
 	CASE=$TEST_ROOT/$1
 	mkdir -p "$CASE/repo" "$CASE/bin" "$CASE/state" "$CASE/local" "$CASE/locks"
 	cp -a "$SOURCE" "$CASE/repo/ci"
+	mkdir -p "$CASE/repo/crates/loupe-worker/src"
 	mkdir -p "$CASE/repo/fuzz/src/bin" "$CASE/repo/fuzz/runners" "$CASE/repo/fuzz/test_cases/alpha"
 	printf 'GEN_TEST alpha\nGEN_TEST beta\n' > "$CASE/repo/fuzz/src/bin/gen_target.sh"
 	: > "$CASE/repo/fuzz/test_cases/alpha/empty"
@@ -221,6 +222,39 @@ metadata_tools)
 			fail "dependency gate accepted $tool"
 		fi
 		grep -q "a product crate depends on a tool crate:.*$tool" "$CASE/output" || fail 'tool dependency failed for an unrelated reason'
+	done
+	;;
+forward_env)
+	fixture forward_env
+	cat > "$CASE/repo/crates/loupe-worker/src/lib.rs" <<'RUST'
+impl SandboxBuilder {
+    pub fn forward_env(self, name: &str) -> Self { self }
+}
+// A mention of .forward_env("ignored") is not a call.
+const MESSAGE: &str = ".forward_env(\"ignored\")";
+#[cfg(test)]
+mod tests {
+    fn explicit_forwarding() { builder.forward_env("TEST_ONLY"); }
+}
+fn after_tests() {}
+RUST
+	"$CASE/repo/ci/check.sh" > "$CASE/output" 2>&1 || fail 'environment-forwarding gate rejected its definition or test call'
+	for form in method multiline qualified reference after_tests; do
+		case "$form" in
+		method) code='fn production() { builder.forward_env("SECRET"); }' ;;
+		multiline) code='fn production() { builder.\nforward_env\n("SECRET"); }' ;;
+		qualified) code='fn production() { SandboxBuilder::forward_env(builder, "SECRET"); }' ;;
+		reference) code='fn production() { let forward = SandboxBuilder::forward_env; forward(builder, "SECRET"); }' ;;
+		after_tests) code='#[cfg(test)]\nmod tests { fn test() { let text = "}"; } }\nfn production() { builder.forward_env("SECRET"); }' ;;
+		esac
+		printf '%b\n' "$code" > "$CASE/repo/crates/loupe-worker/src/caller.rs"
+		if "$CASE/repo/ci/check.sh" > "$CASE/output" 2>&1; then
+			fail "gate accepted production environment forwarding ($form)"
+		fi
+		grep -q 'production environment forwarding' "$CASE/output" || {
+			cat "$CASE/output"
+			fail 'environment-forwarding gate failed for an unrelated reason'
+		}
 	done
 	;;
 generated_staged)
@@ -469,7 +503,7 @@ kani_cleanup_stubborn)
 	done
 	;;
 all)
-	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_required kani_lower_limits kani_stubbing kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
+	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools forward_env generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_required kani_lower_limits kani_stubbing kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
 		"$SCRIPT_DIR/tooling-selftest.sh" "$name"
 	done
 	;;

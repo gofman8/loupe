@@ -14,6 +14,11 @@ and nightly; Kani needs `cargo-kani`. `ci/tooling-selftest.sh` exercises
 the scripts with disposable fixtures and stub tools, without compiling or
 starting a real campaign. It checks member selection, locks, status reporting,
 build paths, retry behavior, and shutdown of spawned processes.
+The normal gate also rejects production calls or qualified references to
+`forward_env` until sandbox values carry provenance. It strips Rust comments
+and literals and skips explicitly `#[cfg(test)]`-gated items; calls after a
+test module remain checked. This is a source convention check, with deliberately
+obscured macro expansion or name resolution still subject to review.
 
 `ci/env.sh` defaults build output to `/tmp/cargo-target-loupe-<branch>`;
 continuous campaigns use `/tmp/cargo-target-loupe-<kind>-<branch>`. An
