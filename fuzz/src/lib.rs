@@ -28,4 +28,5 @@ pub mod storage_source_refs;
 pub mod tls_fingerprint;
 pub mod tls_pem;
 pub mod web_api;
+pub mod worker_mcp_submission;
 pub mod worker_server_response;

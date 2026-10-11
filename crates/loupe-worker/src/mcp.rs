@@ -280,9 +280,7 @@ pub struct McpSessionContext {
 }
 
 /// Run one host-side MCP broker session until the sandbox proxy closes.
-pub async fn run_stream_server<R, W>(
-	context: McpSessionContext, reader: R, mut writer: W,
-) -> Result<()>
+pub async fn run_stream_server<R, W>(context: McpSessionContext, reader: R, writer: W) -> Result<()>
 where
 	R: AsyncBufRead + Unpin,
 	W: AsyncWrite + Unpin,
@@ -307,17 +305,28 @@ where
 		workdir: context.workdir,
 		verify,
 	});
+	run_session(session, reader, writer).await
+}
+
+async fn run_session<R, W>(session: Arc<Session>, reader: R, mut writer: W) -> Result<()>
+where
+	R: AsyncBufRead + Unpin,
+	W: AsyncWrite + Unpin,
+{
 	let mut lines = reader.lines();
 
 	while let Some(line) = lines.next_line().await? {
 		if line.trim().is_empty() {
 			continue;
 		}
-		tracing::debug!(request = %line, "loupe-mcp: received request");
-
 		let request: Request = match serde_json::from_str(&line) {
 			Ok(r) => r,
 			Err(e) => {
+				tracing::debug!(
+					method = "invalid",
+					line_bytes = line.len(),
+					"loupe-mcp: received request"
+				);
 				write_response(
 					&mut writer,
 					&Response::err(Value::Null, -32700, format!("parse error: {e}")),
@@ -326,6 +335,11 @@ where
 				continue;
 			},
 		};
+		tracing::debug!(
+			method = log_method(&request.method),
+			line_bytes = line.len(),
+			"loupe-mcp: received request"
+		);
 
 		// Notifications (no `id`) require no response per JSON-RPC.
 		let Some(id) = request.id.clone() else { continue };
@@ -363,6 +377,31 @@ async fn handle_request(session: &Arc<Session>, req: &Request, id: Value) -> Res
 		// Common no-op MCP notifications/requests we just ack.
 		"notifications/initialized" | "ping" => Response::ok(id, json!({})),
 		other => Response::err(id, -32601, format!("method not found: {other}")),
+	}
+}
+
+/// Closed labels only: unknown method/tool names carry sandbox bytes too.
+fn log_method(method: &str) -> &'static str {
+	match method {
+		"initialize" => "initialize",
+		"tools/list" => "tools/list",
+		"tools/call" => "tools/call",
+		"notifications/initialized" => "notifications/initialized",
+		"ping" => "ping",
+		_ => "unknown",
+	}
+}
+
+fn log_tool(tool: &str) -> &'static str {
+	match tool {
+		"query_prior_findings" => "query_prior_findings",
+		"get_finding_by_id" => "get_finding_by_id",
+		"submit_finding" => "submit_finding",
+		"validate_poc" => "validate_poc",
+		"submit_verdict" => "submit_verdict",
+		"submit_patch" => "submit_patch",
+		"validate_patch" => "validate_patch",
+		_ => "unknown",
 	}
 }
 
@@ -716,7 +755,7 @@ async fn handle_tool_call(session: &Arc<Session>, req: &Request, id: Value) -> R
 			}),
 		),
 		Err(e) => {
-			tracing::warn!(tool = tool_name, error = %e, "loupe-mcp: tool call failed");
+			tracing::warn!(tool = log_tool(tool_name), "loupe-mcp: tool call failed");
 			// MCP convention: tool errors flow through `result` with
 			// `isError: true`, not the JSON-RPC `error` field (which
 			// is reserved for protocol-level failures).
@@ -879,7 +918,6 @@ async fn tool_submit_finding(session: &Arc<Session>, args: &Value) -> Result<Str
 		 bug — the tool should not have been advertised.",
 	)?;
 	let finding = build_finding_from_args(&session.workdir, args)?;
-	let title = finding.title.clone();
 	let file = finding.file_path.clone().unwrap_or_default();
 	let fingerprint = finding.fingerprint.clone();
 	let submission = LlmFindingSubmission {
@@ -902,10 +940,7 @@ async fn tool_submit_finding(session: &Arc<Session>, args: &Value) -> Result<Str
 		.with_context(|| {
 			format!("submitting finding for {file} to /v1/jobs/{job_id}/llm-findings")
 		})?;
-	tracing::info!(
-		job_id, repo_id = session.repo_id, %file, %title, fingerprint = %fingerprint,
-		"loupe-mcp: agent submitted a finding",
-	);
+	tracing::info!(job_id, repo_id = session.repo_id, "loupe-mcp: agent submitted a finding",);
 	Ok(format!(
 		"Submitted. job={job_id} fingerprint={fingerprint}\n\
 		 The server applies UNIQUE(repo_id, fingerprint) on insert; if this finding hash-matches a \
@@ -1111,6 +1146,9 @@ enum DiffCheck {
 /// diff validates. Clearing the environment also keeps unrelated
 /// worker credentials out of the parser subprocess.
 fn git_apply_check_command(workdir: &Path) -> tokio::process::Command {
+	#[cfg(fuzzing)]
+	let mut cmd = tokio::process::Command::new(workdir.join("fuzz-git"));
+	#[cfg(not(fuzzing))]
 	let mut cmd = tokio::process::Command::new("git");
 	configure_git_apply_check_command(&mut cmd, workdir);
 	cmd
@@ -1156,7 +1194,11 @@ async fn check_diff_applies_with_command(
 		let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 		const MAX_STDERR: usize = 4096;
 		if stderr.len() > MAX_STDERR {
-			stderr.truncate(MAX_STDERR);
+			let mut end = MAX_STDERR;
+			while !stderr.is_char_boundary(end) {
+				end -= 1;
+			}
+			stderr.truncate(end);
 			stderr.push_str("\n…(truncated)");
 		}
 		if stderr.trim().is_empty() {
@@ -1177,7 +1219,7 @@ fn fingerprint_for(workdir: &Path, file: &str, line_start: u32, line_end: u32) -
 		Ok(s) => s,
 		Err(e) => {
 			tracing::warn!(
-				file, error = %e,
+				error_kind = ?e.kind(),
 				"fingerprint: could not read worktree file; falling back to line-range-only window",
 			);
 			return crate::fingerprint::compute(
@@ -1198,7 +1240,7 @@ fn fingerprint_for(workdir: &Path, file: &str, line_start: u32, line_end: u32) -
 
 async fn write_response<W: AsyncWrite + Unpin>(w: &mut W, resp: &Response) -> Result<()> {
 	let line = serde_json::to_string(resp)?;
-	tracing::debug!(response = %line, "loupe-mcp: sending response");
+	tracing::debug!(response_bytes = line.len(), "loupe-mcp: sending response");
 	w.write_all(line.as_bytes()).await?;
 	w.write_all(b"\n").await?;
 	w.flush().await?;
@@ -1270,6 +1312,12 @@ async fn flush_verify_session(session: &Arc<Session>) -> Result<()> {
 		.context("POSTing buffered verdict to /v1/jobs/:id/verdict")?;
 	Ok(())
 }
+
+#[cfg(test)]
+mod security_tests;
+
+#[cfg(fuzzing)]
+pub mod fuzz_support;
 
 #[cfg(test)]
 mod tests {
