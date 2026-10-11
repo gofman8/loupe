@@ -172,6 +172,11 @@ fixed public value. Debug checks compare exact field-matched baselines.
 The PEM pair in `fixtures/` is deliberately public test material, never an
 authentication credential. Seeds vary each PEM field independently.
 
+`loupe-server` exposes the pure parsers used by its actual request handlers.
+`http` constructs capability headers independently of the route machinery;
+header admission includes HTAB and exactly 43 bytes, without an alphabet
+restriction. Accepted bytes are checked against their BLAKE3 hash.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -210,6 +215,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `core_text_json` | Duplicate-preserving reference tree, depth/node/byte budgets, composed key/leaf rules, entry-point equivalence and redaction |
 | `proto_dto` | All 36 public DTO types and enum variants, field-preserving round trips, capability redaction and independent LLM submission admission |
 | `proto_version` | Inclusive protocol windows, inverted-window rejection and exact mismatch fields and diagnostics |
+| `server_capability_header` | Exact header-text/length admission, unchanged hash bytes and closed denial diagnostics |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
 | `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |

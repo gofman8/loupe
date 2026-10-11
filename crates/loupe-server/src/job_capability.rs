@@ -35,15 +35,20 @@ pub(crate) fn issue() -> (JobCapability, [u8; 32]) {
 	(JobCapability::from_secret(token), hash)
 }
 
-pub(crate) fn authorize(
-	state: &AppState, worker: &AuthedWorker, headers: &HeaderMap, now: i64,
-) -> Result<AuthorizedJob, (StatusCode, String)> {
+/// Parse the capability header without requiring a live lease.
+pub fn parse_hash(headers: &HeaderMap) -> Result<[u8; 32], (StatusCode, String)> {
 	let token = headers
 		.get(JOB_CAPABILITY_HEADER)
 		.and_then(|value| value.to_str().ok())
 		.filter(|value| value.len() == JOB_CAPABILITY_TOKEN_CHARS)
 		.ok_or_else(forbidden)?;
-	let capability_hash = *blake3::hash(token.as_bytes()).as_bytes();
+	Ok(*blake3::hash(token.as_bytes()).as_bytes())
+}
+
+pub(crate) fn authorize(
+	state: &AppState, worker: &AuthedWorker, headers: &HeaderMap, now: i64,
+) -> Result<AuthorizedJob, (StatusCode, String)> {
+	let capability_hash = parse_hash(headers)?;
 	let row = state
 		.db
 		.with_conn(|conn| {
