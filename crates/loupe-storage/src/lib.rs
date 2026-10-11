@@ -45,3 +45,10 @@ mod scope_tests;
 pub use db::{Db, Error, Result};
 pub use loupe_core::canonical;
 pub use review::{Conflict, Entity, Ownership};
+
+#[cfg(test)]
+mod scope_agreement_tests;
+
+#[cfg(kani)]
+#[path = "../kani/mod.rs"]
+mod kani;

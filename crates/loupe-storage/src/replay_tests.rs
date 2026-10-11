@@ -3,6 +3,81 @@ use loupe_core::text::{Anchor, BoundedJson, Identifier};
 
 use crate::review_tests::{fixture, payload, reason};
 use crate::{checkpoints as c, terminal_receipt as t, transaction, Conflict, Error};
+
+#[test]
+fn checkpoint_replay_does_not_hide_other_insert_failures() {
+	let db = fixture();
+	db.with_conn(|conn| {
+		transaction::immediate(conn, |tx| {
+			let key = Identifier::new("insert-failure").unwrap();
+			let digest = [7; 32];
+			c::record_or_replay(tx, 101, c::Operation::SubmitLead, &key, &digest, &payload(), 0)?;
+			tx.execute_batch(
+				"CREATE TEMP TRIGGER refuse_checkpoint BEFORE INSERT ON job_checkpoints
+				 BEGIN SELECT RAISE(ABORT, 'checkpoint insert refused'); END;",
+			)?;
+			let result = c::record_or_replay(
+				tx,
+				101,
+				c::Operation::SubmitLead,
+				&key,
+				&digest,
+				&payload(),
+				1,
+			);
+			assert!(
+				matches!(result, Err(Error::Sqlite(rusqlite::Error::SqliteFailure(_, Some(ref message))))
+					if message == "checkpoint insert refused"),
+				"only the checkpoint-key uniqueness violation may become a replay"
+			);
+			tx.execute_batch("DROP TRIGGER refuse_checkpoint")?;
+			assert_eq!(
+				c::record_or_replay(
+					tx,
+					101,
+					c::Operation::SubmitLead,
+					&key,
+					&digest,
+					&payload(),
+					2
+				)?,
+				c::Recorded::Replayed(payload()),
+				"a genuine duplicate still replays after the independent failure is removed"
+			);
+			Ok(())
+		})
+	})
+	.unwrap();
+}
+
+#[test]
+fn checkpoint_lookup_rejects_malformed_stored_digests() {
+	let db = fixture();
+	db.with_conn(|conn| {
+		transaction::immediate(conn, |tx| {
+			let key = Identifier::new("stored-digest").unwrap();
+			let digest = [7; 32];
+			assert!(c::lookup(tx, 101, c::Operation::SubmitLead, &key, &digest)?.is_none());
+			c::record_or_replay(tx, 101, c::Operation::SubmitLead, &key, &digest, &payload(), 0)?;
+			for length in [0, 1, 31, 32, 33, 64] {
+				let stored = vec![7u8; length];
+				tx.execute("UPDATE job_checkpoints SET payload_digest=?1", [&stored])?;
+				let result = c::lookup(tx, 101, c::Operation::SubmitLead, &key, &digest);
+				if length == 32 {
+					assert_eq!(result?, Some(payload()), "the identical digest must still replay");
+				} else {
+					assert!(
+						matches!(result, Err(Error::Conflict(Conflict::Checkpoint))),
+						"malformed stored digest of length {length} cannot replay"
+					);
+				}
+			}
+			Ok(())
+		})
+	})
+	.unwrap();
+}
+
 #[test]
 fn checkpoint_run_owns_the_replay_sequence() {
 	// `run` is the API handlers are meant to use: the body never executes on a

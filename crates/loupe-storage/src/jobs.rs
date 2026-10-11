@@ -1388,6 +1388,65 @@ mod tests {
 	}
 
 	#[test]
+	fn active_capability_and_transaction_include_exact_expiry() {
+		let (db, repo_id, worker_id) = db_with_repo_and_worker();
+		db.with_conn(|conn| {
+			let job_id = enqueue(
+				conn,
+				&NewJob {
+					repo_id,
+					kind: JobKind::Scan,
+					incremental: false,
+					since_sha: None,
+					parent_job_id: None,
+					target_finding_id: None,
+				},
+				0,
+			)?;
+			let leased = lease(conn, worker_id, false, 100, 60)?.unwrap();
+			assert_eq!(leased.id, job_id);
+			let hash = active_capability_hash(conn, job_id)?;
+			let identity = LeaseIdentity { job_id, worker_id, capability_hash: &hash };
+			let other_worker = workers::insert(conn, "other", WorkerKind::Worker, &[91; 32], 0)?;
+			let mut wrong_hash = hash.clone();
+			wrong_hash[0] ^= 1;
+			assert!(
+				get_active_by_capability_hash(conn, other_worker, &hash, 160)?.is_none(),
+				"correct capability cannot authorize another worker"
+			);
+			assert!(
+				get_active_by_capability_hash(conn, worker_id, &wrong_hash, 160)?.is_none(),
+				"correct worker cannot authorize another capability"
+			);
+			assert_eq!(
+				get_active_by_capability_hash(conn, worker_id, &hash, 160)?.map(|job| job.id),
+				Some(job_id),
+				"the exact expiry instant remains authorized"
+			);
+			assert!(
+				get_active_by_capability_hash(conn, worker_id, &hash, 161)?.is_none(),
+				"one tick after expiry is unauthorized"
+			);
+			let calls = std::cell::Cell::new(0);
+			let mutate = |_: &Transaction<'_>, row: &JobRow| {
+				calls.set(calls.get() + 1);
+				Ok(row.id)
+			};
+			assert_eq!(
+				with_active_lease_transaction(conn, ActiveLease { identity, now: 160 }, mutate)?,
+				Some(job_id)
+			);
+			assert_eq!(
+				with_active_lease_transaction(conn, ActiveLease { identity, now: 161 }, mutate)?,
+				None
+			);
+			assert_eq!(calls.get(), 1, "expired authorization must never enter the mutation");
+			Ok(())
+		})
+		.unwrap();
+	}
+
+	#[test]
 	fn active_lease_lookup_is_worker_repo_and_expiry_scoped() {
 		let (db, repo_id, worker_id) = db_with_repo_and_worker();
 		let job_id = db
