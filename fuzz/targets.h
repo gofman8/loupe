@@ -24,4 +24,5 @@ void worker_config_run(const unsigned char* data, size_t data_len);
 void worker_extract_json_run(const unsigned char* data, size_t data_len);
 void worker_mcp_submission_run(const unsigned char* data, size_t data_len);
 void worker_network_host_run(const unsigned char* data, size_t data_len);
+void worker_repo_cache_run(const unsigned char* data, size_t data_len);
 void worker_server_response_run(const unsigned char* data, size_t data_len);

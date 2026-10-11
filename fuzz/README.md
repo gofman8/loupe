@@ -248,6 +248,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
+| `worker_repo_cache` | Exact cursor magic/version/body, round trips and status/UTF-8/whitespace behavior of git origin parsing |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
 | `web_api` | Actual browser guards, no upstream call on rejected headers, JSON-enclosed diagnostics and bounded responses |
 
@@ -299,6 +300,11 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+`worker_repo_cache` passes raw bytes through the persisted cursor decoder
+and the actual git-origin output parser. It preserves legacy opaque SHA and
+URL strings, including the origin parser's lossy UTF-8 and whitespace trim.
+It adds no stronger URL or hash grammar.
 
 `worker_config` writes raw TOML, capped at 128 KiB, to an absolute temporary
 path and calls the real loader. Independent checks cover its merge and

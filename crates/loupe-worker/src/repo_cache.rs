@@ -462,16 +462,38 @@ fn read_origin_url(bare_path: &Path) -> Result<Option<String>> {
 		.args(["config", "--get", "remote.origin.url"])
 		.output()
 		.context("spawning git config")?;
-	if !output.status.success() {
+	Ok(parse_origin_output(output.status.success(), &output.stdout))
+}
+
+/// Interpret git's exit status and raw stdout without changing its permissive
+/// URL handling. Validation of an origin belongs to its caller.
+fn parse_origin_output(success: bool, stdout: &[u8]) -> Option<String> {
+	if !success {
 		// `git config --get` exits 1 when the key is missing — that's
 		// not an error from our perspective.
-		return Ok(None);
+		return None;
 	}
-	let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+	let url = String::from_utf8_lossy(stdout).trim().to_owned();
 	if url.is_empty() {
-		Ok(None)
+		None
 	} else {
-		Ok(Some(url))
+		Some(url)
+	}
+}
+
+/// Exercise the same cursor and origin decoders used by the repository cache.
+#[cfg(fuzzing)]
+pub mod fuzz_support {
+	pub fn decode_cursor(bytes: &[u8]) -> Option<String> {
+		super::decode_cursor(bytes)
+	}
+
+	pub fn encode_cursor(sha: &str) -> Vec<u8> {
+		super::encode_cursor(sha)
+	}
+
+	pub fn parse_origin_output(success: bool, stdout: &[u8]) -> Option<String> {
+		super::parse_origin_output(success, stdout)
 	}
 }
 
