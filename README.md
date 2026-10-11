@@ -146,6 +146,14 @@ available Kani harnesses, and ignored integration tests. Fuzz replay needs
 only stable Rust. Campaigns additionally need `cargo-fuzz`, Bash and
 util-linux. See [fuzzing](fuzz/README.md) and the [campaign runbook](ci/README.md).
 
+Kani 0.68.0 is optional for ordinary contributor checks and required for the
+full verification gate. Install it with `cargo install --locked kani-verifier
+--version 0.68.0` and `cargo kani setup`, which installs its pinned toolchain.
+Run proofs only through `ci/kani.sh`; it enforces the shared process and
+memory limits and requires satisfied cover properties to rule out empty
+proofs. Weekly CI runs the harnesses marked `// ci: fast`; the complete set
+runs locally through the full gate and continuous campaign.
+
 For release validation and crates.io publication, see
 [the release guide](contrib/releasing.md).
 

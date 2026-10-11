@@ -115,6 +115,10 @@ timeout) exit 124 ;;
 no_verdict) echo '0 harnesses selected' ;;
 failed_verdict) echo 'VERIFICATION:- FAILED' ;;
 success_then_failure) printf 'VERIFICATION:- SUCCESSFUL\nVERIFICATION:- FAILED\n' ;;
+no_covers) echo 'VERIFICATION:- SUCCESSFUL' ;;
+unsatisfied_cover) printf ' ** 1 of 2 cover properties satisfied\nVERIFICATION:- SUCCESSFUL\n' ;;
+unreachable_cover) printf 'Check 1: sample.cover.1\n - Status: UNREACHABLE\n ** 0 of 1 cover properties satisfied\nVERIFICATION:- SUCCESSFUL\n' ;;
+empty_covers) printf ' ** 0 of 0 cover properties satisfied\nVERIFICATION:- SUCCESSFUL\n' ;;
 stubborn)
 	trap '' TERM INT
 	printf '%s\n' "$$" > "$FIXTURE/state/child"
@@ -135,7 +139,7 @@ leaking_harness)
 		echo 'VERIFICATION:- SUCCESSFUL'
 	fi
 	;;
-clean) sleep 0.1; echo 'VERIFICATION:- SUCCESSFUL' ;;
+clean) sleep 0.1; printf ' ** 2 of 2 cover properties satisfied\nVERIFICATION:- SUCCESSFUL\n' ;;
 esac
 STUB
 	chmod +x "$CASE/bin/"* "$CASE/repo/ci/"*.sh
@@ -409,13 +413,25 @@ kani_slot_cap|kani_memory_cap|kani_memory_arg_cap)
 	[[ $rc == 2 ]] || fail "Kani accepted excessive resource override ($1; exit $rc)"
 	[[ ! -f $CASE/state/targets ]] || fail 'Kani spawned a tool above its resource ceiling'
 	;;
+kani_required)
+	fixture kani_required
+	generation_fixture
+	rm "$CASE/bin/cargo-kani"
+	if BASH_ENV='' PATH="$CASE/bin:/usr/bin:/bin" LOUPE_KANI=1 "$CASE/repo/ci/check.sh" --full > "$CASE/output" 2>&1; then
+		fail 'full gate accepted a missing required verifier'
+	fi
+	grep -q 'kani not installed.*required' "$CASE/output" || {
+		cat "$CASE/output"
+		fail 'missing verifier failed for an unrelated reason'
+	}
+	;;
 kani_lower_limits)
 	fixture kani_lower_limits
 	LOUPE_KANI_SLOTS=1 LOUPE_KANI_MEM_GB=1 "$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1 || fail 'Kani rejected lower resource limits'
 	[[ $(cat "$CASE/state/memory") == 1048576 ]] || fail 'Kani did not apply lower memory limit'
 	;;
 kani_verdict)
-	for mode in no_verdict failed_verdict success_then_failure; do
+	for mode in no_verdict failed_verdict success_then_failure no_covers unsatisfied_cover unreachable_cover empty_covers; do
 		fixture "kani_$mode"
 		rc=0
 		FUZZ_MODE=$mode "$CASE/repo/ci/kani.sh" -p loupe-core --exact --harness kani::sample > "$CASE/output" 2>&1 || rc=$?
@@ -447,7 +463,7 @@ kani_cleanup_stubborn)
 	done
 	;;
 all)
-	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_lower_limits kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
+	for name in env metadata metadata_error metadata_uncached metadata_dependency_error metadata_tools generated_staged generated_changes generated_ci short_lock kill_after target_dir default_targets empty_targets singleton cleanup failure find timeout kani kani_failure kani_cleanup kani_singleton kani_slots kani_slot_cap kani_memory_cap kani_memory_arg_cap kani_required kani_lower_limits kani_verdict kani_harness_cleanup kani_cleanup_stubborn; do
 		"$SCRIPT_DIR/tooling-selftest.sh" "$name"
 	done
 	;;

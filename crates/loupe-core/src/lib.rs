@@ -29,3 +29,7 @@ pub use state_machine::{
 	StateTransitionError, VerdictRollup,
 };
 pub use verdict::{Verdict, VerdictPatch};
+
+#[cfg(kani)]
+#[path = "../kani/mod.rs"]
+mod kani;

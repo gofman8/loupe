@@ -117,7 +117,8 @@ if [ "$FULL" -eq 1 ]; then
 	elif command -v cargo-kani >/dev/null 2>&1; then
 		ci/kani.sh --workspace
 	else
-		echo "kani not installed; skipped (install: cargo install --locked kani-verifier && cargo kani setup)"
+		echo "kani not installed; required for --full (see README.md)" >&2
+		exit 2
 	fi
 
 	say "integration tests (bubblewrap, pinned CLIs)"

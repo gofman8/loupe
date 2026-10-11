@@ -140,7 +140,19 @@ for entry in $LIST; do
 	elif grep -qE '^VERIFICATION:[[:space:]]*-?[[:space:]]*FAILED([[:space:]]|$)' "$log"; then
 		rc=1; verdict="FAILED: counterexample or unwinding assertion; see $log"
 	elif [ "$status" -eq 0 ] && grep -qE '^VERIFICATION:[[:space:]]*-?[[:space:]]*SUCCESSFUL[[:space:]]*$' "$log"; then
-		verdict="VERIFICATION:- SUCCESSFUL"
+		# Kani can report SUCCESSFUL even when every cover is unreachable.
+		# Require a nonempty set of satisfied witnesses for every invocation.
+		if awk '
+			$1 == "**" && $3 == "of" && $5 == "cover" && $6 == "properties" && $7 == "satisfied" {
+				seen = 1
+				if ($2 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || $4 == 0 || $2 != $4) bad = 1
+			}
+			END { exit (!seen || bad) }
+		' "$log"; then
+			verdict="VERIFICATION:- SUCCESSFUL"
+		else
+			rc=1; verdict="FAILED: missing or unsatisfied cover properties; see $log"
+		fi
 	elif [ "$status" -eq 0 ]; then
 		rc=1; verdict="ERROR (exit 0, no successful verification verdict); see $log"
 	else

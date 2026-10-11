@@ -55,7 +55,9 @@ before starting tools. Its state lives under
 verdict was printed, and retries unsuccessful tips after `LOUPE_KANI_POLL`
 seconds (default 120). Successful tips wait for the branch to change.
 An exit status of zero counts as a proof only with an explicit successful
-verification verdict. Missing verdicts and failed checks remain failures.
+verification verdict and at least one cover property, with every cover
+satisfied. Kani's overall success alone does not exclude unreachable covers.
+Missing verdicts and failed checks remain failures.
 
 To stop a campaign, send TERM to its script PID and wait for it to exit;
 for a shell-started background process, use `kill -TERM "$campaign_pid"`
