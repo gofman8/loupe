@@ -284,8 +284,8 @@ fn read_bwrap_pid(info: &OwnedFd, child: &mut Child) -> Result<u32> {
 			Ok(0) => {},
 			Ok(count) => {
 				bytes.extend_from_slice(&chunk[..count]);
-				if let Ok(info) = serde_json::from_slice::<BwrapInfo>(&bytes) {
-					return Ok(info.child_pid);
+				if let Ok(pid) = parse_bwrap_pid(&bytes) {
+					return Ok(pid);
 				}
 			},
 			Err(Errno::AGAIN) => {},
@@ -306,14 +306,7 @@ fn wait_for_userns_mapping(child_pid: u32, child: &mut Child, proc_root: &Path) 
 	let uid = rustix::process::geteuid().as_raw();
 	let path = proc_root.join(child_pid.to_string()).join("uid_map");
 	loop {
-		if std::fs::read_to_string(&path).ok().is_some_and(|map| {
-			map.lines().any(|line| {
-				let mut fields = line.split_whitespace();
-				let inside = fields.next().and_then(|value| value.parse::<u32>().ok());
-				let outside = fields.next().and_then(|value| value.parse::<u32>().ok());
-				inside == Some(uid) && outside == Some(uid)
-			})
-		}) {
+		if std::fs::read_to_string(&path).ok().is_some_and(|map| uid_map_contains(&map, uid)) {
 			return Ok(());
 		}
 		if let Some(status) = child.try_wait()? {
@@ -442,39 +435,75 @@ fn render_network_policy(
 	policy
 }
 
-/// Pure rendering used by the supervisor, without command or namespace I/O.
-#[cfg(fuzzing)]
-pub(crate) mod fuzzing {
-	use super::*;
-
-	pub fn network_policy(
-		mode: SandboxNetworkMode, allowed: &BTreeSet<Ipv4Addr>, routes: &BTreeSet<String>,
-		addresses: &BTreeSet<Ipv4Addr>,
-	) -> String {
-		render_network_policy(mode, allowed, routes, addresses)
-	}
-}
-
 fn connected_ipv4_routes(ip: &Path) -> Result<BTreeSet<String>> {
 	let output = command_stdout(ip, &["-o", "-4", "route", "show", "scope", "link"])?;
-	Ok(output
+	Ok(parse_connected_ipv4_routes(&output))
+}
+
+fn parse_connected_ipv4_routes(output: &str) -> BTreeSet<String> {
+	output
 		.lines()
 		.filter_map(|line| line.split_whitespace().next())
 		.filter(|route| valid_ipv4_network(route))
 		.map(str::to_owned)
-		.collect())
+		.collect()
 }
 
 fn host_ipv4_addresses(ip: &Path) -> Result<BTreeSet<Ipv4Addr>> {
 	let output = command_stdout(ip, &["-o", "-4", "address", "show", "scope", "global"])?;
-	Ok(output
+	Ok(parse_host_ipv4_addresses(&output))
+}
+
+fn parse_host_ipv4_addresses(output: &str) -> BTreeSet<Ipv4Addr> {
+	output
 		.lines()
 		.filter_map(|line| {
 			let fields: Vec<&str> = line.split_whitespace().collect();
 			let inet = fields.iter().position(|field| *field == "inet")?;
 			fields.get(inet + 1)?.split('/').next()?.parse().ok()
 		})
-		.collect())
+		.collect()
+}
+
+fn parse_bwrap_pid(bytes: &[u8]) -> serde_json::Result<u32> {
+	serde_json::from_slice::<BwrapInfo>(bytes).map(|info| info.child_pid)
+}
+
+fn uid_map_contains(map: &str, uid: u32) -> bool {
+	map.lines().any(|line| {
+		let mut fields = line.split_whitespace();
+		let inside = fields.next().and_then(|value| value.parse::<u32>().ok());
+		let outside = fields.next().and_then(|value| value.parse::<u32>().ok());
+		inside == Some(uid) && outside == Some(uid)
+	})
+}
+
+/// Byte-only seams for fuzzing the parsers actually used by the supervisor.
+#[cfg(fuzzing)]
+pub(crate) mod fuzzing {
+	use super::*;
+
+	pub fn bwrap_pid(bytes: &[u8]) -> serde_json::Result<u32> {
+		parse_bwrap_pid(bytes)
+	}
+	pub fn uid_map(map: &str, uid: u32) -> bool {
+		uid_map_contains(map, uid)
+	}
+	pub fn connected_routes(output: &str) -> BTreeSet<String> {
+		parse_connected_ipv4_routes(output)
+	}
+	pub fn host_addresses(output: &str) -> BTreeSet<Ipv4Addr> {
+		parse_host_ipv4_addresses(output)
+	}
+	pub fn valid_network(value: &str) -> bool {
+		valid_ipv4_network(value)
+	}
+	pub fn network_policy(
+		mode: SandboxNetworkMode, allowed: &BTreeSet<Ipv4Addr>, routes: &BTreeSet<String>,
+		addresses: &BTreeSet<Ipv4Addr>,
+	) -> String {
+		render_network_policy(mode, allowed, routes, addresses)
+	}
 }
 
 fn valid_ipv4_network(value: &str) -> bool {

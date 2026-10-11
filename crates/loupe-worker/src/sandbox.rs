@@ -24,7 +24,9 @@ const BWRAP_BIN: &str = "bwrap";
 
 #[cfg(fuzzing)]
 pub mod fuzzing {
-	pub use crate::sandbox_network::fuzzing::network_policy;
+	pub use crate::sandbox_network::fuzzing::{
+		bwrap_pid, connected_routes, host_addresses, network_policy, uid_map, valid_network,
+	};
 }
 
 /// Public host data needed by dynamically linked agent CLIs and libc

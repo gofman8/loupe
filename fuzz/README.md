@@ -310,6 +310,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
+| `worker_network_parsers` | Actual PID, uid_map, route and address parsers, typed-serde PID forms, identity-pair and complete-set checks |
 | `worker_regex_secrets` | Actual scanner walk, independent byte-match/line oracle, size/cancellation/symlink behavior and metadata-only finding Debug |
 | `worker_repo_cache` | Exact cursor magic/version/body, round trips and status/UTF-8/whitespace behavior of git origin parsing |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
@@ -413,6 +414,13 @@ The complete nft output must match the golden rule template. Its tabs,
 quotes and underscores belong to the fixed syntax, including the table name
 and loopback rule; dynamic fields contain only typed addresses and routes.
 
+`worker_network_parsers` uses byte zero modulo four to select PID JSON,
+uid_map, connected routes or host addresses. The remaining input is capped
+at 64 KiB; uid_map starts with a little-endian u32 identity. The PID oracle
+independently models one required u32 field or a one-element sequence,
+including duplicate refusal and ignored-field syntax. Complete route/address
+sets and both uid identity columns must match their separate oracles.
+
 The broker policy target interprets raw bytes as provider JSON, header lines
 and up to 129 little-endian u64 words for output reservations. Its 128 KiB
 input cap bounds harness work; widened arithmetic independently checks the
@@ -424,7 +432,7 @@ and require the pure accounting and filtering paths to emit none.
 
 ## Pending S1 targets
 
-The branch currently has 31 real targets plus smoke. Three additional targets
+The branch currently has 32 real targets plus smoke. Two additional targets
 remain required for S1; none is deferred or dropped. Their candidates and
 counterexamples are preserved and their corrections are in progress under
 the approved twelve-repair allowance. Passing product tests or campaigns does not
@@ -434,7 +442,6 @@ waive a failed harness or integration gate.
 |---|---|
 | `worker_mcp_rpc` | Include valid side-fixture paths in its oracle; then verify the actual dispatcher, both catalogues, IDs/notifications, verdict/patch ordering, reference parsing and metadata-only logs. Verdict parsing belongs here, not to CLI stdout. |
 | `worker_sandbox_args` | Remove the `node_modules` fixture collision; then verify exact namespace/safety flags, supervisor framing, environment names and bind operands. |
-| `worker_network_parsers` | Model typed-serde PID sequence and ignored-field forms; then cover actual PID, uid_map, route and address byte parsers. Hostname/nft coverage does not replace these parsers. |
 
 ## Remaining ingress and later work
 
