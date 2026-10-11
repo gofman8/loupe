@@ -1,4 +1,4 @@
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use loupe_core::{JobKind, JobState};
@@ -42,8 +42,11 @@ pub fn parse_hash(headers: &HeaderMap) -> Result<[u8; 32], (StatusCode, String)>
 }
 
 pub(crate) fn parse_capability(headers: &HeaderMap) -> Option<[u8; 32]> {
-	let token = headers
-		.get(JOB_CAPABILITY_HEADER)
+	parse_capability_value(headers.get(JOB_CAPABILITY_HEADER))
+}
+
+pub(crate) fn parse_capability_value(value: Option<&HeaderValue>) -> Option<[u8; 32]> {
+	let token = value
 		.and_then(|value| value.to_str().ok())
 		.filter(|value| value.len() == JOB_CAPABILITY_TOKEN_CHARS)?;
 	Some(hash_capability(token.as_bytes()))
