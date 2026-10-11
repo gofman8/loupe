@@ -3,12 +3,11 @@
 //! Authenticates with the admin client cert minted by `loupe-server
 //! init`. Every command is one round-trip; the CLI does no caching.
 
-mod render;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use loupe_cli::render::{self, TerminalText};
 use loupe_proto::{
 	FindingDetail, GithubAppResponse, GithubReportingAuth, JobInfo, ListFindingsResponse,
 	ListReposResponse, RegisterRepoRequest, RegisterRepoResponse, RegisterWorkerRequest,
@@ -389,6 +388,10 @@ struct CertMintServerArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+	run().await.map_err(|error| anyhow::anyhow!("{}", TerminalText(&format!("{error:#}"))))
+}
+
+async fn run() -> Result<()> {
 	let Cli { conn, cmd } = Cli::parse();
 	match cmd {
 		Cmd::Repo(c) => match c {
@@ -525,7 +528,7 @@ async fn github_app_show(client: &reqwest::Client, base: &reqwest::Url) -> Resul
 	let body: GithubAppResponse =
 		serde_json::from_slice(&server_response(resp, "show GitHub App").await?)?;
 	match body.app {
-		Some(app) => println!("app_id={} slug={}", app.app_id, app.slug),
+		Some(app) => println!("app_id={} slug={}", app.app_id, TerminalText(&app.slug)),
 		None => println!("no GitHub App configured"),
 	}
 	Ok(())
@@ -667,10 +670,10 @@ async fn repo_list(
 		println!(
 			"{:>4}\t{}\t{}/{}\treporting={}\tinterval={:?}\tverify={}\tapproval={}\t{}\tlast_sha={:?}",
 			r.id,
-			r.host,
-			r.owner,
-			r.repo,
-			reporting_label(r.reporting.as_ref()),
+			TerminalText(&r.host),
+			TerminalText(&r.owner),
+			TerminalText(&r.repo),
+			TerminalText(&reporting_label(r.reporting.as_ref())),
 			r.scan_interval_seconds,
 			r.verification_enabled,
 			approval,
@@ -806,7 +809,11 @@ async fn worker_register(
 	let serialised = serde_json::to_string_pretty(&bundle)?;
 	if let Some(path) = a.out {
 		write_secret_file(&path, serialised.as_bytes())?;
-		println!("worker_id={} bundle written to {}", bundle.worker_id, path.display());
+		println!(
+			"worker_id={} bundle written to {}",
+			bundle.worker_id,
+			TerminalText(&path.to_string_lossy())
+		);
 	} else {
 		println!("{serialised}");
 	}
@@ -952,22 +959,7 @@ async fn finding_list(
 	let body: ListFindingsResponse =
 		serde_json::from_slice(&server_response(resp, "list findings").await?)?;
 	for f in body.findings.into_iter().rev() {
-		let loc = match (f.file_path.as_deref(), f.line_start) {
-			(Some(p), Some(l)) => format!("{p}:{l}"),
-			(Some(p), None) => p.to_string(),
-			_ => "-".into(),
-		};
-		println!(
-			"{:>5}\tjob={}\t{:?}\t{}\tstate={}\tverify={}\t{}\t{}",
-			f.id,
-			f.job_id,
-			f.severity,
-			f.scanner_id,
-			f.state,
-			f.verification_required,
-			loc,
-			f.title,
-		);
+		println!("{}", render::finding_list_row(&f));
 	}
 	Ok(())
 }
@@ -984,15 +976,7 @@ async fn finding_search(
 		return Ok(());
 	}
 	for f in body.findings {
-		let loc = match (f.file_path.as_deref(), f.line_start) {
-			(Some(p), Some(l)) => format!("{p}:{l}"),
-			(Some(p), None) => p.to_string(),
-			_ => "-".into(),
-		};
-		println!(
-			"{:>5}\t{:?}\t{}\tstate={}\t{}\t{}",
-			f.id, f.severity, f.scanner_id, f.state, loc, f.title,
-		);
+		println!("{}", render::finding_search_row(&f));
 	}
 	Ok(())
 }

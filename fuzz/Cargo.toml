@@ -9,6 +9,7 @@ rust-version = "1.88"
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 loupe-core = { path = "../crates/loupe-core" }
+loupe-cli = { path = "../crates/loupe-cli" }
 loupe-http = { path = "../crates/loupe-http" }
 loupe-proto = { path = "../crates/loupe-proto" }
 loupe-server = { path = "../crates/loupe-server" }

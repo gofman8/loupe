@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 use loupe_core::{FindingState, Severity};
-use loupe_proto::FindingDetail;
+use loupe_proto::{FindingDetail, FindingSummary};
 
 /// Whether to emit ANSI escape sequences. Detected once per call by
 /// [`Style::detect`], threaded through the renderer so callers can
@@ -43,8 +43,9 @@ impl Style {
 	}
 
 	fn paint(self, code: &str, text: &str) -> String {
+		let text = TerminalText(text);
 		match self {
-			Style::Plain => text.to_owned(),
+			Style::Plain => text.to_string(),
 			Style::Color => format!("\x1b[{code}m{text}\x1b[0m"),
 		}
 	}
@@ -57,6 +58,59 @@ const GREEN: &str = "32";
 const YELLOW: &str = "33";
 const CYAN: &str = "36";
 
+/// Escape before adding our own ANSI styling. Printable Unicode is preserved;
+/// terminal commands and other C0/C1 controls remain visible as literal escapes.
+pub struct TerminalText<'a>(pub &'a str);
+
+impl std::fmt::Display for TerminalText<'_> {
+	fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		for character in self.0.chars() {
+			if character.is_control() {
+				write!(out, "{}", character.escape_default())?;
+			} else {
+				out.write_char(character)?;
+			}
+		}
+		Ok(())
+	}
+}
+
+/// Render one human listing row; tabs belong to the layout, never to data.
+pub fn finding_list_row(f: &FindingSummary) -> String {
+	format!(
+		"{:>5}\tjob={}\t{:?}\t{}\tstate={}\tverify={}\t{}\t{}",
+		f.id,
+		f.job_id,
+		f.severity,
+		TerminalText(&f.scanner_id),
+		f.state,
+		f.verification_required,
+		TerminalText(&summary_location(f)),
+		TerminalText(&f.title)
+	)
+}
+
+/// Render one search result using the same text boundary as finding details.
+pub fn finding_search_row(f: &FindingSummary) -> String {
+	format!(
+		"{:>5}\t{:?}\t{}\tstate={}\t{}\t{}",
+		f.id,
+		f.severity,
+		TerminalText(&f.scanner_id),
+		f.state,
+		TerminalText(&summary_location(f)),
+		TerminalText(&f.title)
+	)
+}
+
+fn summary_location(f: &FindingSummary) -> String {
+	match (f.file_path.as_deref(), f.line_start) {
+		(Some(path), Some(line)) => format!("{path}:{line}"),
+		(Some(path), None) => path.to_owned(),
+		_ => "-".into(),
+	}
+}
+
 /// Render a [`FindingDetail`] as multi-line plain text.
 pub fn finding(f: &FindingDetail, style: Style) -> String {
 	let mut out = String::with_capacity(1024);
@@ -65,7 +119,7 @@ pub fn finding(f: &FindingDetail, style: Style) -> String {
 	if !f.description.trim().is_empty() {
 		section(&mut out, "Description", style);
 		for line in f.description.lines() {
-			let _ = writeln!(out, "  {line}");
+			let _ = writeln!(out, "  {}", TerminalText(line));
 		}
 		out.push('\n');
 	}
@@ -96,13 +150,13 @@ fn metadata(out: &mut String, f: &FindingDetail, style: Style) {
 		(Some(p), None, _) => p.to_string(),
 		_ => "(unknown)".into(),
 	};
-	let _ = writeln!(out, "  {} {location}", style.paint(DIM, "Location:"));
+	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Location:"), TerminalText(&location));
 	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Repo:    "), f.repo_id);
 	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Job:     "), f.job_id);
-	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Scanner: "), f.scanner_id);
+	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Scanner: "), TerminalText(&f.scanner_id));
 	let _ = writeln!(out, "  {} {}", style.paint(DIM, "State:   "), state_painted(&f.state, style));
 	if let Some(cwe) = &f.cwe {
-		let _ = writeln!(out, "  {} {}", style.paint(DIM, "CWE:     "), cwe);
+		let _ = writeln!(out, "  {} {}", style.paint(DIM, "CWE:     "), TerminalText(cwe));
 	}
 	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Created: "), format_unix(f.created_at));
 	let _ = writeln!(out, "  {} {}", style.paint(DIM, "Verify:  "), f.verification_required);
@@ -137,10 +191,22 @@ fn audit(out: &mut String, f: &FindingDetail, style: Style) {
 	}
 	section(out, "Audit", style);
 	if let (Some(at), Some(by)) = (f.approved_at, f.approved_by_cn.as_deref()) {
-		let _ = writeln!(out, "  {} {} by {}", style.paint(GREEN, "approved"), format_unix(at), by);
+		let _ = writeln!(
+			out,
+			"  {} {} by {}",
+			style.paint(GREEN, "approved"),
+			format_unix(at),
+			TerminalText(by)
+		);
 	}
 	if let (Some(at), Some(by)) = (f.rejected_at, f.rejected_by_cn.as_deref()) {
-		let _ = writeln!(out, "  {} {} by {}", style.paint(RED, "rejected"), format_unix(at), by);
+		let _ = writeln!(
+			out,
+			"  {} {} by {}",
+			style.paint(RED, "rejected"),
+			format_unix(at),
+			TerminalText(by)
+		);
 	}
 	out.push('\n');
 }
@@ -166,7 +232,7 @@ fn render_unified_diff(out: &mut String, diff: &str, style: Style) {
 		} else if line.starts_with("diff ") || line.starts_with("index ") {
 			style.paint(DIM, line)
 		} else {
-			line.to_owned()
+			TerminalText(line).to_string()
 		};
 		let _ = writeln!(out, "  {painted}");
 	}
@@ -205,15 +271,11 @@ fn state_painted(state: &FindingState, style: Style) -> String {
 /// pulling in a date crate. The civil-from-days math is the
 /// classic Howard Hinnant algorithm; readable and exact for any
 /// timestamp the system clock can produce.
-fn format_unix(ts: i64) -> String {
-	let (days, seconds_of_day) = if ts >= 0 {
-		(ts / 86_400, ts % 86_400)
-	} else {
-		// Floor-div so negatives go the right way.
-		let d = -((-ts + 86_399) / 86_400);
-		let s = ts - d * 86_400;
-		(d, s)
-	};
+pub fn format_unix(ts: i64) -> String {
+	// Euclidean division floors negatives without negating i64::MIN or
+	// multiplying a rounded-down day count beyond the timestamp range.
+	let days = ts.div_euclid(86_400);
+	let seconds_of_day = ts.rem_euclid(86_400);
 	let hours = seconds_of_day / 3600;
 	let minutes = (seconds_of_day % 3600) / 60;
 	let secs = seconds_of_day % 60;
@@ -275,6 +337,67 @@ mod tests {
 			approved_by_cn: None,
 			rejected_at: None,
 			rejected_by_cn: None,
+		}
+	}
+
+	#[test]
+	fn untrusted_fields_cannot_control_the_terminal() {
+		let payload: String = (0..=159)
+			.filter_map(char::from_u32)
+			.filter(|c| c.is_control() && !matches!(c, '\n' | '\r'))
+			.collect();
+		for field in 0..10 {
+			let mut f = sample();
+			match field {
+				0 => f.title = payload.clone(),
+				1 => f.description = payload.clone(),
+				2 => f.file_path = Some(payload.clone()),
+				3 => f.scanner_id = payload.clone(),
+				4 => f.cwe = Some(payload.clone()),
+				5 => f.fingerprint = payload.clone(),
+				6 => f.poc_unified = Some(payload.clone()),
+				7 => f.patch_unified = Some(payload.clone()),
+				8 => {
+					f.approved_at = Some(0);
+					f.approved_by_cn = Some(payload.clone());
+				},
+				_ => {
+					f.rejected_at = Some(0);
+					f.rejected_by_cn = Some(payload.clone());
+				},
+			}
+			for style in [Style::Plain, Style::Color] {
+				let mut rendered = finding(&f, style);
+				for code in ["0", BOLD, DIM, RED, GREEN, YELLOW, CYAN] {
+					rendered = rendered.replace(&format!("\x1b[{code}m"), "");
+				}
+				assert!(
+					!rendered.chars().any(|c| c.is_control() && c != '\n'),
+					"field {field} leaked a terminal control in {style:?}"
+				);
+				for c in payload.chars() {
+					assert!(
+						rendered.contains(&c.escape_default().to_string()),
+						"field {field} lost the visible spelling of {c:?}"
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn title_newlines_are_visible_without_forging_rows() {
+		let mut f = sample();
+		f.title = "safe\r\nforged".into();
+		assert!(finding(&f, Style::Plain).contains("safe\\r\\nforged"));
+	}
+
+	#[test]
+	fn format_unix_handles_extreme_timestamps() {
+		for ts in [i64::MIN, i64::MIN + 86_400, i64::MAX] {
+			let rendered = format_unix(ts);
+			assert!(rendered.ends_with(" UTC"));
+			assert!(!rendered.contains(":-"));
 		}
 	}
 

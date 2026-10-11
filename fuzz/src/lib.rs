@@ -10,6 +10,7 @@ compile_error!("Fuzz targets need cfg=fuzzing");
 
 pub mod utils;
 
+pub mod cli_render;
 pub mod core_canonical;
 pub mod core_state_machine;
 pub mod core_text_bounded;

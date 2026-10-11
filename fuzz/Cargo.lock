@@ -947,6 +947,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "loupe-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "loupe-core",
+ "loupe-http",
+ "loupe-proto",
+ "loupe-tls",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "loupe-core"
 version = "0.1.0"
 dependencies = [
@@ -966,6 +982,7 @@ dependencies = [
  "arbitrary",
  "blake3",
  "http",
+ "loupe-cli",
  "loupe-core",
  "loupe-http",
  "loupe-proto",

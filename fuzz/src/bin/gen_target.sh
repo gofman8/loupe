@@ -13,6 +13,7 @@ GEN_TEST() {
 	printf 'void %s_run(const unsigned char* data, size_t data_len);\n' "$target_name" >> "$GENERATED/targets.h"
 }
 # One line per target, alphabetical. Optional second argument: module prefix.
+GEN_TEST cli_render
 GEN_TEST core_canonical
 GEN_TEST core_state_machine
 GEN_TEST core_text_bounded

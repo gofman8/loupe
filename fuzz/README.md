@@ -186,6 +186,10 @@ root keys after that loader succeeds.
 against loopback chunked HTTP. It checks all four typed responses and errors,
 including exact-budget and oversized streams without Content-Length.
 
+`loupe-cli` exposes the actual terminal renderer for plain and colored detail,
+list and search output. Its oracle permits only intentional styling and
+layout controls, while requiring visible spellings of input controls.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -217,6 +221,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 
 | Target | Assertions |
 |---|---|
+| `cli_render` | Control escaping, exact visible text, intentional ANSI styling, row/column integrity and extreme timestamps |
 | `core_canonical` | Independent sorted serialization, reordered/whitespace-equivalent JSON, idempotence, bounded output and BLAKE3 digest |
 | `core_state_machine` | Independent adjacency/precedence tables, terminal exits only through documented operator retries; SQL permutation/scope invariant covered in storage tests |
 | `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
