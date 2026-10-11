@@ -1,6 +1,7 @@
 use axum::http::{HeaderMap, StatusCode};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use loupe_core::{JobKind, JobState};
 use loupe_proto::{JobCapability, JOB_CAPABILITY_HEADER, JOB_CAPABILITY_TOKEN_CHARS};
 use loupe_storage::jobs::{self, JobRow};
 use rand_core::{OsRng, RngCore};
@@ -37,12 +38,39 @@ pub(crate) fn issue() -> (JobCapability, [u8; 32]) {
 
 /// Parse the capability header without requiring a live lease.
 pub fn parse_hash(headers: &HeaderMap) -> Result<[u8; 32], (StatusCode, String)> {
+	parse_capability(headers).ok_or_else(forbidden)
+}
+
+pub(crate) fn parse_capability(headers: &HeaderMap) -> Option<[u8; 32]> {
 	let token = headers
 		.get(JOB_CAPABILITY_HEADER)
 		.and_then(|value| value.to_str().ok())
-		.filter(|value| value.len() == JOB_CAPABILITY_TOKEN_CHARS)
-		.ok_or_else(forbidden)?;
-	Ok(*blake3::hash(token.as_bytes()).as_bytes())
+		.filter(|value| value.len() == JOB_CAPABILITY_TOKEN_CHARS)?;
+	Some(hash_capability(token.as_bytes()))
+}
+
+fn hash_capability(token: &[u8]) -> [u8; 32] {
+	*blake3::hash(token).as_bytes()
+}
+
+pub(crate) struct LeaseFacts {
+	pub worker_id: Option<i64>,
+	pub capability_hash: [u8; 32],
+	pub lease_expires_at: Option<i64>,
+	pub state: JobState,
+}
+
+pub(crate) fn capability_admits(
+	row: &LeaseFacts, caller_worker: i64, hash: &[u8; 32], now: i64,
+) -> bool {
+	row.worker_id == Some(caller_worker)
+		&& row.capability_hash == *hash
+		&& row.state == JobState::Leased
+		&& row.lease_expires_at.is_some_and(|expiry| now <= expiry)
+}
+
+pub(crate) fn legacy_kind(kind: &JobKind) -> bool {
+	matches!(kind, JobKind::Scan | JobKind::Verify)
 }
 
 pub(crate) fn authorize(
@@ -58,6 +86,17 @@ pub(crate) fn authorize(
 			(StatusCode::INTERNAL_SERVER_ERROR, format!("authorize job capability: {error}"))
 		})?
 		.ok_or_else(forbidden)?;
+	// SQL established hash equality in the same lookup. JobRow does not
+	// retain the secret hash; the remaining facts come from the returned row.
+	let facts = LeaseFacts {
+		worker_id: row.worker_id,
+		capability_hash,
+		lease_expires_at: row.lease_expires_at,
+		state: row.state,
+	};
+	if !capability_admits(&facts, worker.id(), &capability_hash, now) {
+		return Err(forbidden());
+	}
 	Ok(AuthorizedJob { row, capability_hash })
 }
 
@@ -65,7 +104,7 @@ pub(crate) fn authorize_for_job(
 	state: &AppState, worker: &AuthedWorker, headers: &HeaderMap, job_id: i64, now: i64,
 ) -> Result<AuthorizedJob, (StatusCode, String)> {
 	let authorized = authorize(state, worker, headers, now)?;
-	if authorized.row.id != job_id {
+	if authorized.row.id != job_id || !legacy_kind(&authorized.row.kind) {
 		return Err(forbidden());
 	}
 	Ok(authorized)

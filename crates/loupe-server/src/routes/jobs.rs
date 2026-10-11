@@ -36,6 +36,19 @@ use crate::auth::AuthedWorker;
 use crate::state::AppState;
 use crate::{job_capability, reporters};
 
+pub(crate) enum Route {
+	Findings,
+	LlmFinding,
+	Verdict,
+}
+
+pub(crate) fn route_admits_kind(route: Route, kind: &JobKind) -> bool {
+	match route {
+		Route::Findings | Route::LlmFinding => matches!(kind, JobKind::Scan),
+		Route::Verdict => matches!(kind, JobKind::Verify),
+	}
+}
+
 fn now_secs() -> i64 {
 	SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
@@ -445,7 +458,7 @@ pub async fn submit_findings(
 
 	let authorized = job_capability::authorize_for_job(&state, &worker, &headers, job_id, now)?;
 	let row = &authorized.row;
-	if row.kind != JobKind::Scan {
+	if !route_admits_kind(Route::Findings, &row.kind) {
 		return Err((StatusCode::BAD_REQUEST, "verify-kind jobs cannot post findings".into()));
 	}
 	if batch.findings.iter().any(|finding| finding.scanner_id == LLM_CODE_REVIEW_SCANNER_ID) {
@@ -539,7 +552,7 @@ pub async fn submit_llm_finding(
 	let now = now_secs();
 	let authorized = job_capability::authorize_for_job(&state, &worker, &headers, job_id, now)?;
 	let row = &authorized.row;
-	if row.kind != JobKind::Scan {
+	if !route_admits_kind(Route::LlmFinding, &row.kind) {
 		return Err((StatusCode::BAD_REQUEST, "verify-kind jobs cannot post findings".into()));
 	}
 	validate_llm_finding_submission(&submission)
@@ -596,7 +609,7 @@ pub async fn submit_verdict(
 
 	let authorized = job_capability::authorize_for_job(&state, &worker, &headers, job_id, now)?;
 	let row = &authorized.row;
-	if row.kind != JobKind::Verify {
+	if !route_admits_kind(Route::Verdict, &row.kind) {
 		return Err((StatusCode::BAD_REQUEST, "scan-kind jobs cannot post verdicts".into()));
 	}
 	let target_finding_id = row
