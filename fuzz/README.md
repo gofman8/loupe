@@ -162,6 +162,11 @@ the persisted aggregate's actual constructor and parser, without opening a
 database. Symbol and canonicalization behavior compose the core validators
 already covered by their own independent targets.
 
+`loupe-proto` exercises the actual public wire DTOs and protocol negotiation.
+`subtle` compares capability bytes in constant time; capability-bearing DTOs
+compare their public fields only after replacing both capabilities with a
+fixed public value. Debug checks compare exact field-matched baselines.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -198,6 +203,8 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
 | `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
 | `core_text_json` | Duplicate-preserving reference tree, depth/node/byte budgets, composed key/leaf rules, entry-point equivalence and redaction |
+| `proto_dto` | All 36 public DTO types and enum variants, field-preserving round trips, capability redaction and independent LLM submission admission |
+| `proto_version` | Inclusive protocol windows, inverted-window rejection and exact mismatch fields and diagnostics |
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
 | `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
@@ -219,6 +226,16 @@ before fingerprinting. A separate byte recognizer checks transient IDs and
 location/hash exclusions; Unicode helpers check NFC, case and whitespace.
 Equivalent spellings must share fingerprints, while different families must
 have different framed bytes. The target does not assume collision freedom.
+
+`proto_dto` takes one selector byte modulo 36 followed by up to 512 KiB of
+JSON. The corpus covers every public DTO and enum variant, malformed JSON,
+capability collisions with public Debug text, and semantic finding limits.
+The independent finding oracle records the existing lexical path and diff
+rules rather than imposing a new validation policy.
+
+`proto_version` consumes six little-endian bytes for the client, minimum
+and maximum u16 versions. A widened interval oracle checks both endpoints,
+inverted windows and integer boundaries; shorter inputs are ignored.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.

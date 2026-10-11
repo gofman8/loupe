@@ -18,6 +18,8 @@ GEN_TEST core_state_machine
 GEN_TEST core_text_bounded
 GEN_TEST core_text_ident
 GEN_TEST core_text_json
+GEN_TEST proto_dto
+GEN_TEST proto_version
 GEN_TEST smoke
 GEN_TEST storage_identity
 GEN_TEST storage_policy_snapshot
