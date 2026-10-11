@@ -32,6 +32,16 @@ impl RegexSecretsScanner {
 		let re = Regex::new(r"AKIA[0-9A-Z]{16}").expect("compile-time AKIA regex must be valid");
 		Self { re }
 	}
+
+	/// Fuzz the synchronous walk used by `scan` without a runtime per input.
+	#[cfg(fuzzing)]
+	pub fn fuzz_walk(&self, workdir: &Path, cancelled: bool) -> Result<Vec<Finding>> {
+		let cancel = tokio_util::sync::CancellationToken::new();
+		if cancelled {
+			cancel.cancel();
+		}
+		walk(workdir, &self.re, "fuzz-head", &cancel)
+	}
 }
 
 impl Default for RegexSecretsScanner {
@@ -162,6 +172,19 @@ mod tests {
 			config: serde_json::Value::Null,
 			cancel: CancellationToken::new(),
 		}
+	}
+
+	#[tokio::test]
+	async fn finding_debug_does_not_expose_repository_secret() {
+		let dir = tempfile::tempdir().unwrap();
+		let secret = "AKIAIOSFODNN7EXAMPLE";
+		std::fs::write(dir.path().join(format!("{secret}.rs")), secret).unwrap();
+		let findings = RegexSecretsScanner::new().scan(&make_ctx(dir.path())).await.unwrap();
+		assert_eq!(findings.len(), 1, "fixture must produce a finding");
+		assert!(
+			!format!("{:?}", findings[0]).contains(secret),
+			"Finding Debug exposed the repository secret through a source path"
+		);
 	}
 
 	#[tokio::test]

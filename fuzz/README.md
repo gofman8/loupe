@@ -309,6 +309,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_network_host` | RFC 1123 hostname boundaries, IPv4 acceptance and complete allowlist/public nft rule templates |
+| `worker_regex_secrets` | Actual scanner walk, independent byte-match/line oracle, size/cancellation/symlink behavior and metadata-only finding Debug |
 | `worker_repo_cache` | Exact cursor magic/version/body, round trips and status/UTF-8/whitespace behavior of git origin parsing |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
 | `worker_source_discovery` | Actual manifest/glob/exclusion parsing, canonical containment, sorted unique paths and complete known-fixture selection |
@@ -375,6 +376,13 @@ GitHub titles are capped at 100 Unicode scalar values and body admission at
 email body for S3; these targets do not claim containment or an email-body
 cap that the current renderers do not provide.
 
+`worker_regex_secrets` interprets byte zero as cancellation and exact/over
+one-MiB file-size modes; the remaining bytes supply file content and a bounded
+safe filename. Inputs are capped at 64 KiB before boundary-mode padding.
+An independent byte recognizer checks every match and line number. `.git`
+and escaping symlink controls must remain excluded, and finding Debug must
+contain only severity and line metadata even when the filename is a secret.
+
 `worker_source_discovery` uses byte zero for inside/outside source-root and
 build-script symlinks; remaining NUL-separated fields contain root/member
 Cargo manifests and an exclusion pattern. Bit 3 instead passes all remaining
@@ -415,10 +423,10 @@ and require the pure accounting and filtering paths to emit none.
 
 ## Pending S1 targets
 
-The branch currently has 29 real targets plus smoke. Five additional targets
+The branch currently has 30 real targets plus smoke. Four additional targets
 remain required for S1; none is deferred or dropped. Their candidates and
-counterexamples are preserved while the plan's consumed six-repair allowance
-awaits an explicit extension. Passing product tests or campaigns does not
+counterexamples are preserved and their corrections are in progress under
+the approved twelve-repair allowance. Passing product tests or campaigns does not
 waive a failed harness or integration gate.
 
 | Required target | Held correction and remaining coverage |
@@ -427,7 +435,6 @@ waive a failed harness or integration gate.
 | `worker_sandbox_args` | Remove the `node_modules` fixture collision; then verify exact namespace/safety flags, supervisor framing, environment names and bind operands. |
 | `worker_network_parsers` | Model typed-serde PID sequence and ignored-field forms; then cover actual PID, uid_map, route and address byte parsers. Hostname/nft coverage does not replace these parsers. |
 | `server_github_response` | Correct ignored-field UTF-8 semantics; then integrate L8 and verify app, installation, token, issue and label responses with closed error diagnostics. |
-| `worker_regex_secrets` | Move its test module after exported items to satisfy all-target Clippy without suppressing the lint; then integrate L11 and verify actual scanner matches/lines and metadata-only Finding Debug. Its clean campaign does not satisfy the failed integration gate. |
 
 ## Remaining ingress and later work
 

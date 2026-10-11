@@ -39,6 +39,7 @@ fuzz/src/worker_network_host.rs fuzz entry point: the C entry point takes a raw 
 fuzz/src/worker_config.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/worker_repo_cache.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/worker_source_discovery.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
+fuzz/src/worker_regex_secrets.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/server_report_email.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/server_report_github.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/server_request_parsers.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer

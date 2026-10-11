@@ -17,7 +17,7 @@ pub fn format_finding_id(id: i64) -> String {
 /// `fingerprint` is the server-side dedup key. Scanners treat it as
 /// opaque; the built-in implementations currently hash scanner id,
 /// file path, and a normalized source window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
 	pub scanner_id: String,
 	pub severity: Severity,
@@ -41,6 +41,19 @@ pub struct Finding {
 	pub fingerprint: String,
 }
 
+// Findings contain repository and agent text, including paths that can embed
+// secrets. Diagnostics expose only severity and source line numbers; serde
+// remains the explicit transport for the complete finding.
+impl std::fmt::Debug for Finding {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Finding")
+			.field("severity", &self.severity)
+			.field("line_start", &self.line_start)
+			.field("line_end", &self.line_end)
+			.finish_non_exhaustive()
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -58,6 +71,23 @@ mod tests {
 			patch_unified: None,
 			poc_unified: None,
 			fingerprint: "deadbeef".into(),
+		}
+	}
+
+	#[test]
+	fn debug_contains_only_severity_and_line_metadata() {
+		let mut f = sample();
+		let baseline = "Finding { severity: High, line_start: Some(42), line_end: Some(42), .. }";
+		for payload in ["private-repository-secret", "Finding", "redacted", ""] {
+			f.scanner_id = payload.into();
+			f.title = payload.into();
+			f.description = payload.into();
+			f.file_path = Some(payload.into());
+			f.cwe = Some(payload.into());
+			f.patch_unified = Some(payload.into());
+			f.poc_unified = Some(payload.into());
+			f.fingerprint = payload.into();
+			assert_eq!(format!("{f:?}"), baseline, "Finding Debug must be independent of text");
 		}
 	}
 
