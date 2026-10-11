@@ -21,3 +21,5 @@ pub mod smoke;
 pub mod storage_identity;
 pub mod storage_policy_snapshot;
 pub mod storage_source_refs;
+pub mod tls_fingerprint;
+pub mod tls_pem;

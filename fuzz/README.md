@@ -167,6 +167,11 @@ already covered by their own independent targets.
 compare their public fields only after replacing both capabilities with a
 fixed public value. Debug checks compare exact field-matched baselines.
 
+`loupe-tls` exercises the production certificate, key and trust-root loaders.
+`sha2` checks that worker fingerprints hash the exact supplied DER bytes.
+The PEM pair in `fixtures/` is deliberately public test material, never an
+authentication credential. Seeds vary each PEM field independently.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -208,6 +213,8 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `storage_source_refs` | Independent path admission, 32/64-item limits, raw and canonical byte budgets, preserved path bytes, aggregate Debug redaction |
 | `storage_identity` | Independent anchor recognition, equivalent spelling, metadata-only diagnostics, explicit identity framing and reference BLAKE3 |
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
+| `tls_fingerprint` | Exact SHA-256 of arbitrary DER bytes and repeatability |
+| `tls_pem` | Certificate/key/root parsing, successful CA reload, valid fixture admission and malformed-label refusal |
 
 `storage_source_refs` takes one policy byte (even: 32 items, odd: 64),
 followed by JSON reference bytes. Inputs up to 128 KiB exercise both sides of

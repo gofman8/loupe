@@ -11,6 +11,8 @@ blake3 = { version = "1", default-features = false, features = ["std"] }
 loupe-core = { path = "../crates/loupe-core" }
 loupe-proto = { path = "../crates/loupe-proto" }
 loupe-storage = { path = "../crates/loupe-storage" }
+loupe-tls = { path = "../crates/loupe-tls" }
+sha2 = { version = "0.10", default-features = false }
 subtle = { version = "2", default-features = false }
 unicode-general-category = { version = "1.1", default-features = false }
 unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }

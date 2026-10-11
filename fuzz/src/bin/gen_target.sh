@@ -24,6 +24,8 @@ GEN_TEST smoke
 GEN_TEST storage_identity
 GEN_TEST storage_policy_snapshot
 GEN_TEST storage_source_refs
+GEN_TEST tls_fingerprint
+GEN_TEST tls_pem
 mkdir -p ../../runners/src/bin
 for old in ../../runners/src/bin/*_target.rs; do
 	[ -e "$old" ] || continue
