@@ -176,6 +176,16 @@ pub struct SandboxBuilder {
 	set_env: Vec<(&'static str, OsString)>,
 }
 
+/// Facts discovered on the trusted host before projecting sandbox arguments.
+/// Keeping I/O here lets the same launch policy run without ambient state.
+pub(crate) struct SandboxHostFacts {
+	pub(crate) launcher: PathBuf,
+	pub(crate) path: String,
+	pub(crate) system_dirs: Vec<&'static str>,
+	pub(crate) system_binds: Vec<(PathBuf, &'static str)>,
+	pub(crate) forwarded_env: Vec<(&'static str, OsString)>,
+}
+
 impl SandboxBuilder {
 	/// New builder targeting a worktree on disk. The `workdir` is bind-
 	/// mounted read-only into the sandbox at `/workdir`.
@@ -314,29 +324,70 @@ impl SandboxBuilder {
 			return cmd;
 		}
 
-		let mut cmd = if let Some(network) = &self.network {
-			let launcher = self.network_supervisor.clone().unwrap_or_else(|| {
+		let host = self.host_facts();
+		let argv = self.argv(program, &[], &host);
+		let mut cmd = Command::new(&argv[0]);
+		cmd.args(&argv[1..]);
+		cmd.env_clear();
+		cmd.env("PATH", &host.path);
+		cmd
+	}
+
+	fn host_facts(&self) -> SandboxHostFacts {
+		let launcher = if self.network.is_some() {
+			self.network_supervisor.clone().unwrap_or_else(|| {
 				std::env::current_exe().unwrap_or_else(|_| PathBuf::from("loupe-worker"))
-			});
-			let mut cmd = Command::new(launcher);
-			cmd.arg("sandbox-exec");
-			cmd.arg("--network").arg(network.config.mode.as_str());
+			})
+		} else {
+			PathBuf::from(BWRAP_BIN)
+		};
+		let mut system_binds = SANDBOX_SYSTEM_FILES
+			.iter()
+			.filter_map(|path| canonical_ro_bind(path))
+			.collect::<Vec<_>>();
+		if self.network.is_some() {
+			system_binds.extend(
+				SANDBOX_NETWORK_FILES
+					.iter()
+					.chain(SANDBOX_CA_PATHS)
+					.filter_map(|path| canonical_ro_bind(path)),
+			);
+		}
+		SandboxHostFacts {
+			launcher,
+			path: sandbox_path(),
+			system_dirs: ["/usr", "/lib", "/lib64", "/bin", "/sbin"]
+				.into_iter()
+				.filter(|path| Path::new(path).exists())
+				.collect(),
+			system_binds,
+			forwarded_env: self
+				.forward_env
+				.iter()
+				.filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+				.collect(),
+		}
+	}
+
+	/// Pure projection, including the executable and both supervisor/program
+	/// separators. Only build's test-only disabled path bypasses this policy.
+	pub(crate) fn argv(
+		&self, program: &str, args: &[OsString], host: &SandboxHostFacts,
+	) -> Vec<OsString> {
+		let mut argv = vec![host.launcher.as_os_str().to_owned()];
+		if let Some(network) = &self.network {
+			argv.extend(
+				["sandbox-exec", "--network", network.config.mode.as_str()].map(OsString::from),
+			);
 			for host in &network.required_hosts {
-				cmd.arg("--required-host").arg(host);
+				argv.extend([OsString::from("--required-host"), OsString::from(host)]);
 			}
 			for host in &network.config.allowlist {
-				cmd.arg("--allow-host").arg(host);
+				argv.extend([OsString::from("--allow-host"), OsString::from(host)]);
 			}
-			cmd.arg("--").arg(BWRAP_BIN);
-			cmd
-		} else {
-			Command::new(BWRAP_BIN)
-		};
-		cmd.env_clear();
-		cmd.env("PATH", sandbox_path());
-		cmd.arg("--die-with-parent");
-		cmd.arg("--new-session");
-		cmd.arg("--clearenv");
+			argv.extend(["--", BWRAP_BIN].map(OsString::from));
+		}
+		argv.extend(["--die-with-parent", "--new-session", "--clearenv"].map(OsString::from));
 
 		// Load-bearing for rootless slirp/nft setup, and subtler than it
 		// looks. The supervisor configures networking by entering the
@@ -349,23 +400,37 @@ impl SandboxBuilder {
 		// here is mounting a fresh `/dev` below. Without that, the parent
 		// is the supervisor's own namespace, re-entering it is `EINVAL`,
 		// and every networked sandbox fails at startup.
-		cmd.args(["--unshare-user", "--unshare-net"]);
-		cmd.args(["--unshare-pid", "--unshare-ipc", "--unshare-uts"]);
+		argv.extend(
+			["--unshare-user", "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+				.map(OsString::from),
+		);
 
 		// Read-only system binaries and libraries. /lib and /lib64 are
 		// platform-dependent, so bind whichever exists. Never bind all
 		// of /etc: supported deployments store the worker identity there.
-		for ro in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
-			if Path::new(ro).exists() {
-				cmd.args(["--ro-bind-try", ro, ro]);
-			}
+		for ro in &host.system_dirs {
+			argv.extend(["--ro-bind-try", ro, ro].map(OsString::from));
 		}
 
-		add_minimal_system_binds(&mut cmd, self.network.is_some());
+		// Bubblewrap creates nested parents, but /etc must exist first.
+		argv.extend(["--dir", "/etc"].map(OsString::from));
+		for (source, destination) in &host.system_binds {
+			argv.extend([
+				OsString::from("--ro-bind"),
+				source.as_os_str().to_owned(),
+				OsString::from(destination),
+			]);
+		}
+		if self.network.is_some() {
+			argv.extend(
+				["--ro-bind", SANDBOX_RESOLV_CONF_PLACEHOLDER, "/etc/resolv.conf"]
+					.map(OsString::from),
+			);
+		}
 
 		// `--dev` is what makes Bubblewrap nest the second user namespace the
 		// network supervisor depends on; see the note above `--unshare-user`.
-		cmd.args(["--proc", "/proc", "--dev", "/dev"]);
+		argv.extend(["--proc", "/proc", "--dev", "/dev"].map(OsString::from));
 
 		// Fresh tmpfs for /tmp and a new $HOME. *Must* come before
 		// any extra_ro_binds that target paths inside /home/scanner —
@@ -373,35 +438,40 @@ impl SandboxBuilder {
 		// a prior bind hides it. Putting the tmpfs first lets caller
 		// binds (e.g. ~/.claude.json → /home/scanner/.claude.json)
 		// overlay the tmpfs and stay visible.
-		cmd.args(["--tmpfs", "/tmp", "--tmpfs", "/home/scanner"]);
-		cmd.args(["--setenv", "HOME", "/home/scanner"]);
-		cmd.args(["--setenv", "TMPDIR", "/tmp"]);
-		cmd.args(["--setenv", "PATH"]).arg(sandbox_path());
+		argv.extend(["--tmpfs", "/tmp", "--tmpfs", "/home/scanner"].map(OsString::from));
+		argv.extend(
+			["--setenv", "HOME", "/home/scanner", "--setenv", "TMPDIR", "/tmp"].map(OsString::from),
+		);
+		argv.extend(["--setenv", "PATH", &host.path].map(OsString::from));
 
 		// Caller-supplied read-only binds (binary install dirs, agent
 		// config dirs, etc.). Use `--ro-bind-try` so a missing src
 		// path is a no-op rather than a fatal — handy when binding an
 		// optional auth dir that may or may not exist on every host.
 		for (src, dst) in &self.extra_ro_binds {
-			cmd.arg("--ro-bind-try").arg(src).arg(dst);
+			argv.extend([
+				OsString::from("--ro-bind-try"),
+				src.as_os_str().to_owned(),
+				dst.as_os_str().to_owned(),
+			]);
 		}
 
 		// Worktree: read-only.
-		cmd.arg("--ro-bind").arg(&self.workdir).arg("/workdir");
-		cmd.args(["--chdir", "/home/scanner"]);
+		argv.extend([
+			OsString::from("--ro-bind"),
+			self.workdir.as_os_str().to_owned(),
+			OsString::from("/workdir"),
+		]);
+		argv.extend(["--chdir", "/home/scanner"].map(OsString::from));
 
 		// Forwarded env vars. Skip those that aren't set on the host.
-		for name in &self.forward_env {
-			if let Some(value) = std::env::var_os(name) {
-				cmd.arg("--setenv").arg(name).arg(value);
-			}
-		}
-		for (name, value) in &self.set_env {
-			cmd.arg("--setenv").arg(name).arg(value);
+		for (name, value) in host.forwarded_env.iter().chain(&self.set_env) {
+			argv.extend([OsString::from("--setenv"), OsString::from(name), value.clone()]);
 		}
 
-		cmd.arg("--").arg(program);
-		cmd
+		argv.extend(["--", program].map(OsString::from));
+		argv.extend_from_slice(args);
+		argv
 	}
 
 	/// Convenience: build with full args + stdio piped, returning the
@@ -437,29 +507,12 @@ fn sandbox_path() -> String {
 		.unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into())
 }
 
-fn add_minimal_system_binds(cmd: &mut Command, allow_network: bool) {
-	// Bubblewrap creates parents for nested bind destinations, but the
-	// top-level directory must exist first.
-	cmd.args(["--dir", "/etc"]);
-	for path in SANDBOX_SYSTEM_FILES {
-		add_canonical_ro_bind(cmd, path);
-	}
-	if allow_network {
-		for path in SANDBOX_NETWORK_FILES.iter().chain(SANDBOX_CA_PATHS) {
-			add_canonical_ro_bind(cmd, path);
-		}
-		cmd.args(["--ro-bind", SANDBOX_RESOLV_CONF_PLACEHOLDER, "/etc/resolv.conf"]);
-	}
-}
-
-fn add_canonical_ro_bind(cmd: &mut Command, destination: &str) {
-	let Ok(source) = std::fs::canonicalize(destination) else {
-		return;
-	};
+fn canonical_ro_bind(destination: &str) -> Option<(PathBuf, &str)> {
+	let source = std::fs::canonicalize(destination).ok()?;
 	// Resolve symlinks on the trusted side, then mount only the resolved
 	// file or directory at its conventional sandbox path. This keeps a
 	// systemd-resolved target usable without exposing its /run parent.
-	cmd.arg("--ro-bind").arg(source).arg(destination);
+	Some((source, destination))
 }
 
 /// If `path` lives inside a `node_modules/` tree, return the outer
@@ -877,11 +930,9 @@ mod tests {
 		let link = scratch.path().join("link");
 		std::fs::write(&target, "resolver data").unwrap();
 		symlink(&target, &link).unwrap();
-		let mut cmd = Command::new(BWRAP_BIN);
-		add_canonical_ro_bind(&mut cmd, link.to_str().unwrap());
-		let args: Vec<PathBuf> = cmd.as_std().get_args().map(PathBuf::from).collect();
-
-		assert_eq!(args, [PathBuf::from("--ro-bind"), target, link]);
+		let (source, destination) = canonical_ro_bind(link.to_str().unwrap()).unwrap();
+		assert_eq!(source, target);
+		assert_eq!(Path::new(destination), link);
 	}
 
 	#[tokio::test]

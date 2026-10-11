@@ -20,8 +20,7 @@ use futures_util::{stream, Stream, StreamExt};
 use http_body_util::{BodyExt, Full, Limited, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{
-	HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, COOKIE, HOST,
-	PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+	HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, TRAILER,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -580,28 +579,37 @@ fn connection_header_names(headers: &HeaderMap) -> HashSet<HeaderName> {
 }
 
 fn strip_request_header(name: &HeaderName, connection_headers: &HashSet<HeaderName>) -> bool {
-	name == AUTHORIZATION
-		|| name == COOKIE
-		|| name == HeaderName::from_static("x-api-key")
-		|| name == HOST
-		|| name == CONTENT_LENGTH
-		|| is_hop_by_hop(name)
-		|| connection_headers.contains(name)
-		|| name.as_str().starts_with("proxy-")
+	strip_request_header_name(name.as_str().as_bytes(), connection_headers.contains(name))
+}
+
+/// HeaderName supplies a lowercase ASCII name; connection membership is
+/// collected from the request before applying this pure forwarding policy.
+pub(crate) fn strip_request_header_name(name: &[u8], connection_named: bool) -> bool {
+	matches!(name, b"authorization" | b"cookie" | b"x-api-key" | b"host" | b"content-length")
+		|| is_hop_by_hop_name(name)
+		|| connection_named
+		|| name.starts_with(b"proxy-")
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
-	name == CONNECTION
-		|| name == HeaderName::from_static("keep-alive")
-		|| name == PROXY_AUTHENTICATE
-		|| name == PROXY_AUTHORIZATION
-		|| name == TE
-		|| name == TRAILER
-		|| name == TRANSFER_ENCODING
-		|| name == UPGRADE
+	is_hop_by_hop_name(name.as_str().as_bytes())
 }
 
-enum RequestPolicyError {
+fn is_hop_by_hop_name(name: &[u8]) -> bool {
+	matches!(
+		name,
+		b"connection"
+			| b"keep-alive"
+			| b"proxy-authenticate"
+			| b"proxy-authorization"
+			| b"te"
+			| b"trailer"
+			| b"transfer-encoding"
+			| b"upgrade"
+	)
+}
+
+pub(crate) enum RequestPolicyError {
 	InvalidJson,
 	DeniedTool(String),
 }
@@ -611,6 +619,17 @@ fn enforce_request_policy(
 ) -> std::result::Result<Bytes, RequestPolicyError> {
 	let mut value: serde_json::Value =
 		serde_json::from_slice(body).map_err(|_| RequestPolicyError::InvalidJson)?;
+	if !apply_request_policy(&mut value, backend)? {
+		return Ok(body.clone());
+	}
+	serde_json::to_vec(&value).map(Bytes::from).map_err(|_| RequestPolicyError::InvalidJson)
+}
+
+/// Apply the configured provider policy, returning whether serialization is
+/// needed. An already matching request retains its original wire bytes.
+pub(crate) fn apply_request_policy(
+	value: &mut serde_json::Value, backend: &ModelBrokerBackend,
+) -> std::result::Result<bool, RequestPolicyError> {
 	let object = value.as_object_mut().ok_or(RequestPolicyError::InvalidJson)?;
 	// The Messages API `mcp_servers` field makes the provider itself connect
 	// to caller-chosen URLs — the same capability class as the denied
@@ -642,7 +661,7 @@ fn enforce_request_policy(
 		.and_then(serde_json::Value::as_str)
 		== Some(backend.effort());
 	if model_matches && effort_matches {
-		return Ok(body.clone());
+		return Ok(false);
 	}
 	object.insert("model".to_owned(), serde_json::Value::String(backend.model().to_owned()));
 	let effort_config = object
@@ -655,7 +674,7 @@ fn enforce_request_policy(
 		.as_object_mut()
 		.expect("effort config was made an object")
 		.insert("effort".to_owned(), serde_json::Value::String(backend.effort().to_owned()));
-	serde_json::to_vec(&value).map(Bytes::from).map_err(|_| RequestPolicyError::InvalidJson)
+	Ok(true)
 }
 
 fn denied_tool_type(provider: ModelProvider, tool_type: &str) -> bool {
@@ -1306,7 +1325,9 @@ mod tests {
 		let mut client = connect(&session).await;
 		let mut oversized_request =
 			request("/v1/responses", r#"{"model":"gpt-test","input":"hi"}"#);
-		oversized_request.headers_mut().insert(TE, HeaderValue::from_static("trailers"));
+		oversized_request
+			.headers_mut()
+			.insert(hyper::header::TE, HeaderValue::from_static("trailers"));
 		let response = client.send_request(oversized_request).await.unwrap();
 		let body = response.into_body().collect().await.unwrap();
 		let trailer =
