@@ -242,6 +242,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
 | `tls_fingerprint` | Exact SHA-256 of arbitrary DER bytes and repeatability |
 | `tls_pem` | Certificate/key/root parsing, successful CA reload, valid fixture admission and malformed-label refusal |
+| `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
 | `web_api` | Actual browser guards, no upstream call on rejected headers, JSON-enclosed diagnostics and bounded responses |
@@ -279,6 +280,11 @@ Its corpus records nine legacy-accepted classes rejected by strict RepoPath,
 plus whitespace-only input accepted by strict RepoPath but rejected by both
 legacy validators. MCP's lexical core remains on the actual submission path;
 filesystem containment stays separate. This target adds no path tightening.
+
+`worker_extract_json` takes raw UTF-8 text and checks the first balanced brace
+span against an independent character-based quote and escape oracle. Balanced
+invalid JSON remains accepted by this retained helper, which has no production
+caller. This uses the existing `loupe-worker` dependency without new libraries.
 
 `worker_mcp_submission` consumes little-endian u32 start/end lines, a
 little-endian u16 path length capped at 2048 bytes, UTF-8 path bytes and the

@@ -31,6 +31,7 @@ GEN_TEST storage_source_refs
 GEN_TEST tls_fingerprint
 GEN_TEST tls_pem
 GEN_TEST web_api
+GEN_TEST worker_extract_json
 GEN_TEST worker_mcp_submission
 GEN_TEST worker_server_response
 mkdir -p ../../runners/src/bin

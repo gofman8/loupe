@@ -145,9 +145,8 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
 /// because the model occasionally emits trailing junk after the
 /// closing brace; we feed only what's inside the braces.
 ///
-/// Used by the verifier scanner, which still parses JSON from the
-/// model's stdout. The discovery flow doesn't need this — submission
-/// goes through the MCP `submit_finding` tool.
+/// Retained legacy helper with no production caller. Discovery findings and
+/// verification verdicts currently arrive through MCP tools instead of stdout.
 pub fn extract_json_object(text: &str) -> Option<String> {
 	let bytes = text.as_bytes();
 	let start = bytes.iter().position(|b| *b == b'{')?;

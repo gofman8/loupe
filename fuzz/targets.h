@@ -18,5 +18,6 @@ void storage_source_refs_run(const unsigned char* data, size_t data_len);
 void tls_fingerprint_run(const unsigned char* data, size_t data_len);
 void tls_pem_run(const unsigned char* data, size_t data_len);
 void web_api_run(const unsigned char* data, size_t data_len);
+void worker_extract_json_run(const unsigned char* data, size_t data_len);
 void worker_mcp_submission_run(const unsigned char* data, size_t data_len);
 void worker_server_response_run(const unsigned char* data, size_t data_len);
