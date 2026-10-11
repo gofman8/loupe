@@ -983,6 +983,7 @@ dependencies = [
  "axum",
  "blake3",
  "http",
+ "hyper",
  "loupe-cli",
  "loupe-core",
  "loupe-http",
@@ -1001,6 +1002,8 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
+ "tracing",
+ "tracing-subscriber",
  "unicode-general-category",
  "unicode-normalization",
 ]

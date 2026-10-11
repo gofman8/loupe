@@ -242,6 +242,8 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `storage_policy_snapshot` | Independent campaign-policy admission, capped retry arithmetic, phase mapping and redacted conflict errors |
 | `tls_fingerprint` | Exact SHA-256 of arbitrary DER bytes and repeatability |
 | `tls_pem` | Certificate/key/root parsing, successful CA reload, valid fixture admission and malformed-label refusal |
+| `worker_broker_policy` | Both provider policies, denied tools and request headers, exact output reservation accounting |
+| `worker_broker_usage` | Independent JSON/SSE accounting, response header filtering and an empty tracing baseline |
 | `worker_extract_json` | Independent character-based balanced-span oracle, quoted braces, escapes and malformed JSON |
 | `worker_mcp_submission` | Independent lexical admission, existing-file containment, symlink rejection, unchanged submitted ranges and snippet clamping |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
@@ -295,6 +297,15 @@ exercise actual containment and submission code without a server or sandbox.
 
 Each becomes a target when the code is covered; the list is the
 backlog, kept current by the stage briefs.
+
+The broker policy target interprets raw bytes as provider JSON, header lines
+and up to 129 little-endian u64 words for output reservations. Its 128 KiB
+input cap bounds harness work; widened arithmetic independently checks the
+remaining output budget. The usage target accepts JSON/SSE up to the default
+32 MiB output ceiling and walks parsed values iteratively to check the
+saturating maximum of total tokens and input-plus-output tokens. Header
+fixtures use `hyper`; `tracing` and `tracing-subscriber` capture diagnostics
+and require the pure accounting and filtering paths to emit none.
 
 | Surface | Source | Target shape |
 |---|---|---|

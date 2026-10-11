@@ -832,6 +832,40 @@ fn empty_response(status: StatusCode) -> Response<BrokerBody> {
 	response
 }
 
+/// Pure policy/accounting seams; no broker listener or provider is started.
+#[cfg(fuzzing)]
+pub mod fuzzing {
+	use super::*;
+
+	pub fn request_policy(body: &[u8], backend: &ModelBrokerBackend) -> Option<Vec<u8>> {
+		enforce_request_policy(&Bytes::copy_from_slice(body), backend)
+			.ok()
+			.map(|body| body.to_vec())
+	}
+
+	pub fn strip_header(name: &HeaderName, headers: &HeaderMap) -> bool {
+		strip_request_header(name, &connection_header_names(headers))
+	}
+
+	#[derive(Default)]
+	pub struct OutputBudget(UsageCounters);
+	impl OutputBudget {
+		pub fn reserve(&self, requested: usize, ceiling: u64) -> usize {
+			self.0.reserve_output(requested, ceiling)
+		}
+		pub fn total(&self) -> u64 {
+			self.0.snapshot().output_bytes
+		}
+	}
+
+	pub fn token_usage(body: &[u8]) -> u64 {
+		token_usage_from_response(body)
+	}
+	pub fn response_headers(headers: &HeaderMap) -> HeaderMap {
+		sanitize_response_headers(headers)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::Arc;
