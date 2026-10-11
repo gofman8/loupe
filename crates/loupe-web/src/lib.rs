@@ -73,7 +73,8 @@ pub fn router(state: WebState) -> Router {
 		.route("/api/findings/{id}/approve", post(routes::api::approve_finding))
 		.route("/api/findings/{id}/reject", post(routes::api::reject_finding))
 		.route("/api/findings/{id}/retry-report", post(routes::api::retry_report_finding))
-		.route_layer(axum::middleware::from_fn_with_state(state.clone(), guard::require_token));
+		.route_layer(axum::middleware::from_fn_with_state(state.clone(), guard::require_token))
+		.layer(axum::middleware::map_response(routes::api::enclose_bad_request));
 
 	Router::new()
 		.route("/", get(routes::assets::index))

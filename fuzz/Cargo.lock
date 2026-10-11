@@ -980,6 +980,7 @@ name = "loupe-fuzz"
 version = "0.0.1"
 dependencies = [
  "arbitrary",
+ "axum",
  "blake3",
  "http",
  "loupe-cli",
@@ -989,6 +990,7 @@ dependencies = [
  "loupe-server",
  "loupe-storage",
  "loupe-tls",
+ "loupe-web",
  "loupe-worker",
  "reqwest",
  "serde",
@@ -998,6 +1000,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tower",
  "unicode-general-category",
  "unicode-normalization",
 ]
@@ -1089,6 +1092,26 @@ dependencies = [
  "rustls-pemfile",
  "sha2",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "loupe-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "clap",
+ "loupe-http",
+ "loupe-proto",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -26,4 +26,5 @@ pub mod storage_policy_snapshot;
 pub mod storage_source_refs;
 pub mod tls_fingerprint;
 pub mod tls_pem;
+pub mod web_api;
 pub mod worker_server_response;

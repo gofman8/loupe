@@ -20,6 +20,27 @@ use serde::Deserialize;
 use crate::client::{AdminClient, UpstreamError};
 use crate::state::WebState;
 
+/// Axum's path/query rejections may repeat browser input. Keep these
+/// diagnostics inside the same JSON envelope as upstream API errors.
+pub(crate) async fn enclose_bad_request(response: Response) -> Response {
+	if response.status() != StatusCode::BAD_REQUEST
+		|| !response
+			.headers()
+			.get(axum::http::header::CONTENT_TYPE)
+			.and_then(|value| value.to_str().ok())
+			.is_some_and(|value| value.starts_with("text/plain"))
+	{
+		return response;
+	}
+	// Extractor errors are small; a pathological URI must not create an
+	// unbounded second allocation merely to construct an error response.
+	let error = match axum::body::to_bytes(response.into_body(), 16 * 1024).await {
+		Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+		Err(_) => "invalid request".to_owned(),
+	};
+	(StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": error }))).into_response()
+}
+
 /// Translate an upstream failure into a response.
 ///
 /// Upstream statuses are preserved where they are meaningful to the page —

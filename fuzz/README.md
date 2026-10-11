@@ -190,6 +190,11 @@ including exact-budget and oversized streams without Content-Length.
 list and search output. Its oracle permits only intentional styling and
 layout controls, while requiring visible spellings of input controls.
 
+`loupe-web`, `axum` and `tower` exercise the dashboard's actual router with
+an isolated loopback upstream. The target verifies capability and browser
+header guards, counts upstream requests, and requires variable diagnostics
+to remain inside JSON envelopes.
+
 The canonical target found a float parsing drift on
 `-9223372036855078478`: parsing serialized bytes changed their next
 serialization and digest. The product enables `serde_json/float_roundtrip`
@@ -237,6 +242,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `tls_fingerprint` | Exact SHA-256 of arbitrary DER bytes and repeatability |
 | `tls_pem` | Certificate/key/root parsing, successful CA reload, valid fixture admission and malformed-label refusal |
 | `worker_server_response` | Actual client methods over chunked HTTP, typed response admission, exact byte budget and bounded errors |
+| `web_api` | Actual browser guards, no upstream call on rejected headers, JSON-enclosed diagnostics and bounded responses |
 
 `storage_source_refs` takes one policy byte (even: 32 items, odd: 64),
 followed by JSON reference bytes. Inputs up to 128 KiB exercise both sides of
