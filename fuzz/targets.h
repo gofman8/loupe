@@ -11,6 +11,7 @@ void proto_dto_run(const unsigned char* data, size_t data_len);
 void proto_version_run(const unsigned char* data, size_t data_len);
 void server_capability_header_run(const unsigned char* data, size_t data_len);
 void server_config_run(const unsigned char* data, size_t data_len);
+void server_github_response_run(const unsigned char* data, size_t data_len);
 void server_report_email_run(const unsigned char* data, size_t data_len);
 void server_report_github_run(const unsigned char* data, size_t data_len);
 void server_request_parsers_run(const unsigned char* data, size_t data_len);

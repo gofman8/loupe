@@ -295,6 +295,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 | `proto_version` | Inclusive protocol windows, inverted-window rejection and exact mismatch fields and diagnostics |
 | `server_capability_header` | Exact header-text/length admission, unchanged hash bytes and closed denial diagnostics |
 | `server_config` | Actual file loader, owner-list rejection, root keys, and exact relative path resolution |
+| `server_github_response` | All five real response decoders, typed-serde object/sequence admission, ignored-field syntax, closed error diagnostics and credential Debug |
 | `server_report_email` | Exact header boundary, CR/LF admission and finding-content isolation from headers |
 | `server_report_github` | Title normalization, title/body character caps and observed S3 fence-containment cases |
 | `server_request_parsers` | Protocol headers, state/kind filters, legacy clone URLs and exact FTS stripping/token admission |
@@ -366,7 +367,7 @@ the remaining bytes to it. Bit 7 selects an absent protocol/state/kind field.
 Protocol versions allow the existing unsigned-decimal leading plus; clone
 URLs retain their permissive legacy grammar. See [server target contracts](SERVER-TARGETS.md)
 for these parsers, configuration and reporting boundaries, including the
-still-pending GitHub response target.
+GitHub response target.
 
 The report targets pass JSON findings to the actual renderers. Email input
 also supplies `from`, `to` and `subject`, whose newline checks must match
@@ -423,7 +424,7 @@ and require the pure accounting and filtering paths to emit none.
 
 ## Pending S1 targets
 
-The branch currently has 30 real targets plus smoke. Four additional targets
+The branch currently has 31 real targets plus smoke. Three additional targets
 remain required for S1; none is deferred or dropped. Their candidates and
 counterexamples are preserved and their corrections are in progress under
 the approved twelve-repair allowance. Passing product tests or campaigns does not
@@ -434,7 +435,6 @@ waive a failed harness or integration gate.
 | `worker_mcp_rpc` | Include valid side-fixture paths in its oracle; then verify the actual dispatcher, both catalogues, IDs/notifications, verdict/patch ordering, reference parsing and metadata-only logs. Verdict parsing belongs here, not to CLI stdout. |
 | `worker_sandbox_args` | Remove the `node_modules` fixture collision; then verify exact namespace/safety flags, supervisor framing, environment names and bind operands. |
 | `worker_network_parsers` | Model typed-serde PID sequence and ignored-field forms; then cover actual PID, uid_map, route and address byte parsers. Hostname/nft coverage does not replace these parsers. |
-| `server_github_response` | Correct ignored-field UTF-8 semantics; then integrate L8 and verify app, installation, token, issue and label responses with closed error diagnostics. |
 
 ## Remaining ingress and later work
 
@@ -450,7 +450,7 @@ or resource-limit coverage remains an explicit gap in the broad ingress rule.
 | Raw database rows and secret BLOB reads | Storage round-trip/migration tests own database fixtures. The three storage targets cover named value parsers, not every row decoder or corruption error. S2 owns scope decisions; S3 owns secret holders and Db decoding. General corrupt-row parser coverage remains unassigned. |
 | CLI/env/startup loaders | CLI, web-config, server-main and provider-auth tests own PEM/base64 precedence and credential loading. TOML targets and `tls_pem` do not cover their combined argv/env behavior. S3 owns Config minting and Secret migration; arbitrary combined-loader coverage remains unassigned. |
 | Sendmail status/stderr and pipe interaction | [email_dispatch.rs](../crates/loupe-server/tests/email_dispatch.rs) covers successful stdin delivery; renderer tests reject header injection. No dedicated failure/backpressure target or process-output budget is specified. S3's renderer/log work alone does not establish those properties. |
-| Reporter HTTP collection | GitHub HTTP integration tests and the held response target own response decoding. Reporter `.bytes()`/`.text()` collection is outside L3's three clients and remains uncapped; its transport budget is an unresolved contract. S3 owns Reporter ingress. |
+| Reporter HTTP collection | GitHub HTTP integration tests and the response target own response decoding. Reporter `.bytes()`/`.text()` collection is outside L3's three clients and remains uncapped; its transport budget is an unresolved contract. S3 owns Reporter ingress. |
 | CLI collection and Git diagnostics | Both CLI backend tests exercise L5's one-MiB retention, drain, head/tail and deadlines. L2 tests UTF-8-safe Git display truncation after collection, not a Git pipe-allocation limit. S3 owns labels and disclosure; bounded buffers do not imply redacted logs. |
 | HTTP/TLS and DAO authorization orchestration | Server auth/health/jobs and storage scope/lease integration tests own full request/database behavior. Header/DTO/TLS targets cover named custom parsers. S2 adds authority/scope proofs while retaining SQL-boundary tests; S3 adds ingress labels. |
 | Broker relay and stream effects | [model_broker.rs](../crates/loupe-worker/src/llm/model_broker.rs) tests output termination, token exhaustion, authenticated routing and redirect isolation. Policy/accounting targets complement those tests. S2/S3 add proofs and labels. |

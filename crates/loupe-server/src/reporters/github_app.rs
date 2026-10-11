@@ -128,11 +128,24 @@ pub async fn fetch_app(
 	let resp =
 		github_request(http.get(url), &jwt).send().await.context("fetching GitHub App metadata")?;
 	let status = resp.status();
+	let body = resp.bytes().await.context("reading GitHub App metadata response")?;
+	parse_app_response(status, &body, key.app_id())
+}
+
+/// Decode app metadata without reflecting response content into diagnostics.
+pub fn parse_app_response(status: StatusCode, body: &[u8], app_id: u64) -> Result<GithubAppInfo> {
 	if !status.is_success() {
-		let body = resp.text().await.unwrap_or_default();
-		bail!("github returned {status} when fetching app {}: {body}", key.app_id());
+		bail!("github returned {status} when fetching app {app_id}");
 	}
-	resp.json().await.context("parsing GitHub App metadata")
+	decode_body(body, "parsing GitHub App metadata")
+}
+
+/// Serde errors can quote a provider-controlled string value. Keep those
+/// values out of the entire error chain, including alternate Display/Debug.
+pub(super) fn decode_body<T: serde::de::DeserializeOwned>(
+	body: &[u8], operation: &'static str,
+) -> Result<T> {
+	serde_json::from_slice(body).map_err(|_| anyhow!("{operation}: invalid response body"))
 }
 
 /// Stamp the headers every GitHub API call carries. Shared with the
@@ -223,6 +236,14 @@ async fn lookup_installation(
 		.await
 		.with_context(|| format!("looking up the GitHub App installation for {owner}/{repo}"))?;
 	let status = resp.status();
+	let body = resp.bytes().await.context("reading installation response")?;
+	parse_installation_response(status, &body, owner, repo)
+}
+
+/// Decode an installation lookup; owner/repo are configured request metadata.
+pub fn parse_installation_response(
+	status: StatusCode, body: &[u8], owner: &str, repo: &str,
+) -> Result<u64> {
 	if status == StatusCode::NOT_FOUND {
 		bail!(
 			"the GitHub App is not installed on {owner}/{repo}; add the repository to the \
@@ -230,12 +251,9 @@ async fn lookup_installation(
 		);
 	}
 	if !status.is_success() {
-		let body = resp.text().await.unwrap_or_default();
-		bail!(
-			"github returned {status} when looking up the installation for {owner}/{repo}: {body}"
-		);
+		bail!("github returned {status} when looking up the installation for {owner}/{repo}");
 	}
-	let body: InstallationBody = resp.json().await.context("parsing installation response")?;
+	let body: InstallationBody = decode_body(body, "parsing installation response")?;
 	Ok(body.id)
 }
 
@@ -254,14 +272,21 @@ async fn mint_token(
 		.await
 		.context("minting GitHub App installation token")?;
 	let status = resp.status();
+	let body = resp.bytes().await.context("reading installation token response")?;
+	parse_access_token_response(status, &body, installation_id)
+}
+
+/// Decode an installation token; response bodies never become error text.
+pub fn parse_access_token_response(
+	status: StatusCode, body: &[u8], installation_id: u64,
+) -> Result<String> {
 	if !status.is_success() {
-		let body = resp.text().await.unwrap_or_default();
 		bail!(
 			"github returned {status} when minting an installation token for installation \
-			 {installation_id}: {body}"
+			 {installation_id}"
 		);
 	}
-	let body: AccessTokenBody = resp.json().await.context("parsing installation token")?;
+	let body: AccessTokenBody = decode_body(body, "parsing installation token")?;
 	Ok(body.token)
 }
 

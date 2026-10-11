@@ -43,3 +43,4 @@ fuzz/src/worker_regex_secrets.rs fuzz entry point: the C entry point takes a raw
 fuzz/src/server_report_email.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/server_report_github.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/server_request_parsers.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
+fuzz/src/server_github_response.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer

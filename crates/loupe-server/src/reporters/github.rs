@@ -203,14 +203,8 @@ impl Reporter for GithubReporter {
 				)
 				.await?;
 			let status = resp.status();
-			if !status.is_success() {
-				let body = resp.text().await.unwrap_or_default();
-				anyhow::bail!("github returned {} when opening issue: {}", status, body);
-			}
-			let json: serde_json::Value = resp.json().await.context("parsing issue response")?;
-			if let Some(external_id) =
-				json.get("number").and_then(|v| v.as_i64()).map(|n| n.to_string())
-			{
+			let body = resp.bytes().await.context("reading issue response")?;
+			if let Some(external_id) = parse_issue_response(status, &body)? {
 				external_ids.push(external_id);
 			}
 		}
@@ -244,11 +238,27 @@ impl GithubReporter {
 			return Ok(());
 		}
 		let body = resp.text().await.unwrap_or_default();
-		if status == StatusCode::UNPROCESSABLE_ENTITY && body.contains("already_exists") {
-			return Ok(());
-		}
-		anyhow::bail!("github returned {} when creating label {}: {}", status, label.name, body);
+		check_label_response(status, &body, label.name)
 	}
+}
+
+/// Decode an issue receipt while keeping provider content out of diagnostics.
+pub fn parse_issue_response(status: StatusCode, body: &[u8]) -> Result<Option<String>> {
+	if !status.is_success() {
+		anyhow::bail!("github returned {status} when opening issue");
+	}
+	let json: serde_json::Value = github_app::decode_body(body, "parsing issue response")?;
+	Ok(json.get("number").and_then(|value| value.as_i64()).map(|number| number.to_string()))
+}
+
+/// The existing label is success only for GitHub's 422/already_exists case.
+pub fn check_label_response(status: StatusCode, body: &str, name: &str) -> Result<()> {
+	if status.is_success()
+		|| (status == StatusCode::UNPROCESSABLE_ENTITY && body.contains("already_exists"))
+	{
+		return Ok(());
+	}
+	anyhow::bail!("github returned {status} when creating label {name}");
 }
 
 fn severity_label(severity: Severity) -> LabelSpec {
