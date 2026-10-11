@@ -70,7 +70,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 rustls-pemfile = { version = "2", default-features = false, features = ["std"] }
 rustix = { version = "1", default-features = false, features = ["std", "fs", "pipe", "process"] }
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
-serde_json = { version = "1", default-features = false, features = ["std"] }
+serde_json = { version = "1", default-features = false, features = ["std", "float_roundtrip"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 tempfile = { version = "3", default-features = false }
 thiserror = { version = "2", default-features = false }

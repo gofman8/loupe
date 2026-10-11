@@ -150,6 +150,16 @@ sentence here saying why.
 independently check character categories and NFC instead of calling the
 validator being tested. They use the same Unicode data as the product.
 
+`blake3` cross-checks digest bytes. `serde_json/preserve_order` is enabled
+only in the fuzz workspace to expose insertion order: otherwise its sorted
+map would mask a missing sort in the production canonicalizer.
+
+The canonical target found a float parsing drift on
+`-9223372036855078478`: parsing serialized bytes changed their next
+serialization and digest. The product enables `serde_json/float_roundtrip`
+to make retransmission stable. The original input and a unit regression
+remain committed; existing integer and canonical fixed vectors still apply.
+
 The initial lockfile uses `arbitrary` 1.5.0 and `libfuzzer-sys` 0.4.13.
 `arbitrary` is confined to this unpublished workspace: derive it for local
 input models that select product operations, rather than adding fuzz-only
@@ -175,6 +185,7 @@ Implemented targets (each corpus includes valid and malformed inputs):
 
 | Target | Assertions |
 |---|---|
+| `core_canonical` | Independent sorted serialization, reordered/whitespace-equivalent JSON, idempotence, bounded output and BLAKE3 digest |
 | `core_text_bounded` | All ten policies: exact admission, raw/normalized caps, NFC, character categories, whitespace and metadata-only diagnostics |
 | `core_text_ident` | Four policies: independent byte recognizers, length/spacing limits, exact spelling and metadata-only diagnostics |
 

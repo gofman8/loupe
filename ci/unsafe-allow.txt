@@ -15,3 +15,4 @@ crates/loupe-provenance/src/volatile.rs volatile writes that zeroise secrets (P9
 fuzz/src/smoke.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/core_text_bounded.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
 fuzz/src/core_text_ident.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer
+fuzz/src/core_canonical.rs fuzz entry point: the C entry point takes a raw pointer from the fuzzer

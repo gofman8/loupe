@@ -64,6 +64,17 @@ mod tests {
 	}
 
 	#[test]
+	fn floating_point_retransmission_keeps_its_canonical_digest() {
+		// Found by core_canonical: serde_json's default fast float parser
+		// rounded this value differently when reading its own serialization.
+		let value: Value = serde_json::from_str("-9223372036855078478").unwrap();
+		let first = canonical_bytes(&value);
+		let replay: Value = serde_json::from_slice(&first).unwrap();
+		assert_eq!(canonical_bytes(&replay), first, "canonical float bytes changed on replay");
+		assert_eq!(digest(&canonical_bytes(&replay)), digest(&first));
+	}
+
+	#[test]
 	fn blake3_matches_the_published_empty_input_vector() {
 		let hex: String = digest(b"").iter().map(|byte| format!("{byte:02x}")).collect();
 		assert_eq!(hex, "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262");

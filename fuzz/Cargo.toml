@@ -6,6 +6,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
+blake3 = { version = "1", default-features = false, features = ["std"] }
 loupe-core = { path = "../crates/loupe-core" }
 unicode-general-category = { version = "1.1", default-features = false }
 unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
@@ -25,7 +26,7 @@ unicode-normalization = { version = "0.1.25", default-features = false, features
 # Structure-aware inputs for typed, stateful targets (see README,
 # "Dependencies"). Fuzz workspace only; never a product dependency.
 arbitrary = { version = "1", features = ["derive"] }
-serde_json = { version = "1", default-features = false, features = ["std"] }
+serde_json = { version = "1", default-features = false, features = ["std", "preserve_order"] }
 
 # Prevent this from interfering with the product workspace.
 [workspace]
