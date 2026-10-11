@@ -19,6 +19,7 @@ GEN_TEST core_text_bounded
 GEN_TEST core_text_ident
 GEN_TEST core_text_json
 GEN_TEST smoke
+GEN_TEST storage_source_refs
 mkdir -p ../../runners/src/bin
 for old in ../../runners/src/bin/*_target.rs; do
 	[ -e "$old" ] || continue
