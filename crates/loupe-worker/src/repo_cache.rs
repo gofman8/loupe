@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use loupe_core::source_migration::text::BoundedText;
+use loupe_core::text::BoundedText;
 use loupe_provenance::{Ingress, Mark, Repo, Secret, Untrusted, Unvalidated, Validate};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
@@ -24,16 +24,20 @@ const CURSOR_VERSION: u8 = 1;
 /// and hashable — used as the key in both the access log and the lock map.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct RepoKey {
-	pub host: String,
-	pub owner: String,
-	pub repo: String,
+	host: String,
+	owner: String,
+	repo: String,
 }
 
 impl RepoKey {
-	pub fn new(host: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
+	pub fn new(
+		host: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>,
+	) -> Result<Self> {
 		let host = host.into();
-		let host = host.rsplit_once('@').map_or(host.as_str(), |(_, host)| host).to_owned();
-		Self { host, owner: owner.into(), repo: repo.into() }
+		let owner = owner.into();
+		let repo = repo.into();
+		let host = loupe_core::validate_repo_components(&host, &owner, &repo)?.to_owned();
+		Ok(Self { host, owner, repo })
 	}
 }
 
@@ -89,6 +93,7 @@ impl RepoCache {
 	) -> Result<Self> {
 		std::fs::create_dir_all(&cache_dir)
 			.with_context(|| format!("failed to create cache dir: {}", cache_dir.display()))?;
+		let cache_dir = cache_dir.canonicalize().context("resolving Git cache directory")?;
 
 		let mut access_log = HashMap::new();
 		Self::scan_existing(&cache_dir, &mut access_log);
@@ -120,32 +125,38 @@ impl RepoCache {
 	fn scan_existing(cache_dir: &Path, access_log: &mut HashMap<RepoKey, SystemTime>) {
 		let Ok(hosts) = std::fs::read_dir(cache_dir) else { return };
 		for host_entry in hosts.flatten() {
-			if !host_entry.path().is_dir() {
+			if !host_entry.file_type().is_ok_and(|kind| kind.is_dir()) {
 				continue;
 			}
-			let host_name = host_entry.file_name().to_string_lossy().into_owned();
+			let Ok(host_name) = host_entry.file_name().into_string() else { continue };
 			let Ok(owners) = std::fs::read_dir(host_entry.path()) else { continue };
 			for owner_entry in owners.flatten() {
-				if !owner_entry.path().is_dir() {
+				if !owner_entry.file_type().is_ok_and(|kind| kind.is_dir()) {
 					continue;
 				}
-				let owner_name = owner_entry.file_name().to_string_lossy().into_owned();
+				let Ok(owner_name) = owner_entry.file_name().into_string() else { continue };
 				let Ok(repos) = std::fs::read_dir(owner_entry.path()) else { continue };
 				for repo_entry in repos.flatten() {
-					let repo_dirname = repo_entry.file_name().to_string_lossy().into_owned();
-					if !repo_dirname.ends_with(".git") || !repo_entry.path().is_dir() {
+					let Ok(repo_dirname) = repo_entry.file_name().into_string() else { continue };
+					if !repo_dirname.ends_with(".git")
+						|| !repo_entry.file_type().is_ok_and(|kind| kind.is_dir())
+					{
 						continue;
 					}
 					let repo_stem = repo_dirname[..repo_dirname.len() - 4].to_owned();
+					let Ok(key) = RepoKey::new(host_name.clone(), owner_name.clone(), repo_stem)
+					else {
+						continue;
+					};
+					if key.host != host_name {
+						continue;
+					}
 					let mtime = repo_entry
 						.metadata()
 						.ok()
 						.and_then(|m| m.modified().ok())
 						.unwrap_or(SystemTime::UNIX_EPOCH);
-					access_log.insert(
-						RepoKey::new(host_name.clone(), owner_name.clone(), repo_stem),
-						mtime,
-					);
+					access_log.insert(key, mtime);
 				}
 			}
 		}
@@ -154,6 +165,24 @@ impl RepoCache {
 	/// Path where the bare clone for `key` would live.
 	pub fn repo_path(&self, key: &RepoKey) -> PathBuf {
 		self.cache_dir.join(&key.host).join(&key.owner).join(format!("{}.git", key.repo))
+	}
+
+	fn checked_repo_path(&self, key: &RepoKey) -> Result<PathBuf> {
+		// The operator-owned cache tree must not be writable by other users.
+		// Refuse pre-existing links before Git or deletion can follow them.
+		let mut path = self.cache_dir.clone();
+		reject_symlink(&path)?;
+		for component in [&key.host, &key.owner, &format!("{}.git", key.repo)] {
+			path.push(component);
+			reject_symlink(&path)?;
+		}
+		Ok(path)
+	}
+
+	fn cursor_path(&self, key: &RepoKey) -> Result<PathBuf> {
+		let path = self.checked_repo_path(key)?.join(CURSOR_FILENAME);
+		reject_symlink(&path)?;
+		Ok(path)
 	}
 
 	fn repo_lock(&self, key: &RepoKey) -> Arc<AsyncMutex<()>> {
@@ -195,7 +224,7 @@ impl RepoCache {
 			let _guard = guard;
 			let operation =
 				GitCredentialOperation::new(&url, token, cache.worker_binary.as_deref())?;
-			let path = cache.repo_path(&key);
+			let path = cache.checked_repo_path(&key)?;
 			if force_clone && path.exists() {
 				std::fs::remove_dir_all(&path).context("removing cached Git repository")?;
 			}
@@ -225,20 +254,20 @@ impl RepoCache {
 	/// if the file is missing, has a bad magic, or carries an unknown
 	/// version — in any of those cases the caller should treat the repo
 	/// as never-scanned.
-	pub fn read_cursor(&self, key: &RepoKey) -> Option<String> {
-		let path = self.repo_path(key).join(CURSOR_FILENAME);
+	pub fn read_cursor(&self, key: &RepoKey) -> Option<BoundedText<RevisionText, Repo>> {
+		let path = self.cursor_path(key).ok()?;
 		let bytes = std::fs::read(&path).ok()?;
 		// SAFETY: actual cached repository cursor bytes, before decoding.
 		#[allow(unsafe_code)]
 		let bytes = Untrusted::new(bytes, unsafe { Ingress::<Repo>::new() });
-		bytes.as_bytes().validate(RepoCursorDecoder).ok()?.map(RepoCursor::legacy_revision)
+		bytes.as_bytes().validate(RepoCursorDecoder).ok()?.map(RepoCursor::into_revision)
 	}
 
 	/// Write the cursor for `key`. Always writes the current cursor
 	/// version; older readers will refuse to parse it (which is the safe
 	/// behaviour — they'll do a fresh full scan).
 	pub fn write_cursor(&self, key: &RepoKey, sha: &str) -> Result<()> {
-		let path = self.repo_path(key).join(CURSOR_FILENAME);
+		let path = self.cursor_path(key)?;
 		let bytes = encode_cursor(sha);
 		std::fs::write(&path, bytes)
 			.with_context(|| format!("failed to write cursor to {}", path.display()))?;
@@ -328,7 +357,7 @@ impl RepoCache {
 				if self.is_pinned(key) {
 					continue;
 				}
-				let path = self.repo_path(key);
+				let path = self.checked_repo_path(key)?;
 				if path.exists() {
 					entries.push((key.clone(), access_time, dir_size(&path)));
 				}
@@ -342,7 +371,7 @@ impl RepoCache {
 			if freed >= target {
 				break;
 			}
-			let path = self.repo_path(key);
+			let path = self.checked_repo_path(key)?;
 			if let Err(e) = std::fs::remove_dir_all(&path) {
 				warn!(host = %key.host, owner = %key.owner, repo = %key.repo, error = %e, "failed to evict repo");
 				continue;
@@ -355,6 +384,15 @@ impl RepoCache {
 		}
 		Ok(())
 	}
+}
+
+fn reject_symlink(path: &Path) -> Result<()> {
+	match std::fs::symlink_metadata(path) {
+		Ok(metadata) => anyhow::ensure!(!metadata.is_symlink(), "symlink in Git cache path"),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+		Err(error) => return Err(error).context("inspecting Git cache path"),
+	}
+	Ok(())
 }
 
 /// Encode a cursor file: `LOUPE\x01\n<sha>`.
@@ -405,8 +443,8 @@ impl Validate<&[u8], Repo> for RepoCursorDecoder {
 }
 impl RepoCursor {
 	/// Temporary concrete cursor exit; M retains the Repo revision.
-	fn legacy_revision(self) -> String {
-		self.0.expose().to_owned()
+	fn into_revision(self) -> BoundedText<RevisionText, Repo> {
+		self.0
 	}
 }
 
@@ -418,7 +456,7 @@ pub mod fuzz_support {
 		use super::*;
 		// SAFETY: cfg-only original Repo cursor fixture bytes, before decoding.
 		let original = Untrusted::new(bytes, unsafe { Ingress::<Repo>::new() });
-		original.validate(RepoCursorDecoder).unwrap().map(RepoCursor::legacy_revision)
+		original.validate(RepoCursorDecoder).unwrap().map(|v| v.into_revision().expose().to_owned())
 	}
 
 	pub fn encode_cursor(sha: &str) -> Vec<u8> {
@@ -491,8 +529,89 @@ mod tests {
 	fn repo_path_includes_host() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache = RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap();
-		let path = cache.repo_path(&RepoKey::new("github.com", "acme", "widget"));
+		let path = cache.repo_path(&RepoKey::new("github.com", "acme", "widget").unwrap());
 		assert_eq!(path, tmp.path().join("github.com").join("acme").join("widget.git"));
+	}
+
+	#[tokio::test]
+	async fn cache_refresh_cannot_remove_paths_outside_its_root() {
+		for force_clone in [false, true] {
+			let tmp = tempfile::tempdir().unwrap();
+			let outside = tmp.path().join("outside");
+			let victim = outside.join("repo.git");
+			std::fs::create_dir_all(&victim).unwrap();
+			let sentinel = victim.join("keep");
+			std::fs::write(&sentinel, "unrelated data").unwrap();
+			let cache = Arc::new(RepoCache::new(tmp.path().join("cache"), u64::MAX, None).unwrap());
+			let key = RepoKey::new("host", outside.to_str().unwrap(), "repo");
+			let url = format!("file://{}", tmp.path().join("missing.git").display());
+			let result = match key {
+				Ok(key) => cache.refresh(&key, &url, None, force_clone).await.map(drop),
+				Err(error) => Err(error),
+			};
+			assert!(result.is_err());
+			assert!(sentinel.exists(), "cache refresh deleted an unrelated directory");
+		}
+	}
+
+	#[test]
+	fn cache_key_requires_single_normal_components() {
+		for component in ["", ".", "..", "a/b", "a\\b", "/absolute", "C:\\absolute", "a/", "a\0b"] {
+			assert!(RepoKey::new(component, "owner", "repo").is_err(), "host {component:?}");
+			assert!(RepoKey::new("host", component, "repo").is_err(), "owner {component:?}");
+			assert!(RepoKey::new("host", "owner", component).is_err(), "repo {component:?}");
+		}
+		for component in ["name with spaces", "日本語", "dotted.name", "hyphen-name", "_name"] {
+			assert!(RepoKey::new(component, component, component).is_ok());
+		}
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn cache_refresh_rejects_symlinked_directories() {
+		for depth in 0..3 {
+			let tmp = tempfile::tempdir().unwrap();
+			let cache_dir = tmp.path().join("cache");
+			let outside = tmp.path().join("outside");
+			let components = ["host", "owner", "repo.git"];
+			let mut link = cache_dir.clone();
+			for component in &components[..=depth] {
+				link.push(component);
+			}
+			let mut victim = outside.clone();
+			for component in &components[depth + 1..] {
+				victim.push(component);
+			}
+			std::fs::create_dir_all(&victim).unwrap();
+			std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+			std::os::unix::fs::symlink(&outside, &link).unwrap();
+			let sentinel = victim.join("keep");
+			std::fs::write(&sentinel, "unrelated data").unwrap();
+			let cache = Arc::new(RepoCache::new(cache_dir, u64::MAX, None).unwrap());
+			let key = RepoKey::new("host", "owner", "repo").unwrap();
+			let url = format!("file://{}", tmp.path().join("missing.git").display());
+			assert!(cache.reclone_repo(&key, &url, None).await.is_err());
+			assert!(sentinel.exists(), "cache refresh followed a symlink outside its root");
+			assert!(link.is_symlink(), "cache refresh removed a symlinked cache entry");
+			assert!(cache.access_log.lock().unwrap().is_empty());
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn cache_cursor_rejects_symlinked_file() {
+		let tmp = tempfile::tempdir().unwrap();
+		let cache = RepoCache::new(tmp.path().join("cache"), u64::MAX, None).unwrap();
+		let key = RepoKey::new("host", "owner", "repo").unwrap();
+		let path = cache.repo_path(&key);
+		std::fs::create_dir_all(&path).unwrap();
+		let outside = tmp.path().join("outside");
+		let bytes = encode_cursor("keep");
+		std::fs::write(&outside, &bytes).unwrap();
+		std::os::unix::fs::symlink(&outside, path.join(CURSOR_FILENAME)).unwrap();
+		assert!(cache.read_cursor(&key).is_none(), "cursor read followed a symlink");
+		assert!(cache.write_cursor(&key, "replacement").is_err());
+		assert_eq!(std::fs::read(&outside).unwrap(), bytes);
 	}
 
 	#[test]
@@ -500,7 +619,8 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache = RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap();
 		let token = "ghp_repo_path_leak_canary";
-		let key = RepoKey::new(format!("x-access-token:{token}@github.com"), "acme", "widget");
+		let key =
+			RepoKey::new(format!("x-access-token:{token}@github.com"), "acme", "widget").unwrap();
 		let path = cache.repo_path(&key);
 
 		assert_eq!(key.host, "github.com", "repo key retained credential-bearing userinfo");
@@ -541,7 +661,7 @@ mod tests {
 		let cache_tmp = tempfile::tempdir().unwrap();
 		let cache =
 			Arc::new(RepoCache::new(cache_tmp.path().to_path_buf(), u64::MAX, None).unwrap());
-		let key = RepoKey::new("local", "local", "repo");
+		let key = RepoKey::new("local", "local", "repo").unwrap();
 		let url = format!("file://{}", remote_tmp.path().display());
 
 		let first = cache.ensure_repo(&key, &url, None).await.unwrap();
@@ -563,7 +683,7 @@ mod tests {
 		let cache_tmp = tempfile::tempdir().unwrap();
 		let cache =
 			Arc::new(RepoCache::new(cache_tmp.path().to_path_buf(), u64::MAX, None).unwrap());
-		let key = RepoKey::new("local", "local", "repo");
+		let key = RepoKey::new("local", "local", "repo").unwrap();
 		let url = format!("file://{}", remote_tmp.path().display());
 
 		let first = cache.ensure_repo(&key, &url, None).await.unwrap();
@@ -579,31 +699,31 @@ mod tests {
 	fn cursor_round_trips() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache = RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap();
-		let key = RepoKey::new("github.com", "acme", "widget");
+		let key = RepoKey::new("github.com", "acme", "widget").unwrap();
 		std::fs::create_dir_all(cache.repo_path(&key)).unwrap();
 
 		assert!(cache.read_cursor(&key).is_none());
 		cache.write_cursor(&key, "abc123def456").unwrap();
-		assert_eq!(cache.read_cursor(&key).as_deref(), Some("abc123def456"));
+		assert_eq!(cache.read_cursor(&key).as_ref().map(|v| v.expose()), Some("abc123def456"));
 	}
 
 	#[test]
 	fn cursor_repo_text_rejects_new_control_policy() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache = RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap();
-		let key = RepoKey::new("local", "owner", "repo");
+		let key = RepoKey::new("local", "owner", "repo").unwrap();
 		std::fs::create_dir_all(cache.repo_path(&key)).unwrap();
 		cache.write_cursor(&key, "bad\u{1}revision").unwrap();
 		assert!(cache.read_cursor(&key).is_none(), "Repo cursor control bytes were admitted");
 		cache.write_cursor(&key, " base ").unwrap();
-		assert_eq!(cache.read_cursor(&key).as_deref(), Some("base"));
+		assert_eq!(cache.read_cursor(&key).as_ref().map(|v| v.expose()), Some("base"));
 	}
 
 	#[test]
 	fn cursor_with_unknown_magic_is_ignored() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache = RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap();
-		let key = RepoKey::new("github.com", "acme", "widget");
+		let key = RepoKey::new("github.com", "acme", "widget").unwrap();
 		std::fs::create_dir_all(cache.repo_path(&key)).unwrap();
 		std::fs::write(cache.repo_path(&key).join(CURSOR_FILENAME), b"BKB\x01\nabc123").unwrap();
 		assert!(cache.read_cursor(&key).is_none(), "foreign magic must not parse as a cursor");
@@ -613,7 +733,7 @@ mod tests {
 	fn cursor_with_future_version_is_ignored() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache = RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap();
-		let key = RepoKey::new("github.com", "acme", "widget");
+		let key = RepoKey::new("github.com", "acme", "widget").unwrap();
 		std::fs::create_dir_all(cache.repo_path(&key)).unwrap();
 		std::fs::write(cache.repo_path(&key).join(CURSOR_FILENAME), b"LOUPE\x09\nabc123").unwrap();
 		assert!(cache.read_cursor(&key).is_none(), "unknown version must force a re-scan");
@@ -623,8 +743,8 @@ mod tests {
 	fn evict_drops_least_recently_used() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache_dir = tmp.path().to_path_buf();
-		let key1 = RepoKey::new("github.com", "owner1", "repo1");
-		let key2 = RepoKey::new("github.com", "owner2", "repo2");
+		let key1 = RepoKey::new("github.com", "owner1", "repo1").unwrap();
+		let key2 = RepoKey::new("github.com", "owner2", "repo2").unwrap();
 		let p1 = cache_dir.join("github.com").join("owner1").join("repo1.git");
 		let p2 = cache_dir.join("github.com").join("owner2").join("repo2.git");
 		std::fs::create_dir_all(&p1).unwrap();
@@ -648,8 +768,8 @@ mod tests {
 	fn evict_skips_pinned_entries() {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache_dir = tmp.path().to_path_buf();
-		let key1 = RepoKey::new("github.com", "owner1", "repo1");
-		let key2 = RepoKey::new("github.com", "owner2", "repo2");
+		let key1 = RepoKey::new("github.com", "owner1", "repo1").unwrap();
+		let key2 = RepoKey::new("github.com", "owner2", "repo2").unwrap();
 		let p1 = cache_dir.join("github.com").join("owner1").join("repo1.git");
 		let p2 = cache_dir.join("github.com").join("owner2").join("repo2.git");
 		std::fs::create_dir_all(&p1).unwrap();
@@ -675,7 +795,7 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let cache =
 			std::sync::Arc::new(RepoCache::new(tmp.path().to_path_buf(), u64::MAX, None).unwrap());
-		let key = RepoKey::new("github.com", "a", "b");
+		let key = RepoKey::new("github.com", "a", "b").unwrap();
 		assert!(!cache.is_pinned(&key));
 		{
 			let _pin = cache.pin(&key);

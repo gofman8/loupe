@@ -413,10 +413,10 @@ See `contrib/docker/README.md` for fresh Debian host prerequisites,
 image builds, two-host deployment, restart behaviour, and the exact
 secret-handling model.
 
-For existing installations moving to schema v3, follow the
+For existing installations moving to schema 6, follow the
 [offline upgrade runbook](contrib/upgrading-schema-v3.md) before deploying the
-new server. Back up first and stop the old server and all workers; queued
-legacy work may remain, but leased jobs block the migration.
+new server. Stop all workers and the old server, then take a verified backup;
+queued work may remain. Schema-2 upgrades refuse outstanding leases.
 
 ### 6. Register a repo and trigger a scan
 
@@ -516,11 +516,9 @@ unless you watch the tracker repo with *All activity*. Set your watch
 to *Participating and @mentions* to hear only about threads you take
 part in.
 
-Upgrading an existing deployment: deploy the server first. The
-database schema bumps from 3 to 4 automatically — no table changes,
-but older binaries refuse the database up front instead of failing
-on the first app-mode repo row. Configure the app, then switch repos
-one at a time with `loupectl repo set-github-reporting` (below), or
+Upgrading an existing deployment: follow the
+[offline upgrade runbook](contrib/upgrading-schema-v3.md). Configure the app,
+then switch repos one at a time with `loupectl repo set-github-reporting` (below), or
 script it from `loupectl repo list --json`. PAT repos keep working
 untouched.
 The dashboard's add-repo form defaults to the app as well and shows

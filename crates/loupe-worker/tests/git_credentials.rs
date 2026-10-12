@@ -114,7 +114,7 @@ fn clone_never_persists_pat_in_origin() {
 		);
 		let cache = cache(root);
 		let token = Arc::new(Secret::new(PAT.to_owned()));
-		let key = RepoKey::new("git.example.invalid", "acme", "repo");
+		let key = RepoKey::new("git.example.invalid", "acme", "repo").unwrap();
 		let repo = runtime().block_on(cache.ensure_repo(&key, CLEAN_URL, Some(&token))).unwrap();
 		let stored = git(&repo.path, &["config", "--local", "--get-all", "remote.origin.url"]);
 		assert!(!stored.contains(PAT), "real Git clone persisted the PAT in origin");
@@ -130,7 +130,7 @@ fn refresh_without_pat_replaces_all_legacy_origins_and_preserves_refs() {
 		rewrite(root, CLEAN_URL, &source);
 		rewrite(root, &old, &source);
 		let cache = cache(root);
-		let key = RepoKey::new("git.example.invalid", "acme", "repo");
+		let key = RepoKey::new("git.example.invalid", "acme", "repo").unwrap();
 		let rt = runtime();
 		let initial = rt.block_on(cache.ensure_repo(&key, CLEAN_URL, None)).unwrap();
 		git(&initial.path, &["config", "--local", "--replace-all", "remote.origin.url", &old]);
@@ -157,7 +157,7 @@ fn refresh_uses_current_authorized_url() {
 	isolated("refresh_uses_current_authorized_url", |root| {
 		let source = upstream(root);
 		let cache = cache(root);
-		let key = RepoKey::new("local", "acme", "repo");
+		let key = RepoKey::new("local", "acme", "repo").unwrap();
 		let rt = runtime();
 		let old_url = format!("file://{}", source.display());
 		drop(rt.block_on(cache.ensure_repo(&key, &old_url, None)).unwrap());
@@ -190,7 +190,7 @@ fn cancellation_keeps_repo_lock_until_git_finishes() {
 		)).unwrap();
 		std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
 		let cache = cache(root);
-		let key = RepoKey::new("local", "acme", "repo");
+		let key = RepoKey::new("local", "acme", "repo").unwrap();
 		let url = CLEAN_URL.to_owned();
 		let token = Arc::new(Secret::new(PAT.to_owned()));
 		let weak = Arc::downgrade(&token);
@@ -374,7 +374,7 @@ fn failed_origin_remediation_recovers_without_fetching_legacy_url() {
 	isolated("failed_origin_remediation_recovers_without_fetching_legacy_url", |root| {
 		let source = upstream(root);
 		let cache = cache(root);
-		let key = RepoKey::new("local", "acme", "repo");
+		let key = RepoKey::new("local", "acme", "repo").unwrap();
 		let url = format!("file://{}", source.display());
 		let rt = runtime();
 		let repo = rt.block_on(cache.ensure_repo(&key, &url, None)).unwrap();
@@ -451,7 +451,7 @@ fn refresh_prunes_deleted_branches_and_fetches_tags() {
 		let source = upstream(root);
 		git(&source, &["branch", "obsolete"]);
 		let cache = cache(root);
-		let key = RepoKey::new("local", "acme", "repo");
+		let key = RepoKey::new("local", "acme", "repo").unwrap();
 		let url = format!("file://{}", source.display());
 		let rt = runtime();
 		drop(rt.block_on(cache.ensure_repo(&key, &url, None)).unwrap());
@@ -484,7 +484,7 @@ fn url_projection_rejects_userinfo_without_exposing_it() {
 		git(root, &["config", "--global", &format!("url.{leaked}.insteadOf"), CLEAN_URL]);
 		let token = Arc::new(Secret::new(PAT.to_owned()));
 		let result = runtime().block_on(cache(root).ensure_repo(
-			&RepoKey::new("example.invalid", "acme", "repo"),
+			&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 			CLEAN_URL,
 			Some(&token),
 		));
@@ -507,7 +507,7 @@ fn scp_projection_rejects_userinfo_before_transport() {
 			let rewrite_key = format!("url.{projected}.insteadOf");
 			git(root, &["config", "--global", &rewrite_key, CLEAN_URL]);
 			let result = runtime().block_on(cache(root).ensure_repo(
-				&RepoKey::new("example.invalid", "acme", "repo"),
+				&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 				CLEAN_URL,
 				Some(&token),
 			));
@@ -532,7 +532,7 @@ fn uri_projection_rejects_encoded_userinfo_before_transport() {
 		git(root, &["config", "--global", &format!("url.{projected}.insteadOf"), CLEAN_URL]);
 		let token = Arc::new(Secret::new(PAT.to_owned()));
 		let result = runtime().block_on(cache(root).ensure_repo(
-			&RepoKey::new("example.invalid", "acme", "repo"),
+			&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 			CLEAN_URL,
 			Some(&token),
 		));
@@ -561,7 +561,7 @@ fn uri_projection_rejects_ambiguous_authority_before_transport() {
 			let key = format!("url.{projected}.insteadOf");
 			git(root, &["config", "--global", &key, CLEAN_URL]);
 			let result = runtime().block_on(cache(root).ensure_repo(
-				&RepoKey::new("example.invalid", "acme", "repo"),
+				&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 				CLEAN_URL,
 				Some(&token),
 			));
@@ -599,7 +599,7 @@ fn projection_rejects_ssh_cross_path_userinfo_before_transport() {
 			let key = format!("url.{spelling}.insteadOf");
 			git(root, &["config", "--global", &key, CLEAN_URL]);
 			let result = runtime().block_on(cache(root).ensure_repo(
-				&RepoKey::new("example.invalid", "acme", "repo"),
+				&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 				CLEAN_URL,
 				Some(&token),
 			));
@@ -643,7 +643,7 @@ fn projection_preserves_one_pass_uri_and_local_interpretation() {
 			let key = format!("url.{spelling}.insteadOf");
 			git(root, &["config", "--global", &key, CLEAN_URL]);
 			let result = runtime().block_on(cache(root).ensure_repo(
-				&RepoKey::new("example.invalid", "acme", "repo"),
+				&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 				CLEAN_URL,
 				Some(&token),
 			));
@@ -667,7 +667,7 @@ fn url_projection_preserves_local_path_with_at_and_colon() {
 		let token = Arc::new(Secret::new(PAT.to_owned()));
 		let repo = runtime()
 			.block_on(cache(root).ensure_repo(
-				&RepoKey::new("example.invalid", "acme", "repo"),
+				&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 				CLEAN_URL,
 				Some(&token),
 			))
@@ -690,7 +690,7 @@ fn url_projection_deadline_kills_and_reaps_the_child() {
 		let token = Arc::new(Secret::new(PAT.to_owned()));
 		let start = std::time::Instant::now();
 		let result = runtime().block_on(cache(root).ensure_repo(
-			&RepoKey::new("example.invalid", "acme", "repo"),
+			&RepoKey::new("example.invalid", "acme", "repo").unwrap(),
 			CLEAN_URL,
 			Some(&token),
 		));

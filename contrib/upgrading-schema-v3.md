@@ -1,108 +1,112 @@
-# Upgrading to schema v3 (PR-B1)
+# Upgrading the database to schema 6
 
-This upgrade prepares storage for the v2 review harness. It does **not**
-activate survey/drilldown orchestration: the existing scan and verification
-pipeline remains in production. Queued legacy work, repository configuration
-bytes, findings, verification history, and legacy PoCs are preserved without
-reinterpretation or synthetic backfills.
+Current schema-4 installations upgrade to schema 6 when the new server opens
+the database. Schema 5 adds stable finding identities for report completion;
+schema 6 records conservative source labels for stored content. Existing
+findings, jobs, history, and content remain stored. Older schemas also apply
+their pending migrations in the same transaction.
 
-Redeploy the **server** to apply this migration; it runs automatically when
-the new server opens the database. B1 changes neither the worker protocol nor
-worker behavior, so it does not itself require rebuilding workers. All workers
-must nevertheless be stopped for the offline upgrade and restarted afterwards.
-This is distinct from the earlier worker-side model-broker deployment.
+This upgrade retains the scan/verification runtime; it does not activate
+survey or drilldown orchestration. Deploy the server and worker images from
+the same release so the worker hardening is included. Keep all workers stopped
+until the server has completed migration and opened its listener.
 
-## Before starting the new server
+## Offline upgrade
 
-1. Take and verify a recoverable, consistent SQLCipher database backup with
-   your existing backup tooling, and retain the matching master key securely.
-   Follow that tool's WAL/checkpoint requirements: copying only the main file
-   while the server writes is not a complete backup. Retain the old server
-   image/binary. Loupe does not create, validate, or retain backups for you.
-2. Arrange a maintenance window. Allow in-flight work to finish if practical,
-   then stop every worker service (including any automatic restarts).
-   Stopping a worker does not clear its persisted lease. While the old server
-   is still running and workers cannot claim more jobs, inspect outstanding
-   jobs with the dashboard/API or `loupectl job list` and `loupectl job get ID`.
-   Wait for abandoned leases to be reaped, or explicitly cancel them with
-   `loupectl job cancel ID`. Cancellation may discard unaccepted findings;
-   let work finish if that is not the intended outcome. A limited recent-jobs
-   listing is not proof that all leases have cleared; the migration checks
-   the entire table.
-3. Stop the old server. Keep all workers stopped. Ensure that no second server,
-   database shell, backup reader, or other process has the database open from
-   **before the pre-check through completion of the rebuild**. WAL permits
-   concurrent readers; WAL mode is not an exclusive-ownership guarantee.
-4. Deploy and start the new server with the existing database and master key.
-   For containers, follow [the deployment guide](docker/README.md) only after
-   completing this offline preparation. Migration and `integrity_check` can
-   take time on large databases; allow for the database copy, indexes, and
-   journal/WAL in your free-space and startup-time budgets.
-5. After successful startup, restart the workers. Check a queued scan and
-   verification job, inspect existing findings and history, and confirm normal
-   processing resumes. Do not manually enqueue new phase kinds: their runtime
-   support and production activation belong to later PRs.
+1. Retain the old images/binaries and the database's matching master key.
+   Rehearse the candidate upgrade and restoration on a copy of the production
+   database. Check free space for schema work, indexes, and the journal/WAL;
+   whole-table admission and integrity checks can take time on a large database.
+2. Arrange a maintenance window. Allow in-flight work to finish where possible,
+   then stop every worker, including automatic restarts. While the old server
+   is still running, inspect outstanding jobs with the dashboard/API or
+   `loupectl job list` and `loupectl job get ID`. Stopping workers does not
+   clear leases. Wait for reaping or explicitly cancel abandoned jobs with
+   `loupectl job cancel ID`; cancellation can discard unaccepted findings.
+   Queued work may remain. Schema-2 upgrades refuse outstanding leases. From
+   schema 1, the capability migration completes leased verify jobs with recorded
+   verdicts and requeues other leases. The jobs rebuild also refuses conflicting
+   active verification jobs.
+3. Stop the old server and every other database user. Keep workers stopped
+   through upgrade verification. WAL permits concurrent readers; it does not
+   establish exclusive ownership for this maintenance procedure.
+4. Take and verify a recoverable, consistent SQLCipher backup with your backup
+   tooling. Follow its WAL/checkpoint requirements: copying only the main
+   database file can omit committed data. Retain this final maintenance-window
+   snapshot and the matching key. Loupe does not create or validate backups.
+5. Start the new server with the existing database and key. For containers,
+   follow [the deployment guide](docker/README.md). Adjust
+   `LOUPE_SERVER_START_TIMEOUT_SECONDS` if the default 300-second wait is too
+   short. Keep INFO logging enabled so the deployment helper can observe
+   `loupe-server listening` for the new service invocation. A running systemd
+   unit or `database ready` message alone does not establish listener readiness.
+6. Once the listener is ready, check authenticated `/v1/health`, existing
+   findings and search, and the reported schema version. Start the new workers
+   and verify a queued scan and verification job complete normally. Do not
+   enqueue phase kinds that have no production runtime handler.
 
-Queued `scan` and `verify` jobs may remain throughout B1. You do not need to
-drain or bulk-cancel the queue. The later PR-C4 production cutover has a
-separate activation gate that requires all legacy work to be terminal, even
-when the database has already been at schema v3 for some time.
+## Migration refusal and recovery
 
-## Refusals and recovery
+All pending versions, stored-data admission, foreign-key and integrity checks,
+both version markers, and foreign-key restoration belong to one transaction.
+A detected migration error rolls that transaction back. A failed upgrade from
+schema 4 remains schema 4; a failure from schema 1 remains schema 1. Journal
+configuration can change outside the transaction; the guarantee concerns the
+logical schema and rows, not byte-identical database files.
 
-The migration refuses to start if any job is `leased` or an unexpected legacy
-kind is present. A leased-job diagnostic asks you to wait or cancel before
-retrying. Stop the new server's restart loop before recovery; use the old
-server to resolve leases, then repeat the offline steps above. Do not edit
-version markers or job kinds to bypass a refusal.
+Admission checks include stored field policies and numeric ranges, runnable
+verification targets, scheduling ownership, and agreement between the finding
+search index and its content. Disabled/retired/terminal rows are also read.
+Accepted legacy formats, registered future job kinds, and the existing malformed
+scanner-JSON fallback remain supported. Validation does not rewrite historical
+text, cancel jobs, or silently repair an inconsistent search index.
 
-If legacy data contains duplicate queued verify jobs for a finding, the new
-unique index cannot be created. The diagnostic identifies
-`jobs.target_finding_id`, one conflicting job's numeric row ID, and the
-recovery action. The migration rolls back. Restart the old
-server with workers stopped, inspect the jobs, cancel the redundant queued
-verify job, then stop the server and retry the upgrade. There is no automatic
-job cancellation or data repair during migration.
+The server logs a migration failure's source/target versions, stage, table,
+column, numeric row ID where available, and a closed reason or SQLite code.
+Stored payloads and credentials are omitted. Stop the new server's restart loop,
+retain the backup, and inspect the identified row or index with authorized
+tooling. Correct the cause deliberately, then repeat the offline upgrade.
+For a refused migration, the previous compatible binary can reopen the original
+logical database. Do not edit version markers to bypass a refusal.
 
-Supported upgrades are v2 → v3 and v1 → v3:
+Older-schema lease or duplicate-verification refusals can be resolved with the
+old server while workers remain stopped. Inspect and cancel only redundant or
+abandoned jobs, then stop the server again before retrying. Report-identity
+entropy/backfill failures also roll back all earlier pending migrations.
 
-- All pending schema versions form one atomic upgrade. Any failure preserves
-  the original logical schema, every original row, and both version markers.
-  A failed v1 upgrade remains v1; a failed v2 upgrade remains v2.
-- On successful v1 upgrades, the v2 capability migration requeues interrupted
-  leases and completes verifies with recorded verdicts. Those changes commit
-  only after all later migrations and startup checks have succeeded.
-- Exact copy checks, foreign-key and integrity validation, startup
-  initialization, both version writes, and verified restoration of the prior
-  foreign-key setting all precede the single commit. A restoration failure
-  therefore rolls back the upgrade as well.
-- Diagnostics identify the source and target versions, failure stage, known
-  table/column and numeric row ID when available, and a closed reason or
-  SQLite numeric code. They omit stored payloads and raw SQLite messages.
+These checks are not a guarantee of detecting every conceivable bad database.
+Full admission runs during upgrades; current-schema startup separately checks
+unknown job kinds. Credential usability and remote services are checked by
+their consumers. Backups remain necessary for storage faults and power loss.
 
-Every subsequent startup rejects job kinds missing from `job_kinds`, even if
-schema v3 was already applied. Investigate the reported row rather than
-disabling validation.
+## Rollback after migration succeeds
 
-After successful migration, old binaries reject schema v3. There is no
-automatic downgrade: restoring the external backup with its matching key is
-the rollback path, and it loses writes accepted since the backup. Once new
-canonical evidence has been accepted, prefer a forward fix unless that data
-loss is an explicit operator decision.
+After commit the database is schema 6, which old schema-4 binaries reject.
+TLS configuration, listener binding, or another later startup step can still
+fail after that commit. A deployment timeout also does not undo the upgrade
+and may leave the server still running; inspect its state before recovery.
+
+There is no automatic downgrade. Stop all writers, restore the verified backup
+with its matching key, and start the old images against that restored snapshot.
+Restoration loses writes accepted after the backup. Before resuming workers,
+prefer correcting a later startup problem and retrying the new server when the
+migration itself succeeded. Once new work has been accepted, consider a forward
+fix to avoid discarding it.
 
 ## Verification coverage
 
-Generated encrypted fixtures cover legacy states and relationships, queued
-claims, capability hashes, FTS, config bytes, approval settings, v1 upgrades,
-ownership constraints, and generation purge with canonical evidence retained.
-Failure probes cover pre-check, table creation, copy, replacement, indexes,
-validation, commit, and FK restoration. Separate tests corrupt equal-length
-copy values and provoke a real SQLite commit failure with a held reader lock.
-
-The existing workspace end-to-end tests run unchanged. Targeted checks:
+Encrypted historical fixtures cover preserved content and relationships,
+queued claims, search results, and successful upgrades. Refusal tests compare
+the original schema, rows, and markers after rollback and verify a deliberate
+repair permits retry. Failure injection covers migration stages and later
+backfill failures; a held reader exercises a real SQLite commit failure.
 
 ```sh
-export CARGO_TARGET_DIR="$(mktemp -d /tmp/cargo-target-loupe-schema-v3.XXXXXX)"
+export CARGO_TARGET_DIR="$(mktemp -d /tmp/cargo-target-loupe-migrations.XXXXXX)"
 cargo test -p loupe-storage migrations
-cargo test -p loupe-storage startup_rejects_unknown_job_kinds_on_an_already_migrated_db
+cargo test -p loupe-server --test migration_startup
+bash contrib/docker/test-server-readiness.sh
 ```
+
+These tests complement, rather than replace, the production-data upgrade and
+backup-restore rehearsal in the offline procedure.

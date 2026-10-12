@@ -3,8 +3,8 @@
 
 use std::ops::Range;
 
-use loupe_core::source_migration::text::BoundedText;
-use loupe_core::text::{decode_json_string_bounded, Normalization, TextPolicy, Whitespace};
+pub(crate) use loupe_core::text::policy::{RevisionText, ScannerExcludePattern, ScannerExtension};
+use loupe_core::text::{decode_json_string_bounded, BoundedText, TextPolicy};
 use loupe_provenance::{Mark, Source};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -76,7 +76,7 @@ pub(crate) fn contained_token_range(
 
 /// Fuzz-only observation of the exact range passed by concrete Agent carries.
 /// Scope drop clears observations on early return or unwinding.
-#[cfg(fuzzing)]
+#[cfg(any(test, fuzzing))]
 pub(crate) mod observe {
 	use std::cell::RefCell;
 	use std::ops::Range;
@@ -98,6 +98,7 @@ pub(crate) mod observe {
 			});
 		}
 	}
+	#[cfg(fuzzing)]
 	pub(crate) fn agent(range: Range<usize>) {
 		SPANS.with(|spans| {
 			if let Some(spans) = spans.borrow_mut().as_mut() {
@@ -105,27 +106,6 @@ pub(crate) mod observe {
 			}
 		});
 	}
-}
-
-macro_rules! exact_policy {
-	($($name:ident, $field:literal;)*) => { $(
-		pub(crate) struct $name;
-		impl TextPolicy for $name {
-			const FIELD: &'static str = $field;
-			const MAX_CHARS: usize = loupe_core::text::policy::LEGACY_TEXT_MAX_BYTES;
-			const MAX_BYTES: usize = loupe_core::text::policy::LEGACY_TEXT_MAX_BYTES;
-			const MULTILINE: bool = false;
-			const ALLOW_EMPTY: bool = true;
-			const NORMALIZATION: Normalization = Normalization::Exact;
-			const WHITESPACE: Whitespace = Whitespace::Significant;
-		}
-	)* };
-}
-exact_policy! {
-	RevisionText, "revision";
-	AuditName, "audit_name";
-	ScannerExtension, "scanner_extension";
-	ScannerExcludePattern, "scanner_exclude_pattern";
 }
 
 /// No-output compatibility visitor for legacy Value/tagged-enum interiors.

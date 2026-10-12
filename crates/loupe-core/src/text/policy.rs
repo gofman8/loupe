@@ -34,11 +34,17 @@ exact_texts! {
 	VerdictReason, "verdict_reason", true;
 	PatchNotes, "patch_notes", true;
 	ScannerIdText, "scanner_id", false;
+	ScannerExtension, "scanner_extension", false;
+	ScannerExcludePattern, "scanner_exclude_pattern", false;
 	CweText, "cwe", false;
 	FindingFingerprintText, "finding_fingerprint", false;
 	WorkerName, "worker_name", false;
 	LeaseCapabilityName, "lease_capability_name", false;
 	GithubAppSlug, "github_app_slug", false;
+	RevisionText, "revision", false;
+	AuditName, "audit_common_name", false;
+	JobDiagnostic, "job_diagnostic", true;
+	JobKindName, "job_kind", false;
 	RepoHost, "repo_host", false;
 	RepoOwner, "repo_owner", false;
 	RepoName, "repo_name", false;

@@ -92,13 +92,14 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("cursor fixture: {error}"));
 		let cache = loupe_worker::RepoCache::new(dir.path().to_owned(), u64::MAX, None)
 			.unwrap_or_else(|error| panic!("cursor cache: {error}"));
-		let key = loupe_worker::RepoKey::new("local", "owner", "repo");
+		let key = loupe_worker::RepoKey::new("local", "owner", "repo")
+			.unwrap_or_else(|error| panic!("cursor key: {error}"));
 		std::fs::create_dir_all(cache.repo_path(&key))
 			.unwrap_or_else(|error| panic!("cursor parent: {error}"));
 		for (raw, expected) in [(" base ", Some("base")), ("bad\u{1}revision", None), ("", None)] {
 			cache.write_cursor(&key, raw).unwrap_or_else(|error| panic!("write cursor: {error}"));
 			assert_eq!(
-				cache.read_cursor(&key).as_deref(),
+				cache.read_cursor(&key).as_ref().map(|revision| revision.expose()),
 				expected,
 				"actual persisted cursor differs from admitted Repo decoder"
 			);

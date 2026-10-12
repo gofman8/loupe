@@ -1,10 +1,10 @@
-//! Scope checks run inside the same transaction as the domain mutation.
-use rusqlite::{OptionalExtension, Row, Transaction};
+//! Scope checks use the caller's connection; mutations supply their transaction.
+use rusqlite::{Connection, OptionalExtension, Row};
 
 use crate::scope::{Scope, Subject, SubjectKind};
 use crate::{Entity, Error, Ownership, Result};
 
-pub fn generation_repo(tx: &Transaction<'_>, generation: i64) -> Result<i64> {
+pub fn generation_repo(tx: &Connection, generation: i64) -> Result<i64> {
 	tx.query_row(
 		"SELECT repo_id FROM review_generations WHERE generation_id = ?1",
 		[generation],
@@ -15,7 +15,7 @@ pub fn generation_repo(tx: &Transaction<'_>, generation: i64) -> Result<i64> {
 }
 
 pub(crate) fn generation_scope(
-	tx: &Transaction<'_>, generation: i64, relation: Ownership,
+	tx: &Connection, generation: i64, relation: Ownership,
 ) -> Result<Scope> {
 	let repo = tx
 		.query_row(
@@ -29,7 +29,7 @@ pub(crate) fn generation_scope(
 }
 
 pub(crate) fn require(
-	tx: &Transaction<'_>, sql: &str, parameters: impl rusqlite::Params, scope: Scope,
+	tx: &Connection, sql: &str, parameters: impl rusqlite::Params, scope: Scope,
 	relation: Ownership, load: impl FnOnce(&Row<'_>) -> rusqlite::Result<Subject>,
 ) -> Result<()> {
 	let subject = tx.query_row(sql, parameters, load).optional()?;
@@ -44,9 +44,7 @@ pub(crate) fn generation_row(row: &Row<'_>) -> rusqlite::Result<Subject> {
 	Ok(Subject { generation: Some(row.get(1)?), ..Subject::repository(row.get(0)?) })
 }
 
-pub fn generation(
-	tx: &Transaction<'_>, repo: i64, generation: i64, relation: Ownership,
-) -> Result<()> {
+pub fn generation(tx: &Connection, repo: i64, generation: i64, relation: Ownership) -> Result<()> {
 	require(
 		tx,
 		"SELECT repo_id FROM review_generations WHERE generation_id=?1",
@@ -56,7 +54,7 @@ pub fn generation(
 		repository_row,
 	)
 }
-pub fn campaign(tx: &Transaction<'_>, repo: i64, campaign: i64, relation: Ownership) -> Result<()> {
+pub fn campaign(tx: &Connection, repo: i64, campaign: i64, relation: Ownership) -> Result<()> {
 	require(
 		tx,
 		"SELECT repo_id FROM review_campaigns WHERE campaign_id=?1",
@@ -70,7 +68,7 @@ pub fn campaign(tx: &Transaction<'_>, repo: i64, campaign: i64, relation: Owners
 /// An explicit job generation cannot be overridden by a campaign fallback.
 /// Campaign-only, host-authored work may create rows in that repo's generation.
 pub fn job_for_generation(
-	tx: &Transaction<'_>, job: i64, generation: i64, relation: Ownership,
+	tx: &Connection, job: i64, generation: i64, relation: Ownership,
 ) -> Result<()> {
 	let scope = generation_scope(tx, generation, relation)?;
 	require(tx, "SELECT j.repo_id,j.generation_id,j.campaign_id,c.repo_id FROM jobs j LEFT JOIN review_campaigns c ON c.campaign_id=j.campaign_id WHERE j.id=?1", [job], scope, relation, |r| Ok(Subject {
@@ -78,24 +76,24 @@ pub fn job_for_generation(
 	}))
 }
 pub fn unit_in_generation(
-	tx: &Transaction<'_>, unit: i64, generation: i64, relation: Ownership,
+	tx: &Connection, unit: i64, generation: i64, relation: Ownership,
 ) -> Result<()> {
 	let scope = generation_scope(tx, generation, relation)?;
 	require(tx, "SELECT g.repo_id,u.generation_id FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1", [unit], scope, relation, generation_row)
 }
-pub fn unit_in_repo(tx: &Transaction<'_>, unit: i64, repo: i64, relation: Ownership) -> Result<()> {
+pub fn unit_in_repo(tx: &Connection, unit: i64, repo: i64, relation: Ownership) -> Result<()> {
 	require(tx, "SELECT g.repo_id FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1", [unit], Scope::repository(repo), relation, repository_row)
 }
 pub fn lead_in_generation(
-	tx: &Transaction<'_>, lead: i64, generation: i64, relation: Ownership,
+	tx: &Connection, lead: i64, generation: i64, relation: Ownership,
 ) -> Result<()> {
 	let scope = generation_scope(tx, generation, relation)?;
 	require(tx, "SELECT g.repo_id,l.generation_id FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id WHERE l.lead_id=?1", [lead], scope, relation, generation_row)
 }
-pub fn lead_in_repo(tx: &Transaction<'_>, lead: i64, repo: i64, relation: Ownership) -> Result<()> {
+pub fn lead_in_repo(tx: &Connection, lead: i64, repo: i64, relation: Ownership) -> Result<()> {
 	require(tx, "SELECT g.repo_id FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id WHERE l.lead_id=?1", [lead], Scope::repository(repo), relation, repository_row)
 }
-pub fn finding(tx: &Transaction<'_>, finding: i64, repo: i64, relation: Ownership) -> Result<()> {
+pub fn finding(tx: &Connection, finding: i64, repo: i64, relation: Ownership) -> Result<()> {
 	require(
 		tx,
 		"SELECT repo_id FROM findings WHERE id=?1",
@@ -107,7 +105,7 @@ pub fn finding(tx: &Transaction<'_>, finding: i64, repo: i64, relation: Ownershi
 }
 /// Scheduler-side checks for the nullable, single-column job foreign keys.
 pub fn job_links(
-	tx: &Transaction<'_>, repo: i64, generation_id: Option<i64>, lead_id: Option<i64>,
+	tx: &Connection, repo: i64, generation_id: Option<i64>, lead_id: Option<i64>,
 ) -> Result<()> {
 	if let Some(id) = generation_id {
 		generation(tx, repo, id, Ownership::JobGeneration)?;

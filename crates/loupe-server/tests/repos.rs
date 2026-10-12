@@ -6,10 +6,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use loupe_core::ReportingDestination;
-use loupe_proto::{
-	GithubReportingAuth, ListReposResponse, RegisterRepoRequest, ReportingSetup, ReportingSummary,
-	RotateRepoPatRequest, SetRepoGithubReportingRequest, PROTOCOL_VERSION,
+use common::wire::{
+	GithubReportingAuth, ListReposResponse, RegisterRepoRequest, ReportingDestination,
+	ReportingSetup, ReportingSummary, RotateRepoPatRequest, SetRepoGithubReportingRequest,
+	PROTOCOL_VERSION,
 };
 use loupe_server::init::run_init;
 use loupe_server::reporters::github_app::testing::APP_PRIVATE_KEY_PEM;
@@ -64,7 +64,7 @@ fn store_github_app(db: &Db) {
 			c,
 			&StoredGithubApp {
 				app_id: 4242,
-				slug: "loupe-reporter".into(),
+				slug: common::marked::operator::text("loupe-reporter"),
 				private_key_pem: loupe_provenance::Secret::new(APP_PRIVATE_KEY_PEM.into()),
 			},
 			0,
@@ -77,37 +77,42 @@ async fn bring_up_with(
 	verification_default: bool, github_app_allowed_owners: Option<Vec<String>>,
 ) -> Fixture {
 	let tmp = tempfile::tempdir().unwrap();
-	let init = run_init(tmp.path(), &["loupe-server".to_owned()], None).unwrap();
-
-	let ca = Ca::from_pem(
-		&std::fs::read_to_string(&init.layout.ca_cert).unwrap(),
-		&std::fs::read_to_string(&init.layout.ca_key).unwrap(),
+	let init = run_init(
+		&common::config_path(tmp.path()),
+		&[common::config_hostname("loupe-server")],
+		None,
 	)
 	.unwrap();
 
-	let server_cert_pem = std::fs::read_to_string(&init.layout.server_cert).unwrap();
-	let server_key_pem = std::fs::read_to_string(&init.layout.server_key).unwrap();
-	let ca_cert_pem = std::fs::read_to_string(&init.layout.ca_cert).unwrap();
-	let ca_key_pem = std::fs::read_to_string(&init.layout.ca_key).unwrap();
+	let ca = Ca::from_pem(
+		&std::fs::read_to_string(init.layout.ca_cert.as_path()).unwrap(),
+		&std::fs::read_to_string(init.layout.ca_key.as_path()).unwrap(),
+	)
+	.unwrap();
+
+	let server_cert_pem = std::fs::read_to_string(init.layout.server_cert.as_path()).unwrap();
+	let server_key_pem = std::fs::read_to_string(init.layout.server_key.as_path()).unwrap();
+	let ca_cert_pem = std::fs::read_to_string(init.layout.ca_cert.as_path()).unwrap();
+	let ca_key_pem = std::fs::read_to_string(init.layout.ca_key.as_path()).unwrap();
 	let admin_cert_pem = init.admin_bundle.cert_pem.clone();
 	let admin_key_pem = init.admin_bundle.key_pem.expose().to_owned();
 
 	let cfg = Config {
 		bind_addr: "127.0.0.1:0".parse().unwrap(),
 		db_path: init.layout.db_path.clone(),
-		server_cert_pem: loupe_provenance::Secret::new(server_cert_pem),
-		server_key_pem: loupe_provenance::Secret::new(server_key_pem),
-		ca_cert_pem: loupe_provenance::Secret::new(ca_cert_pem.clone()),
-		ca_key_pem: loupe_provenance::Secret::new(ca_key_pem),
+		server_cert_pem: common::config_pem(&server_cert_pem),
+		server_key_pem: common::config_pem(&server_key_pem),
+		ca_cert_pem: common::config_pem(&ca_cert_pem),
+		ca_key_pem: common::config_pem(&ca_key_pem),
 	};
-	let db = Arc::new(Db::open(&init.layout.db_path, &init.master_key).unwrap());
+	let db = Arc::new(Db::open(init.layout.db_path.as_path(), &init.master_key).unwrap());
 	let state = AppState::new(
 		db.clone(),
 		Arc::new(ca),
 		Arc::new(loupe_server::reporters::GithubReporter::new().unwrap()),
 	)
 	.with_verification_default(verification_default)
-	.with_github_app_allowed_owners(github_app_allowed_owners);
+	.with_github_app_allowed_owners(common::allowed_owners(github_app_allowed_owners));
 	let handle = serve(cfg, state).await.unwrap();
 	let addr = handle.local_addr;
 	std::mem::forget(tmp);
@@ -132,6 +137,63 @@ async fn create_repo(admin: &reqwest::Client, reporting: ReportingSetup) -> i64 
 	let repo_id = body["repo_id"].as_i64().unwrap();
 	assert!(repo_id > 0);
 	repo_id
+}
+
+#[tokio::test]
+async fn registration_rejects_scanner_text_the_worker_cannot_admit() {
+	let f = bring_up().await;
+	let admin = admin_client(&f.ca_cert_pem, &f.admin_cert_pem, &f.admin_key_pem, f.addr);
+	for scanner_config in [
+		serde_json::json!({"include_extensions":["rs\u{1b}"]}),
+		serde_json::json!({"exclude_path_substrings":["some\npath"]}),
+		serde_json::json!([null, null, null, ["rs\u{1b}"]]),
+	] {
+		let body = serde_json::json!({"protocol_version":PROTOCOL_VERSION,
+			"clone_url":"https://github.com/acme/widget.git",
+			"reporting":{"kind":"manual"},"scanner_config":scanner_config});
+		let response =
+			admin.post("https://loupe-server/v1/repos").json(&body).send().await.unwrap();
+		assert_eq!(
+			response.status(),
+			400,
+			"registration must reject worker-inadmissible scanner text"
+		);
+	}
+	assert_eq!(
+		f.db.with_conn(|c| Ok(
+			c.query_row("SELECT count(*) FROM registered_repos", [], |r| r.get::<_, i64>(0))?
+		))
+		.unwrap(),
+		0
+	);
+	create_repo(&admin, ReportingSetup::Manual).await;
+	f.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn registration_rejects_unusable_repository_cache_components() {
+	let f = bring_up().await;
+	let admin = admin_client(&f.ca_cert_pem, &f.admin_cert_pem, &f.admin_key_pem, f.addr);
+	for clone_url in [
+		"file:///tmp/project/..",
+		"https://github.com/../repo",
+		"https://github.com/acme/bad\\repo",
+	] {
+		let body = serde_json::json!({"protocol_version":PROTOCOL_VERSION,
+			"clone_url":clone_url,"reporting":{"kind":"manual"}});
+		let response =
+			admin.post("https://loupe-server/v1/repos").json(&body).send().await.unwrap();
+		assert_eq!(response.status(), 400, "registration must reject unusable cache components");
+	}
+	assert_eq!(
+		f.db.with_conn(|c| Ok(
+			c.query_row("SELECT count(*) FROM registered_repos", [], |r| r.get::<_, i64>(0))?
+		))
+		.unwrap(),
+		0
+	);
+	create_repo(&admin, ReportingSetup::Manual).await;
+	f.handle.shutdown().await;
 }
 
 fn repo_reporting(db: &Db, repo_id: i64) -> ReportingDestination {

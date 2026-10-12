@@ -207,7 +207,7 @@ fn clone_and_fetch_authenticate_without_inherited_helpers() {
 			let server = TlsGit::start(root).await;
 			let token = Arc::new(Secret::new(PAT.to_owned()));
 			let cache = cache(root);
-			let key = RepoKey::new("localhost", "acme", "repo");
+			let key = RepoKey::new("localhost", "acme", "repo").unwrap();
 			let first = cache.ensure_repo(&key, &server.url, Some(&token)).await.unwrap();
 			assert_eq!(
 				git(&first.path, &["rev-parse", "HEAD"]),
@@ -262,7 +262,7 @@ fn redirects_are_rejected_despite_url_scoped_override() {
 				server.requests.store(0, Ordering::SeqCst);
 				let result = cache(root)
 					.ensure_repo(
-						&RepoKey::new("localhost", "acme", index.to_string()),
+						&RepoKey::new("localhost", "acme", index.to_string()).unwrap(),
 						&server.url,
 						Some(&token),
 					)
@@ -288,7 +288,11 @@ fn rejected_auth_never_falls_back_to_inherited_helpers() {
 			let server = TlsGit::start(root).await;
 			let token = Arc::new(Secret::new("wrong-test-token".to_owned()));
 			let result = cache(root)
-				.ensure_repo(&RepoKey::new("localhost", "acme", "repo"), &server.url, Some(&token))
+				.ensure_repo(
+					&RepoKey::new("localhost", "acme", "repo").unwrap(),
+					&server.url,
+					Some(&token),
+				)
 				.await;
 			assert!(result.is_err());
 			assert_eq!(server.authenticated.load(Ordering::SeqCst), 0);
@@ -330,7 +334,7 @@ fn rewrites_cannot_expand_credential_destination() {
 				);
 				let result = cache(root)
 					.ensure_repo(
-						&RepoKey::new("localhost", "acme", index.to_string()),
+						&RepoKey::new("localhost", "acme", index.to_string()).unwrap(),
 						authorized,
 						Some(&token),
 					)
@@ -362,7 +366,11 @@ fn decoded_repository_path_authenticates_and_tracing_stays_off() {
 			let url = format!("{}/", server.url.replace("repo.git", "repo%2Egit"));
 			let token = Arc::new(Secret::new(PAT.to_owned()));
 			let result = cache(root)
-				.ensure_repo(&RepoKey::new("localhost", "acme", "repo"), &url, Some(&token))
+				.ensure_repo(
+					&RepoKey::new("localhost", "acme", "repo").unwrap(),
+					&url,
+					Some(&token),
+				)
 				.await;
 			assert!(result.is_ok(), "percent-escaped trailing-slash URL failed");
 			assert!(server.authenticated.load(Ordering::SeqCst) > 0);
@@ -382,8 +390,8 @@ fn concurrent_operations_keep_credentials_separate() {
 			let cache = cache(root);
 			let good = Arc::new(Secret::new(PAT.to_owned()));
 			let bad = Arc::new(Secret::new("separate-operation-token".to_owned()));
-			let good_key = RepoKey::new("localhost", "acme", "good");
-			let bad_key = RepoKey::new("localhost", "acme", "bad");
+			let good_key = RepoKey::new("localhost", "acme", "good").unwrap();
+			let bad_key = RepoKey::new("localhost", "acme", "bad").unwrap();
 			let (good_result, bad_result) = tokio::join!(
 				cache.ensure_repo(&good_key, &server.url, Some(&good)),
 				cache.ensure_repo(&bad_key, &server.url, Some(&bad)),
@@ -410,7 +418,7 @@ fn redirect_alias(name: &str, authorized_path: &str, rewritten_path: &str) {
 			);
 			let control = cache
 				.ensure_repo(
-					&RepoKey::new("localhost", "control", "repo"),
+					&RepoKey::new("localhost", "control", "repo").unwrap(),
 					&server.url,
 					Some(&token),
 				)
@@ -433,7 +441,11 @@ fn redirect_alias(name: &str, authorized_path: &str, rewritten_path: &str) {
 				Some(format!("{rewritten}/info/refs?service=git-upload-pack"));
 			server.authenticated.store(0, Ordering::SeqCst);
 			let result = cache
-				.ensure_repo(&RepoKey::new("localhost", "alias", "repo"), &authorized, Some(&token))
+				.ensure_repo(
+					&RepoKey::new("localhost", "alias", "repo").unwrap(),
+					&authorized,
+					Some(&token),
+				)
 				.await;
 			assert!(result.is_err());
 			assert_eq!(
@@ -566,7 +578,7 @@ fn clone_context(name: &str, context: &str) {
 				Some(format!("{alias}/info/refs?service=git-upload-pack"));
 			let token = Arc::new(Secret::new(PAT.to_owned()));
 			let cache = cache(root);
-			let key = RepoKey::new("localhost", "acme", "repo");
+			let key = RepoKey::new("localhost", "acme", "repo").unwrap();
 			let result = cache.ensure_repo(&key, &server.url, Some(&token)).await;
 			assert!(result.is_err());
 			assert_eq!(
@@ -626,7 +638,11 @@ fn equals_in_url_keeps_exact_redirect_policy() {
 				Some(format!("{url}/info/refs?service=git-upload-pack"));
 			let token = Arc::new(Secret::new(PAT.to_owned()));
 			let result = cache(root)
-				.ensure_repo(&RepoKey::new("localhost", "acme", "repo"), &url, Some(&token))
+				.ensure_repo(
+					&RepoKey::new("localhost", "acme", "repo").unwrap(),
+					&url,
+					Some(&token),
+				)
 				.await;
 			assert!(result.is_err());
 			assert_eq!(
