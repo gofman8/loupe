@@ -1,0 +1,2 @@
+logging=['info',false,true,"ignored\u0001tail"]
+agents={claude=['Model-A','high',false],codex=['Model-B','low',{}]}
