@@ -32,6 +32,14 @@ sudo for the required `podman`, `install`, and `systemctl` commands. For the
 one-time bootstrap, password-prompting sudo is fine, but upload the script first
 so sudo can read the password from a TTY instead of from the script's stdin.
 
+Server deployment waits for `loupe-server listening` in the new systemd
+invocation's journal. This message follows successful migration and listener
+binding. Keep INFO logging enabled for the server binary. The default wait is
+300 seconds; set `LOUPE_SERVER_START_TIMEOUT_SECONDS` to allow a longer upgrade.
+An exited/restarted service or timeout makes deployment fail. A timeout does
+not stop the server or roll back a migration that already committed: inspect
+the journal before restarting workers or attempting recovery.
+
 The worker host does not need host Rust, Cargo, Node, npm, Git, `bubblewrap`,
 `slirp4netns`, `nft`, `ip`, `nsenter`, Claude Code, Codex, or `bkb-mcp`.
 Those are installed in the worker image.

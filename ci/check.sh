@@ -18,6 +18,9 @@ say() { printf '\n== %s\n' "$*"; }
 say "server container deployment"
 bash contrib/docker/test-server-container.sh
 
+say "server listener readiness"
+bash contrib/docker/test-server-readiness.sh
+
 say "fmt (nightly)"
 rustup run nightly cargo fmt --all -- --check
 (cd fuzz && rustup run nightly cargo fmt --all -- --check)
