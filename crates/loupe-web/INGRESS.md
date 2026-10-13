@@ -1,8 +1,7 @@
 # Web source ownership
 
-This M owner preserves the browser proxy contract. It does not interpret finding
-fields or claim Agent provenance for transparent Server forwarding. Later
-sandbox, audit, scope and prompt/report work remain separate graph nodes.
+The browser proxy forwards Server responses without interpreting finding fields
+or assigning Agent provenance to their contents.
 
 ## Actual captures and final sinks
 
@@ -48,7 +47,7 @@ Production captures remain six: Browser request, Server response, three native
 Config parser instances and one Config file-content read. The parser macro has
 one allowlisted statement instantiated for three concrete fixed-source owners.
 No fixture mint exists. The binary forbids unsafe; the library denies it except
-those narrowly scoped capture functions. Root owns the shared unsafe registry.
+those narrowly scoped capture functions. The shared unsafe registry lists them.
 
 ## Policy, bytes and secrets
 
@@ -99,9 +98,8 @@ nonobject, absent/present limit, status, diagnostics, body cap and redaction
 assertions are retained. Native-path and child-environment exact-value controls
 moved to private config unit tests so production config gets no test getter.
 Actual process loopback-before-credential and missing-file error tests remain
-integration tests. Full-server dashboard assertions retain their intent and need
-the combined M server/storage build.
+integration tests. Full-server dashboard tests exercise the server/storage join.
 
 `DIRECT-COVERAGE.md` describes the unchanged direct fuzz boundary obligations and
 required typed fixture joins. cfg observations are not production conversion
-APIs. Full combined campaigns, Kani and independent review remain root gates.
+APIs.

@@ -268,6 +268,8 @@ fn allowed(config: &WorkerConfig) -> bool {
 	let bkb = url.as_ref().is_some_and(|url| {
 		["http", "https"].contains(&url.scheme())
 			&& url.host_str().is_some_and(crate::worker_network_host::allowed)
+			&& url.username().is_empty()
+			&& url.password().is_none()
 	});
 	!config.agents.claude.model.for_operation().trim().is_empty()
 		&& !config.agents.codex.model.for_operation().trim().is_empty()
@@ -438,6 +440,31 @@ mod tests {
 			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
 			assert!(super::file_text_policy(&value), "native spelling rejected: {document}");
 			super::do_test(document.as_bytes());
+		}
+	}
+
+	#[test]
+	fn bkb_urls_reject_credentials_but_allow_public_paths() {
+		for (url, admitted) in [
+			("https:[::@i", false),
+			("https://user@example.com/api", false),
+			("https://user:password@example.com/api", false),
+			("https://:password@example.com/api", false),
+			("https://user:@example.com/api", false),
+			("https://%75ser@example.com/api", false),
+			("https://example.com/api/v2?format=json", true),
+			("https://example.com/@public?contact=user@example.com", true),
+			("https://@example.com/api", true),
+		] {
+			let mut config = super::WorkerConfig::default();
+			config.bkb.api_url = loupe_worker::config::ConfiguredText::Builtin(url);
+			assert_eq!(
+				super::fuzzing::validate(&config).is_ok(),
+				admitted,
+				"BKB URL policy: {url}"
+			);
+			assert_eq!(super::allowed(&config), admitted, "BKB URL oracle: {url}");
+			super::do_test(format!("[bkb]\napi_url={url:?}\n").as_bytes());
 		}
 	}
 

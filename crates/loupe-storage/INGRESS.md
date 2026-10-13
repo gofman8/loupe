@@ -29,7 +29,8 @@ exactly twelve content-classification columns, conservatively backfilled agent.
 New finding writes obtain OS entropy before insertion. Only the repository /
 fingerprint uniqueness conflict is ignored; identity collisions and entropy
 errors propagate. Reads reject missing/invalid identities. Rowid reuse cannot
-reuse the deleted finding's identity. Later report-scope receipts must bind it.
+reuse the deleted finding's identity. Report receipts bind this identity so
+completion cannot affect a replacement row with the same integer ID.
 
 VerificationInput separates Submitted Agent verdict notes/reason from the exact
 closed DeadlineExpired tuple. NULL job alone does not identify the host tuple.
@@ -45,8 +46,8 @@ SearchQuery retains its typed keyword/syntax input until the concrete FTS sink.
 
 Exact legacy text uses its existing 2 MiB policy with significant whitespace,
 original Unicode and applicable CR/LF/TAB. Invalid rows are refused without
-rewriting bytes. Shared RevisionText/AuditName/JobDiagnostic/JobKindName policies
-replace temporary duplicates. Local CheckpointOperation, InventoryRendering
+rewriting bytes. RevisionText/AuditName/JobDiagnostic/JobKindName policies are
+shared with other consumers. Local CheckpointOperation, InventoryRendering
 and finding SearchText retain their actual domain contracts.
 
 SourceRefs retains 32/64 counts, raw/canonical 64 KiB bounds and original serde
@@ -58,13 +59,12 @@ envelope recursion/ignored-value semantics. Scanner documents have no newly
 invented Payload normalization or whole-document ceiling.
 
 Conversion errors contain only fixed field/rule/category metadata, never serde
-errors or SQL values. ExistingPolicy and Admission remain distinct. Later
-partial reporting must preserve whole-list rejection for old schema failures,
-including compound failures hidden behind an earlier admission error. This
-migration does not implement that later delivery-scope policy.
+errors or SQL values. ExistingPolicy and Admission remain distinct. Invalid
+stored report input makes report preparation unavailable; domain mutations
+still propagate their own SQL errors.
 
 SQLite and parser scratch remain opaque dependency copies. Fixed-source test
 fixtures exist only under cfg(test); they do not replace actual ingress. Runtime
 DAO, schema, replay, identity, count-budget, secret and source-span controls use
-real encrypted databases. Full atomic-M consumer/fuzz/Kani and scope joins are
-validated at the workspace integration boundary.
+real encrypted databases. Consumer, fuzz, Kani and scope joins are validated at
+the workspace integration boundary.

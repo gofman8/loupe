@@ -37,7 +37,7 @@ that API, while request/proxy/DNS/timeout behavior remains reqwest's concern.
 
 Private parser/import/signing errors discard source chains in favor of fixed
 messages. This prevents reflection of malformed private input but does not
-wipe dependency parser scratch. P10 excludes opaque ring state, rcgen's
+wipe dependency parser scratch. Cleanup excludes opaque ring state, rcgen's
 internal generation document, PEM/base64/line/error parser scratch, compiler
 temporaries and prior reallocations, OS/transport/TLS session buffers, and
 already-exported operator files. Live-buffer cleanup probes and dependency

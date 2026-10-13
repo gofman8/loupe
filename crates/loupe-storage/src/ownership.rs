@@ -2,17 +2,7 @@
 use rusqlite::{Connection, OptionalExtension, Row};
 
 use crate::scope::{Scope, Subject, SubjectKind};
-use crate::{Entity, Error, Ownership, Result};
-
-pub fn generation_repo(tx: &Connection, generation: i64) -> Result<i64> {
-	tx.query_row(
-		"SELECT repo_id FROM review_generations WHERE generation_id = ?1",
-		[generation],
-		|r| r.get(0),
-	)
-	.optional()?
-	.ok_or(Error::NotFound(Entity::Generation, generation))
-}
+use crate::{Error, Ownership, Result};
 
 pub(crate) fn generation_scope(
 	tx: &Connection, generation: i64, relation: Ownership,
@@ -44,7 +34,9 @@ pub(crate) fn generation_row(row: &Row<'_>) -> rusqlite::Result<Subject> {
 	Ok(Subject { generation: Some(row.get(1)?), ..Subject::repository(row.get(0)?) })
 }
 
-pub fn generation(tx: &Connection, repo: i64, generation: i64, relation: Ownership) -> Result<()> {
+pub(crate) fn generation(
+	tx: &Connection, repo: i64, generation: i64, relation: Ownership,
+) -> Result<()> {
 	require(
 		tx,
 		"SELECT repo_id FROM review_generations WHERE generation_id=?1",
@@ -54,7 +46,9 @@ pub fn generation(tx: &Connection, repo: i64, generation: i64, relation: Ownersh
 		repository_row,
 	)
 }
-pub fn campaign(tx: &Connection, repo: i64, campaign: i64, relation: Ownership) -> Result<()> {
+pub(crate) fn campaign(
+	tx: &Connection, repo: i64, campaign: i64, relation: Ownership,
+) -> Result<()> {
 	require(
 		tx,
 		"SELECT repo_id FROM review_campaigns WHERE campaign_id=?1",
@@ -67,7 +61,7 @@ pub fn campaign(tx: &Connection, repo: i64, campaign: i64, relation: Ownership) 
 
 /// An explicit job generation cannot be overridden by a campaign fallback.
 /// Campaign-only, host-authored work may create rows in that repo's generation.
-pub fn job_for_generation(
+pub(crate) fn job_for_generation(
 	tx: &Connection, job: i64, generation: i64, relation: Ownership,
 ) -> Result<()> {
 	let scope = generation_scope(tx, generation, relation)?;
@@ -75,25 +69,29 @@ pub fn job_for_generation(
 		repo: r.get(0)?, generation: r.get(1)?, campaign: r.get(2)?, kind: SubjectKind::Job { campaign_repo: r.get(3)? },
 	}))
 }
-pub fn unit_in_generation(
+pub(crate) fn unit_in_generation(
 	tx: &Connection, unit: i64, generation: i64, relation: Ownership,
 ) -> Result<()> {
 	let scope = generation_scope(tx, generation, relation)?;
 	require(tx, "SELECT g.repo_id,u.generation_id FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1", [unit], scope, relation, generation_row)
 }
-pub fn unit_in_repo(tx: &Connection, unit: i64, repo: i64, relation: Ownership) -> Result<()> {
+pub(crate) fn unit_in_repo(
+	tx: &Connection, unit: i64, repo: i64, relation: Ownership,
+) -> Result<()> {
 	require(tx, "SELECT g.repo_id FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?1", [unit], Scope::repository(repo), relation, repository_row)
 }
-pub fn lead_in_generation(
+pub(crate) fn lead_in_generation(
 	tx: &Connection, lead: i64, generation: i64, relation: Ownership,
 ) -> Result<()> {
 	let scope = generation_scope(tx, generation, relation)?;
 	require(tx, "SELECT g.repo_id,l.generation_id FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id WHERE l.lead_id=?1", [lead], scope, relation, generation_row)
 }
-pub fn lead_in_repo(tx: &Connection, lead: i64, repo: i64, relation: Ownership) -> Result<()> {
+pub(crate) fn lead_in_repo(
+	tx: &Connection, lead: i64, repo: i64, relation: Ownership,
+) -> Result<()> {
 	require(tx, "SELECT g.repo_id FROM leads l JOIN review_generations g ON g.generation_id=l.generation_id WHERE l.lead_id=?1", [lead], Scope::repository(repo), relation, repository_row)
 }
-pub fn finding(tx: &Connection, finding: i64, repo: i64, relation: Ownership) -> Result<()> {
+pub(crate) fn finding(tx: &Connection, finding: i64, repo: i64, relation: Ownership) -> Result<()> {
 	require(
 		tx,
 		"SELECT repo_id FROM findings WHERE id=?1",
@@ -104,7 +102,7 @@ pub fn finding(tx: &Connection, finding: i64, repo: i64, relation: Ownership) ->
 	)
 }
 /// Scheduler-side checks for the nullable, single-column job foreign keys.
-pub fn job_links(
+pub(crate) fn job_links(
 	tx: &Connection, repo: i64, generation_id: Option<i64>, lead_id: Option<i64>,
 ) -> Result<()> {
 	if let Some(id) = generation_id {

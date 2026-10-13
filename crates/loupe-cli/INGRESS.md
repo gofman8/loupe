@@ -2,8 +2,6 @@
 
 The CLI retains Config values through concrete request and local-operation
 inputs, and Server/Agent values through final protocol DTOs and rendering.
-This describes the CLI portion of atomic M; other consumers and the combined
-integration gates remain separate obligations.
 
 ## Actual input owners
 
@@ -28,8 +26,7 @@ Display operation. Main applies TerminalText to the entire final error.
 
 The three production `Ingress::new` sites remain in two files. Normal tests
 obtain Server through real loopback HTTP and use the actual Clap callbacks;
-the separate fixed-Server fuzz fixture is cfg-only. Registry changes belong
-to the root integration owner.
+the separate fixed-Server fuzz fixture is cfg-only.
 
 ## Text and source contracts
 
@@ -113,22 +110,16 @@ Reporting alone uses a no-output Content traversal with three enclosing levels
 number handling. Ordinary ignored DTO extras retain their iterative ignore
 behavior rather than receiving a blanket whole-body Value restriction.
 
-Baseline PAT Debug and text-admission assertions are saved outside the checkout.
-Terminal rejection assertions also ran on unchanged baseline production: four
-expected reds, while the original five escaping controls passed. Invalid
-successful-response fields now exercise actual admission refusal. Separate
-direct TerminalText/Style tests retain literal escaping controls, including
+Invalid successful-response fields exercise actual admission refusal. Separate
+direct TerminalText/Style tests cover literal escaping, including
 every C0/C1 character, CR and LF; valid renderer fixtures enter through the
 actual response owner and retain Unicode, markup and significant spacing.
 
-The missing/null/default response fixtures are compatibility positives, not
-historical regression reds. Populated job parentage, failure fields and the
-390-second duration are checked through get/retry/cancel/list owners. The job
-kind output test distinguishes the unfinished M candidate's extra quoting
-from the corrected named terminal operation.
+Missing/null/default response fixtures cover compatibility. Populated job
+parentage, failure fields and durations are checked through get/retry/cancel/list
+owners. Job-kind output tests check the named terminal formatter's spelling.
 
 Original-token evidence checks equal array members, detail diff/prose equality,
 retained Server audit types, response allocation identity and exact limits.
 OS argv/env, Clap's backing storage, transport and kernel copies remain opaque
-dependency limits. Complete atomic M and full fuzz-target validation require
-the combined consumer tree.
+dependency limits.

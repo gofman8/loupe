@@ -92,8 +92,8 @@ old lossy-text decision. App retry, PAT dispatch and cache behavior are unchange
 Pure compatibility helpers and synthetic owner observations are available only
 under test/fuzz cfg. They do not provide normal-build arbitrary labelled decode
 APIs. Reporter render entry points require the final typed finding/destination
-owners. Full later report containment, prompt framing and scope/canary work are
-separate obligations; typed sink inputs alone do not claim those properties.
+owners. Reporter containment and transaction scopes enforce their own output
+and authority policies; a source label alone does not confer those properties.
 
 ## Evidence boundaries
 

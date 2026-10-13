@@ -2,11 +2,41 @@
 
 use loupe_tls::{client_config, reqwest_client_config, server_config, Ca};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+use rustls::pki_types::{CertificateDer, UnixTime};
+use rustls::server::WebPkiClientVerifier;
+use rustls::RootCertStore;
 
 const RSA_PKCS1: &str = include_str!("fixtures/throwaway-rsa-pkcs1.pem");
 const RSA_PKCS8: &str = include_str!("fixtures/throwaway-rsa-pkcs8.pem");
 const EC_SEC1: &str = include_str!("fixtures/throwaway-ec-sec1.pem");
 const EC_PKCS8: &str = include_str!("fixtures/throwaway-ec-pkcs8.pem");
+
+#[test]
+fn imported_supported_ca_keys_issue_verifiable_clients() {
+	let keys = [
+		KeyPair::from_pem(RSA_PKCS8).unwrap(),
+		KeyPair::from_pem(EC_PKCS8).unwrap(),
+		KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap(),
+		KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap(),
+	];
+	for key in keys {
+		let mut params = CertificateParams::default();
+		params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+		let cert = params.self_signed(&key).unwrap();
+		let imported = Ca::from_pem(&cert.pem(), &key.serialize_pem()).unwrap();
+		let client = imported.mint_client("worker").unwrap();
+		let client_der = CertificateDer::from(pem::parse(client.cert_pem).unwrap().into_contents());
+		let mut roots = RootCertStore::empty();
+		roots.add(cert.der().clone()).unwrap();
+		let verifier = WebPkiClientVerifier::builder_with_provider(
+			std::sync::Arc::new(roots),
+			std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+		)
+		.build()
+		.unwrap();
+		verifier.verify_client_cert(&client_der, &[], UnixTime::now()).unwrap();
+	}
+}
 
 #[test]
 fn loaders_accept_pkcs1_pkcs8_and_sec1_while_ca_import_stays_pkcs8() {

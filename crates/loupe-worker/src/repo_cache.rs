@@ -22,11 +22,16 @@ const CURSOR_VERSION: u8 = 1;
 
 /// Three-tuple identifier for a cached repo. Designed to be cheap to clone
 /// and hashable — used as the key in both the access log and the lock map.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct RepoKey {
 	host: String,
 	owner: String,
 	repo: String,
+}
+impl std::fmt::Debug for RepoKey {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("RepoKey([redacted])")
+	}
 }
 
 impl RepoKey {
@@ -91,13 +96,20 @@ impl RepoCache {
 	pub fn new(
 		cache_dir: PathBuf, max_cache_bytes: u64, worker_binary: Option<PathBuf>,
 	) -> Result<Self> {
-		std::fs::create_dir_all(&cache_dir)
-			.with_context(|| format!("failed to create cache dir: {}", cache_dir.display()))?;
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "RepoCache creates its selected Config cache root before any repository operation."
+		)]
+		std::fs::create_dir_all(&cache_dir).context("failed to create cache directory")?;
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "Resolve the operator-selected cache root once before deriving repository paths."
+		)]
 		let cache_dir = cache_dir.canonicalize().context("resolving Git cache directory")?;
 
 		let mut access_log = HashMap::new();
 		Self::scan_existing(&cache_dir, &mut access_log);
-		debug!(cache_dir = %cache_dir.display(), repos = access_log.len(), "loupe repo cache initialized");
+		debug!(repos = access_log.len(), "loupe repo cache initialized");
 
 		Ok(Self {
 			cache_dir,
@@ -123,19 +135,37 @@ impl RepoCache {
 	}
 
 	fn scan_existing(cache_dir: &Path, access_log: &mut HashMap<RepoKey, SystemTime>) {
-		let Ok(hosts) = std::fs::read_dir(cache_dir) else { return };
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "Cache accounting walks the selected cache root and uses entries only as cache metadata."
+		)]
+		let Ok(hosts) = std::fs::read_dir(cache_dir) else {
+			return;
+		};
 		for host_entry in hosts.flatten() {
 			if !host_entry.file_type().is_ok_and(|kind| kind.is_dir()) {
 				continue;
 			}
 			let Ok(host_name) = host_entry.file_name().into_string() else { continue };
-			let Ok(owners) = std::fs::read_dir(host_entry.path()) else { continue };
+			#[allow(
+				clippy::disallowed_methods,
+				reason = "Cache accounting reads the next directory level under the selected cache root."
+			)]
+			let Ok(owners) = std::fs::read_dir(host_entry.path()) else {
+				continue;
+			};
 			for owner_entry in owners.flatten() {
 				if !owner_entry.file_type().is_ok_and(|kind| kind.is_dir()) {
 					continue;
 				}
 				let Ok(owner_name) = owner_entry.file_name().into_string() else { continue };
-				let Ok(repos) = std::fs::read_dir(owner_entry.path()) else { continue };
+				#[allow(
+					clippy::disallowed_methods,
+					reason = "Cache accounting reads repository entries under the selected cache hierarchy."
+				)]
+				let Ok(repos) = std::fs::read_dir(owner_entry.path()) else {
+					continue;
+				};
 				for repo_entry in repos.flatten() {
 					let Ok(repo_dirname) = repo_entry.file_name().into_string() else { continue };
 					if !repo_dirname.ends_with(".git")
@@ -143,6 +173,10 @@ impl RepoCache {
 					{
 						continue;
 					}
+					#[allow(
+						clippy::string_slice,
+						reason = "The preceding guard proves an ASCII .git suffix; removing four bytes ends at its boundary."
+					)]
 					let repo_stem = repo_dirname[..repo_dirname.len() - 4].to_owned();
 					let Ok(key) = RepoKey::new(host_name.clone(), owner_name.clone(), repo_stem)
 					else {
@@ -186,6 +220,10 @@ impl RepoCache {
 	}
 
 	fn repo_lock(&self, key: &RepoKey) -> Arc<AsyncMutex<()>> {
+		#[allow(
+			clippy::expect_used,
+			reason = "A poisoned host lock map indicates a prior panic; creating a second per-repo lock would violate exclusion."
+		)]
 		let mut map = self.repo_locks.lock().expect("repo_locks mutex poisoned");
 		map.entry(key.clone()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
 	}
@@ -225,19 +263,24 @@ impl RepoCache {
 			let operation =
 				GitCredentialOperation::new(&url, token, cache.worker_binary.as_deref())?;
 			let path = cache.checked_repo_path(&key)?;
+			#[allow(clippy::disallowed_methods, reason = "The cache owner checks its computed repository path while holding the per-repository lock.")]
 			if force_clone && path.exists() {
+				#[allow(clippy::disallowed_methods, reason = "Explicit reclone removes only the selected cached repository while retaining its lock and pin.")]
 				std::fs::remove_dir_all(&path).context("removing cached Git repository")?;
 			}
+			#[allow(clippy::disallowed_methods, reason = "The cache owner tests its selected repository path to choose fetch or clone.")]
 			if path.exists() {
-				info!(host = %key.host, owner = %key.owner, repo = %key.repo, "fetching repo updates");
-				if let Err(error) = Self::fetch_bare(&path, &operation) {
-					warn!(%error, "Git refresh failed; rebuilding cache");
+				info!("fetching repo updates");
+				if Self::fetch_bare(&path, &operation).is_err() {
+					warn!("Git refresh failed; rebuilding cache");
+					#[allow(clippy::disallowed_methods, reason = "Failed refresh replaces the selected stale cache under the same lock and pin.")]
 					std::fs::remove_dir_all(&path).context("removing stale Git repository")?;
 					Self::clone_bare(&path, &operation)?;
 				}
 			} else {
 				cache.evict_if_needed()?;
 				if let Some(parent) = path.parent() {
+					#[allow(clippy::disallowed_methods, reason = "The cache owner creates the selected repository parent under its Config cache root.")]
 					std::fs::create_dir_all(parent).context("creating Git cache directory")?;
 				}
 				Self::clone_bare(&path, &operation)?;
@@ -256,6 +299,10 @@ impl RepoCache {
 	/// as never-scanned.
 	pub fn read_cursor(&self, key: &RepoKey) -> Option<BoundedText<RevisionText, Repo>> {
 		let path = self.cursor_path(key).ok()?;
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "Cursor ingress reads only the fixed cursor file and then applies the named Repo decoder."
+		)]
 		let bytes = std::fs::read(&path).ok()?;
 		// SAFETY: actual cached repository cursor bytes, before decoding.
 		#[allow(unsafe_code)]
@@ -269,8 +316,11 @@ impl RepoCache {
 	pub fn write_cursor(&self, key: &RepoKey, sha: &str) -> Result<()> {
 		let path = self.cursor_path(key)?;
 		let bytes = encode_cursor(sha);
-		std::fs::write(&path, bytes)
-			.with_context(|| format!("failed to write cursor to {}", path.display()))?;
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "The cache owner persists the versioned cursor at the fixed repository cursor path."
+		)]
+		std::fs::write(&path, bytes).context("failed to write repository cursor")?;
 		Ok(())
 	}
 
@@ -286,6 +336,10 @@ impl RepoCache {
 	/// Authentication uses only the operation's private host helper.
 	fn clone_bare(path: &Path, operation: &GitCredentialOperation) -> Result<()> {
 		let (mut command, destination) = operation.transport_command(None)?;
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "Git clone executes the destination-scoped credential command with stderr and stdout discarded."
+		)]
 		let status = command
 			.args([
 				"clone",
@@ -309,6 +363,10 @@ impl RepoCache {
 		// Never read a legacy origin into memory. Replace every value from
 		// the current validated destination before any network command,
 		// including refreshes whose lease contains no PAT.
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "Origin remediation executes only the fixed local Git configuration operation."
+		)]
 		let status = operation
 			.command()
 			.current_dir(path)
@@ -324,6 +382,10 @@ impl RepoCache {
 	fn fetch_bare(path: &Path, operation: &GitCredentialOperation) -> Result<()> {
 		Self::replace_origin(path, operation)?;
 		let (mut command, destination) = operation.transport_command(Some(path))?;
+		#[allow(
+			clippy::disallowed_methods,
+			reason = "Git fetch executes the destination-scoped credential command with fixed refspecs."
+		)]
 		let status = command
 			.args([
 				"fetch",
@@ -358,6 +420,10 @@ impl RepoCache {
 					continue;
 				}
 				let path = self.checked_repo_path(key)?;
+				#[allow(
+					clippy::disallowed_methods,
+					reason = "Cache eviction checks only selected unpinned repository candidates."
+				)]
 				if path.exists() {
 					entries.push((key.clone(), access_time, dir_size(&path)));
 				}
@@ -372,11 +438,15 @@ impl RepoCache {
 				break;
 			}
 			let path = self.checked_repo_path(key)?;
-			if let Err(e) = std::fs::remove_dir_all(&path) {
-				warn!(host = %key.host, owner = %key.owner, repo = %key.repo, error = %e, "failed to evict repo");
+			#[allow(
+				clippy::disallowed_methods,
+				reason = "Cache eviction removes only a selected unpinned repository under the Config cache root."
+			)]
+			if std::fs::remove_dir_all(&path).is_err() {
+				warn!("failed to evict repo");
 				continue;
 			}
-			info!(host = %key.host, owner = %key.owner, repo = %key.repo, size_mb = size / (1024 * 1024), "evicted cached repo");
+			info!(size_mb = size / (1024 * 1024), "evicted cached repo");
 			freed += size;
 			if let Ok(mut log) = self.access_log.lock() {
 				log.remove(key);
@@ -387,6 +457,10 @@ impl RepoCache {
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
+	#[allow(
+		clippy::disallowed_methods,
+		reason = "The cache owner inspects each selected path component without following links."
+	)]
 	match std::fs::symlink_metadata(path) {
 		Ok(metadata) => anyhow::ensure!(!metadata.is_symlink(), "symlink in Git cache path"),
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
@@ -442,7 +516,7 @@ impl Validate<&[u8], Repo> for RepoCursorDecoder {
 	}
 }
 impl RepoCursor {
-	/// Temporary concrete cursor exit; M retains the Repo revision.
+	/// Keep the cursor's Repo provenance when handing its revision to the runner.
 	fn into_revision(self) -> BoundedText<RevisionText, Repo> {
 		self.0
 	}
@@ -471,7 +545,13 @@ pub mod fuzz_support {
 /// Recursively compute the size of a directory in bytes.
 pub fn dir_size(path: &Path) -> u64 {
 	let mut total = 0u64;
-	let Ok(entries) = std::fs::read_dir(path) else { return total };
+	#[allow(
+		clippy::disallowed_methods,
+		reason = "Cache size accounting reads directory entries solely to aggregate byte counts."
+	)]
+	let Ok(entries) = std::fs::read_dir(path) else {
+		return total;
+	};
 	for entry in entries.flatten() {
 		let Ok(ft) = entry.file_type() else { continue };
 		if ft.is_file() {
@@ -485,6 +565,52 @@ pub fn dir_size(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn cache_diagnostics_omit_configured_root() {
+		if !crate::test_env::in_env(
+			"repo_cache::tests::cache_diagnostics_omit_configured_root",
+			"cache-i8",
+			&[],
+		) {
+			return;
+		}
+		let capture = crate::test_support::LogCapture::default();
+		capture.install();
+		let directory =
+			tempfile::Builder::new().prefix("private-cache-root-sentinel-").tempdir().unwrap();
+		let _cache = super::RepoCache::new(directory.path().to_owned(), 1024, None).unwrap();
+		let logs = capture.text();
+		assert!(
+			logs.contains("repo cache initialized"),
+			"capture must observe real cache initialization"
+		);
+		assert!(
+			!logs.contains("private-cache-root-sentinel"),
+			"configured cache path leaked into host logs"
+		);
+	}
+	#[test]
+	fn cache_path_errors_omit_original_bytes_from_the_chain() {
+		let directory = tempfile::tempdir().unwrap();
+		let occupied = directory.path().join("private-cache-path-sentinel");
+		std::fs::write(&occupied, "occupied").unwrap();
+		let error = super::RepoCache::new(occupied.join("cache"), 1024, None).err().unwrap();
+		assert!(
+			!format!("{error:#}").contains("private-cache-path-sentinel"),
+			"cache path leaked through the public error chain"
+		);
+	}
+
+	#[test]
+	fn cache_key_debug_omits_repository_components() {
+		let key =
+			super::RepoKey::new("github.com", "private-owner-sentinel", "private-repo-sentinel");
+		let debug = format!("{key:?}");
+		assert!(
+			!debug.contains("private-owner-sentinel") && !debug.contains("private-repo-sentinel"),
+			"repository key bytes leaked through Debug"
+		);
+	}
 	use std::process::Command;
 	use std::sync::Arc;
 

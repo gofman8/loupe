@@ -44,6 +44,7 @@ async fn try_client(
 #[tokio::test]
 async fn authorised_client_handshakes_and_reads_payload() {
 	let ca = Ca::new("loupe-test-ca").unwrap();
+	let ca = Ca::from_pem(ca.cert_pem(), ca.key_pem().expose()).unwrap();
 	let server_cert = ca.mint_server("loupe-server", &["loupe-server".into()]).unwrap();
 	let client_cert = ca.mint_client("worker-1").unwrap();
 

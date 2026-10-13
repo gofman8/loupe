@@ -571,15 +571,15 @@ UPDATE jobs SET target_finding_id=6 WHERE id=6;",
 	drop(conn);
 	let db = Db::open(&path, &MasterKey::for_tests()).unwrap();
 	db.with_conn(|conn| {
-		assert_eq!(crate::jobs::get(conn, 1)?.unwrap().attempts, u32::MAX);
-		let finding = crate::findings::get(conn, 6)?.unwrap();
+		assert_eq!(crate::jobs::get_raw(conn, 1)?.unwrap().attempts, u32::MAX);
+		let finding = crate::findings::get_raw(conn, 6)?.unwrap();
 		assert_eq!(finding.line_start, Some(0));
 		assert_eq!(finding.line_end, Some(u32::MAX));
-		assert_eq!(crate::jobs::get(conn, 2)?.unwrap().target_finding_id, None);
-		assert_eq!(crate::jobs::get(conn, 4)?.unwrap().target_finding_id, Some(999999));
-		assert_eq!(crate::jobs::get(conn, 6)?.unwrap().target_finding_id, Some(6));
+		assert_eq!(crate::jobs::get_raw(conn, 2)?.unwrap().target_finding_id, None);
+		assert_eq!(crate::jobs::get_raw(conn, 4)?.unwrap().target_finding_id, Some(999999));
+		assert_eq!(crate::jobs::get_raw(conn, 6)?.unwrap().target_finding_id, Some(6));
 		crate::transaction::immediate(conn, |tx| {
-			let claimed = crate::scheduler::claim(
+			let claimed = crate::scheduler::claim_raw(
 				tx,
 				&crate::scheduler::ClaimRequest {
 					worker_id: 1,
@@ -617,16 +617,19 @@ DELETE FROM review_generations WHERE generation_id=12;",
 	drop(conn);
 	let db = Db::open(&path, &MasterKey::for_tests()).unwrap();
 	db.with_conn(|conn| {
-		let job = crate::jobs::get(conn, 7)?.unwrap();
+		let job = crate::jobs::get_raw(conn, 7)?.unwrap();
 		assert_eq!(job.generation_id, Some(11));
 		assert_eq!(job.assigned_lead_id, Some(11));
 		assert_eq!(job.continuation_of_job_id, Some(11));
-		assert_eq!(crate::jobs::get(conn, 12)?.unwrap().generation_id, None);
-		assert_eq!(crate::campaigns::get(conn, 12)?.unwrap().generation_id, None);
-		let campaign = crate::campaigns::get(conn, 11)?.unwrap();
+		assert_eq!(crate::jobs::get_raw(conn, 12)?.unwrap().generation_id, None);
+		assert_eq!(crate::campaigns::get_raw(conn, 12)?.unwrap().generation_id, None);
+		let campaign = crate::campaigns::get_raw(conn, 11)?.unwrap();
 		assert_eq!(campaign.root_campaign_id, Some(13));
 		assert_eq!(campaign.continuation_of_campaign_id, Some(13));
-		assert_eq!(crate::generations::get(conn, 11)?.unwrap().predecessor_generation_id, Some(13));
+		assert_eq!(
+			crate::generations::get_raw(conn, 11)?.unwrap().predecessor_generation_id,
+			Some(13)
+		);
 		Ok(())
 	})
 	.unwrap();

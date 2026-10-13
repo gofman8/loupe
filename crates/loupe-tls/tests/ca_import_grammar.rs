@@ -3,6 +3,16 @@
 use loupe_tls::Ca;
 
 #[test]
+fn certificate_import_rejects_an_unrelated_private_key() {
+	let ca = Ca::new("same-subject-ca").unwrap();
+	let other = Ca::new("same-subject-ca").unwrap();
+	let error = Ca::from_pem(ca.cert_pem(), other.key_pem().expose())
+		.err()
+		.expect("CA certificate and private key must match");
+	assert_eq!(error.to_string(), "CA certificate does not match private key");
+}
+
+#[test]
 fn certificate_import_is_tag_neutral_for_valid_certificate_der() {
 	let ca = Ca::new("tag-neutral-ca").unwrap();
 	for label in ["PRIVATE KEY", "PUBLIC KEY", "LOUPE CERTIFICATE"] {
