@@ -214,7 +214,7 @@ impl Reporter for GithubReporter {
 				external_ids.push(external_id);
 			}
 		}
-		let external_id = (!external_ids.is_empty()).then(|| external_ids.as_slice().join(","));
+		let external_id = (!external_ids.is_empty()).then(|| external_ids.join(","));
 		Ok(DispatchReceipt { kind: self.kind(), external_id })
 	}
 }

@@ -530,34 +530,6 @@ fn validate_report_size(
 	Ok(())
 }
 
-#[cfg(test)]
-mod storage_error_tests {
-	use super::*;
-	#[test]
-	fn domain_errors_keep_their_http_meaning() {
-		use loupe_storage::{Conflict, Entity, Error, Ownership};
-		for (error, status) in [
-			(Error::Conflict(Conflict::Checkpoint), StatusCode::CONFLICT),
-			(Error::Ownership(Ownership::LeadJob), StatusCode::FORBIDDEN),
-			(Error::NotFound(Entity::Job, 1), StatusCode::NOT_FOUND),
-			(
-				Error::Validation(loupe_core::text::Error::new(
-					"title",
-					loupe_core::text::Rule::Empty,
-				)),
-				StatusCode::BAD_REQUEST,
-			),
-			(Error::UnknownJobKinds(vec![]), StatusCode::INTERNAL_SERVER_ERROR),
-		] {
-			assert_eq!(
-				storage_write_error("submit", error).0,
-				status,
-				"preserve typed storage failure status"
-			);
-		}
-	}
-}
-
 /// `POST /v1/jobs/:id/llm-findings` — strict host-side MCP broker path.
 pub async fn submit_llm_finding(
 	State(state): State<AppState>, Extension(worker): Extension<AuthedWorker>,
@@ -1075,4 +1047,32 @@ fn report_finding_from_row(
 fn mark_reported(state: &AppState, ids: &[i64], now: i64) -> anyhow::Result<usize> {
 	let n = state.db.with_conn(|c| Ok(findings::mark_reported(c, ids, now)?))?;
 	Ok(n)
+}
+
+#[cfg(test)]
+mod storage_error_tests {
+	use super::*;
+	#[test]
+	fn domain_errors_keep_their_http_meaning() {
+		use loupe_storage::{Conflict, Entity, Error, Ownership};
+		for (error, status) in [
+			(Error::Conflict(Conflict::Checkpoint), StatusCode::CONFLICT),
+			(Error::Ownership(Ownership::LeadJob), StatusCode::FORBIDDEN),
+			(Error::NotFound(Entity::Job, 1), StatusCode::NOT_FOUND),
+			(
+				Error::Validation(loupe_core::text::Error::new(
+					"title",
+					loupe_core::text::Rule::Empty,
+				)),
+				StatusCode::BAD_REQUEST,
+			),
+			(Error::UnknownJobKinds(vec![]), StatusCode::INTERNAL_SERVER_ERROR),
+		] {
+			assert_eq!(
+				storage_write_error("submit", error).0,
+				status,
+				"preserve typed storage failure status"
+			);
+		}
+	}
 }
