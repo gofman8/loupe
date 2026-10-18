@@ -1095,7 +1095,6 @@ dependencies = [
 name = "loupe-storage"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "loupe-core",
  "loupe-provenance",
  "rand_core 0.6.4",
@@ -1118,7 +1117,6 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "sha2",
- "thiserror 2.0.21",
  "webpki-roots",
  "zeroize",
 ]
