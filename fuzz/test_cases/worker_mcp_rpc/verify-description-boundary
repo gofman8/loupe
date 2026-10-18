@@ -1,0 +1,4 @@
+A{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_verdict","arguments":{"verdict":"confirmed","notes":"confirmed"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_finding_by_id","arguments":{"id":1}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"submit_patch","arguments":{"patch_unified":"patch","notes":"notes"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"submit_patch","arguments":{"patch_unified":"duplicate","notes":"notes"}}}

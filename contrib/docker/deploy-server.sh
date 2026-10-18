@@ -13,7 +13,11 @@ REMOTE_CONF="${LOUPE_SERVER_REMOTE_CONF:-/etc/loupe-container/server.conf}"
 REMOTE_SECRET="${LOUPE_SERVER_SECRET_FILE:-/etc/loupe-container/server.secrets.env}"
 LOAD_IMAGE="${LOUPE_SERVER_LOAD_IMAGE:-0}"
 PULL_IMAGE="${LOUPE_SERVER_PULL_IMAGE:-0}"
-START_GRACE_SECONDS="${LOUPE_SERVER_START_GRACE_SECONDS:-3}"
+START_TIMEOUT_SECONDS="${LOUPE_SERVER_START_TIMEOUT_SECONDS:-300}"
+if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+	echo 'error: LOUPE_SERVER_START_TIMEOUT_SECONDS must be a positive integer' >&2
+	exit 2
+fi
 
 RUN_FILE="$ROOT/contrib/docker/run-server-container.sh"
 UNIT_FILE="$ROOT/contrib/docker/loupe-server-container.service"
@@ -89,6 +93,7 @@ build_conf_file() {
 			LOUPE_LOG_JSON \
 			LOUPE_BIND \
 			LOUPE_DB \
+			LOUPE_CONFIG \
 			LOUPE_REQUIRE_APPROVAL_DEFAULT \
 			LOUPE_VERIFICATION_DEFAULT
 		do
@@ -118,6 +123,8 @@ load_image_if_requested() {
 }
 
 verify_remote_image() {
+	# The image name comes from the local deployment configuration.
+	# shellcheck disable=SC2029
 	if ! ssh "$SSH_TARGET" sudo podman image exists "$IMAGE"; then
 		echo "error: image $IMAGE is not present in rootful Podman on $SSH_TARGET" >&2
 		echo "hint: load it with: podman save \"\$LOUPE_SERVER_IMAGE\" | ssh $SSH_TARGET sudo podman load" >&2
@@ -170,11 +177,13 @@ REMOTE
 
 load_image_if_requested
 if [ "$PULL_IMAGE" = "1" ]; then
+	# shellcheck disable=SC2029 # Use the locally selected image.
 	ssh "$SSH_TARGET" sudo podman pull "$IMAGE"
 fi
 verify_remote_image
 
 echo "==> Writing persistent server secret env file to $SSH_TARGET:$REMOTE_SECRET"
+# shellcheck disable=SC2016 # Expand these variables only on the remote host.
 secret_writer='
 set -euo pipefail
 secret="$1"
@@ -190,12 +199,41 @@ chmod 0600 "$tmp"
 mv "$tmp" "$secret"
 trap - EXIT
 '
+# shellcheck disable=SC2029 # remote_quote protects locally supplied arguments.
 emit_secret_env | ssh "$SSH_TARGET" \
 	"sudo bash -c $(remote_quote "$secret_writer") bash $(remote_quote "$REMOTE_SECRET") 10001"
 
 echo "==> Restarting $SERVICE_NAME"
+# shellcheck disable=SC2029 # Use the locally selected service name.
 ssh "$SSH_TARGET" sudo systemctl restart "$SERVICE_NAME"
-sleep "$START_GRACE_SECONDS"
-ssh "$SSH_TARGET" systemctl --no-pager --lines=30 status "$SERVICE_NAME"
+# shellcheck disable=SC2029 # remote_quote preserves each local argument.
+ssh "$SSH_TARGET" "sudo bash -s -- $(remote_quote "$SERVICE_NAME") $(remote_quote "$START_TIMEOUT_SECONDS")" <<'REMOTE'
+set -euo pipefail
+service="$1"
+timeout_seconds="$2"
+invocation=$(systemctl show --property=InvocationID --value "$service")
+if [[ ! "$invocation" =~ ^[a-f0-9]{32}$ ]]; then
+	echo 'error: server did not start a service invocation' >&2
+	exit 1
+fi
+deadline=$((SECONDS + timeout_seconds))
+while (( SECONDS < deadline )); do
+	if ! systemctl is-active --quiet "$service" ||
+		[[ "$(systemctl show --property=InvocationID --value "$service")" != "$invocation" ]] ||
+		[[ "$(systemctl show --property=NRestarts --value "$service")" != 0 ]]; then
+		echo 'error: server exited or restarted before listener readiness; inspect its journal' >&2
+		exit 1
+	fi
+	# Scope the message to this process lifetime so an older successful
+	# deployment cannot hide a failing or incomplete migration.
+	logs=$(journalctl --quiet --no-pager --output=cat "_SYSTEMD_INVOCATION_ID=$invocation")
+	if grep -Fq 'loupe-server listening' <<< "$logs"; then
+		exit 0
+	fi
+	sleep 1
+done
+echo 'error: timed out waiting for server listener readiness; inspect its journal before restarting workers' >&2
+exit 1
+REMOTE
 
 echo "==> loupe server container deployed"

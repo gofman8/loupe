@@ -1,0 +1,497 @@
+//! Raw TOML bytes pass through the actual path-based loader and validation.
+//! The fixture parent is absolute; relative TLS/cache paths must resolve there.
+
+use loupe_worker::config::{fuzzing, WorkerConfig, WorkerConfigOverrides};
+mod wire;
+use loupe_worker::sandbox::SandboxNetworkMode;
+use wire::FileConfig;
+
+use crate::utils::test_logger;
+
+pub fn do_test(data: &[u8]) {
+	if data.len() > 128 * 1024 {
+		return;
+	}
+	let recipe = data.strip_prefix(b"\xffLOUPECFG").map(|control| {
+		let choice = control.first().copied().unwrap_or(0);
+		let length = [0, 1, 2 * 1024 * 1024 - 1, 2 * 1024 * 1024, 2 * 1024 * 1024 + 1]
+			[usize::from(choice % 5)];
+		format!("[logging]\nlevel=\"{}\"\n", "a".repeat(length)).into_bytes()
+	});
+	let data = recipe.as_deref().unwrap_or(data);
+	check_arguments(data);
+	let expected = std::str::from_utf8(data)
+		.ok()
+		.and_then(|text| toml::from_str::<toml::Value>(text).ok())
+		.filter(legacy_shape)
+		.filter(file_text_policy);
+	let observed =
+		crate::worker_client_ingress::oracle::without_logs(|| fuzzing::file_document(data));
+	assert_eq!(
+		observed.is_ok(),
+		expected.is_some(),
+		"Config original document schema/field admission differs"
+	);
+	if let Ok(actual) = &observed {
+		let expected: FileConfig = toml::from_str(std::str::from_utf8(data).unwrap_or_default())
+			.unwrap_or_else(|error| panic!("legacy admitted Config shape: {error}"));
+		assert_eq!(
+			format!("{actual:?}"),
+			format!("{expected:?}"),
+			"Config admitted original fields changed"
+		);
+	} else if let Err(error) = &observed {
+		check_file_error(data, error);
+	}
+	let fixture = tempfile::tempdir().unwrap_or_else(|_| panic!("create config fixture"));
+	let path = fixture.path().join("worker.toml");
+	std::fs::write(&path, data).unwrap_or_else(|_| panic!("write config fixture"));
+	let loaded = WorkerConfig::load(Some(&path), WorkerConfigOverrides::default());
+	let parsed = fuzzing::load_document(&path);
+	let Ok(file) = parsed else {
+		assert!(loaded.is_err());
+		return;
+	};
+	for value in file.resolved_paths() {
+		assert!(value.is_absolute(), "config path was not resolved against its absolute parent");
+	}
+	let Ok(config) = fuzzing::merge(file) else {
+		assert!(loaded.is_err());
+		return;
+	};
+	let expected = allowed(&config);
+	assert_eq!(
+		fuzzing::validate(&config).is_ok(),
+		expected,
+		"worker config validation differs from oracle"
+	);
+	assert_eq!(loaded.is_ok(), expected, "config load skipped or changed validation");
+	if let Ok(loaded) = loaded {
+		assert!(allowed(&loaded));
+		assert!(loaded.cache.dir.for_filesystem().is_absolute());
+		for value in [&loaded.tls.ca_cert, &loaded.tls.cert, &loaded.tls.key].into_iter().flatten()
+		{
+			assert!(value.for_filesystem().is_absolute());
+		}
+	}
+}
+
+fn section_fields<'a>(
+	section: &str, value: &'a toml::Value,
+) -> Option<Vec<(&'a str, &'a toml::Value)>> {
+	let names: &[&str] = match section {
+		"server" => &["url"],
+		"tls" => &["ca_cert", "cert", "key"],
+		"cache" => &["dir", "max_gb"],
+		"runtime" => &["max_workdir_gb", "disable_sandbox"],
+		"sandbox" => &["network", "allowlist"],
+		"logging" => &["level", "json", "agent_output"],
+		"agents" => &["scan", "verify", "claude", "codex"],
+		"agent" => &["model", "effort"],
+		"scanner_defaults" => {
+			&["max_concurrent_files", "max_file_bytes", "per_request_timeout_seconds"]
+		},
+		"bkb" => &["api_url"],
+		"broker" => &["request_ceiling", "output_ceiling_bytes", "token_ceiling"],
+		_ => return None,
+	};
+	match value {
+		toml::Value::Table(fields) => {
+			Some(fields.iter().map(|(key, value)| (key.as_str(), value)).collect())
+		},
+		// Struct sequences default missing fields and ignore surplus elements.
+		toml::Value::Array(fields) => Some(names.iter().copied().zip(fields).collect()),
+		_ => None,
+	}
+}
+
+fn unit_variant(value: &toml::Value, variants: &[&str]) -> bool {
+	match value {
+		toml::Value::String(name) => variants.contains(&name.as_str()),
+		toml::Value::Table(tags) if tags.len() == 1 => tags.iter().all(|(name, payload)| {
+			variants.contains(&name.as_str())
+				&& (payload.as_table().is_some_and(|fields| fields.is_empty())
+					|| payload.as_array().is_some_and(|fields| fields.is_empty()))
+		}),
+		_ => false,
+	}
+}
+
+fn legacy_shape(value: &toml::Value) -> bool {
+	let Some(sections) = value.as_table() else { return false };
+	sections.iter().all(|(section, value)| {
+		let Some(fields) = section_fields(section, value) else { return false };
+		match section.as_str() {
+			"server" => fields.into_iter().all(|(key, v)| key == "url" && v.is_str()),
+			"tls" => fields
+				.into_iter()
+				.all(|(key, v)| ["ca_cert", "cert", "key"].contains(&key) && v.is_str()),
+			"cache" => fields.into_iter().all(|(key, v)| match key {
+				"dir" => v.is_str(),
+				"max_gb" => unsigned(v),
+				_ => false,
+			}),
+			"runtime" => fields.into_iter().all(|(key, v)| match key {
+				"max_workdir_gb" => unsigned(v),
+				"disable_sandbox" => v.is_bool(),
+				_ => false,
+			}),
+			"sandbox" => fields.into_iter().all(|(key, v)| match key {
+				"network" => unit_variant(v, &["allowlist", "public"]),
+				"allowlist" => {
+					v.as_array().is_some_and(|items| items.iter().all(toml::Value::is_str))
+				},
+				_ => false,
+			}),
+			"logging" => fields.into_iter().all(|(key, v)| match key {
+				"level" => v.is_str(),
+				"json" | "agent_output" => v.is_bool(),
+				_ => false,
+			}),
+			"agents" => fields.into_iter().all(|(key, v)| match key {
+				"scan" | "verify" => unit_variant(v, &["auto", "claude", "codex"]),
+				"claude" | "codex" => section_fields("agent", v).is_some_and(|items| {
+					items
+						.into_iter()
+						.all(|(key, v)| ["model", "effort"].contains(&key) && v.is_str())
+				}),
+				_ => false,
+			}),
+			"scanner_defaults" => fields.into_iter().all(|(key, v)| {
+				["max_concurrent_files", "max_file_bytes", "per_request_timeout_seconds"]
+					.contains(&key)
+					&& unsigned(v)
+			}),
+			"bkb" => fields.into_iter().all(|(key, v)| key == "api_url" && v.is_str()),
+			"broker" => fields.into_iter().all(|(key, v)| {
+				["request_ceiling", "output_ceiling_bytes", "token_ceiling"].contains(&key)
+					&& unsigned(v)
+			}),
+			_ => false,
+		}
+	})
+}
+fn unsigned(value: &toml::Value) -> bool {
+	value.as_integer().is_some_and(|v| v >= 0)
+}
+fn file_text_policy(value: &toml::Value) -> bool {
+	let allowed = |value: &toml::Value| {
+		value.as_str().is_some_and(|text| crate::worker_client_ingress::oracle::text(text, false))
+	};
+	let Some(sections) = value.as_table() else { return false };
+	sections.iter().all(|(section, value)| {
+		let Some(fields) = section_fields(section, value) else { return false };
+		fields.into_iter().all(|(key, value)| match (section.as_str(), key) {
+			("server", "url") | ("logging", "level") | ("bkb", "api_url") => allowed(value),
+			("agents", "claude" | "codex") => section_fields("agent", value)
+				.is_some_and(|fields| fields.into_iter().all(|(_, value)| allowed(value))),
+			("sandbox", "allowlist") => {
+				value.as_array().is_some_and(|hosts| hosts.iter().all(allowed))
+			},
+			_ => true,
+		})
+	})
+}
+fn check_file_error(data: &[u8], actual: &str) {
+	let text = match std::str::from_utf8(data) {
+		Ok(text) => text,
+		Err(error) => {
+			assert_eq!(actual, error.to_string());
+			return;
+		},
+	};
+	if let Err(error) = toml::from_str::<FileConfig>(text) {
+		let reason =
+			["unknown field", "unknown variant", "invalid type", "invalid value", "missing field"]
+				.into_iter()
+				.find(|reason| error.message().starts_with(reason))
+				.unwrap_or("invalid TOML");
+		let span = error.span().unwrap_or(0..0);
+		assert_eq!(
+			actual,
+			format!("worker_config: {reason} at bytes {}..{}", span.start, span.end),
+			"Config parser error retained source payload or lost fixed metadata"
+		);
+	} else {
+		let Some(rest) = actual.strip_prefix("worker_config: ") else {
+			panic!("unknown Config policy error: {actual}")
+		};
+		assert!(
+			rest == "Bytes"
+				|| rest == "Chars"
+				|| rest
+					.strip_prefix("Character (U+")
+					.and_then(|s| s.strip_suffix(')'))
+					.is_some_and(|s| u32::from_str_radix(s, 16).is_ok()),
+			"Config policy error is not closed"
+		);
+	}
+}
+#[cfg(unix)]
+fn check_arguments(data: &[u8]) {
+	crate::worker_client_ingress::oracle::without_logs(|| check_argument_callbacks(data));
+}
+#[cfg(unix)]
+fn check_argument_callbacks(data: &[u8]) {
+	use std::os::unix::ffi::OsStrExt;
+
+	use fuzzing::{ArgumentCase, ArgumentValue};
+	let original = std::ffi::OsStr::from_bytes(data);
+	let text = std::str::from_utf8(data)
+		.ok()
+		.filter(|value| crate::worker_client_ingress::oracle::text(value, false));
+	let observed = fuzzing::argument(ArgumentCase::Text, original);
+	assert_eq!(
+		observed.as_ref().ok(),
+		text.map(|text| ArgumentValue::Text(text.to_owned())).as_ref(),
+		"actual Config text callback differs"
+	);
+	let url = text
+		.and_then(|text| url::Url::parse(text).ok())
+		.map(|url| ArgumentValue::Url(url.to_string()));
+	assert_eq!(
+		fuzzing::argument(ArgumentCase::Url, original).ok(),
+		url,
+		"actual Config URL callback differs"
+	);
+	assert_eq!(
+		fuzzing::argument(ArgumentCase::Path, original),
+		Ok(ArgumentValue::Path(original.to_owned())),
+		"native Config callback changed bytes or invented a path policy"
+	);
+}
+#[cfg(not(unix))]
+fn check_arguments(_: &[u8]) {}
+
+fn allowed(config: &WorkerConfig) -> bool {
+	let url = url::Url::parse(config.bkb.api_url.for_operation()).ok();
+	let bkb = url.as_ref().is_some_and(|url| {
+		["http", "https"].contains(&url.scheme())
+			&& url.host_str().is_some_and(crate::worker_network_host::allowed)
+			&& url.username().is_empty()
+			&& url.password().is_none()
+	});
+	!config.agents.claude.model.for_operation().trim().is_empty()
+		&& !config.agents.codex.model.for_operation().trim().is_empty()
+		&& ["low", "medium", "high", "xhigh", "max"]
+			.contains(&config.agents.claude.effort.for_operation())
+		&& ["none", "low", "medium", "high", "xhigh"]
+			.contains(&config.agents.codex.effort.for_operation())
+		&& ["trace", "debug", "info", "warn", "error"]
+			.contains(&config.logging.level.for_operation())
+		&& config.cache.max_gb > 0
+		&& config.scanner_defaults.max_concurrent_files > 0
+		&& config.scanner_defaults.max_concurrent_files <= tokio::sync::Semaphore::MAX_PERMITS
+		&& config.scanner_defaults.max_file_bytes > 0
+		&& config.scanner_defaults.per_request_timeout.as_secs() > 0
+		&& (config.sandbox.mode == SandboxNetworkMode::Allowlist
+			|| config.sandbox.allowlist.is_empty())
+		&& config
+			.sandbox
+			.allowlist
+			.iter()
+			.all(|host| crate::worker_network_host::allowed(host.for_operation()))
+		&& bkb
+		&& config.broker.request_ceiling > 0
+		&& config.broker.output_ceiling_bytes > 0
+		&& config.broker.token_ceiling != Some(0)
+}
+
+pub fn worker_config_test<Out: test_logger::Output>(data: &[u8], _out: Out) {
+	do_test(data);
+}
+
+/// # Safety
+/// `data` must point to `datalen` readable bytes for the duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn worker_config_run(data: *const u8, datalen: usize) {
+	// SAFETY: the caller provides readable bytes for the duration of this call.
+	do_test(unsafe { std::slice::from_raw_parts(data, datalen) });
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn positional_sections_preserve_defaults_types_and_fields() {
+		for (section, fields) in [
+			("server", vec!["'https://example.invalid/'"]),
+			("tls", vec!["'ca'", "'cert'", "'key'"]),
+			("cache", vec!["'cache'", "17"]),
+			("runtime", vec!["19", "true"]),
+			("sandbox", vec!["'allowlist'", "['example.invalid']"]),
+			("logging", vec!["'debug'", "true", "false"]),
+			("agents", vec!["'claude'", "'codex'", "['Model-A', 'high']", "['Model-B', 'low']"]),
+			("scanner_defaults", vec!["3", "23", "29"]),
+			("bkb", vec!["'https://example.invalid/api'"]),
+			("broker", vec!["31", "37", "41"]),
+		] {
+			for length in 0..=fields.len() {
+				let document = format!("{section}=[{}]", fields[..length].join(","));
+				let value = toml::from_str(&document).unwrap_or_else(|e| panic!("fixture: {e}"));
+				assert!(super::legacy_shape(&value), "positional section rejected: {document}");
+				super::do_test(document.as_bytes());
+			}
+			let document = format!("{section}=[{},\"ignored\\u0001tail\"]", fields.join(","));
+			let value = toml::from_str(&document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(super::legacy_shape(&value), "surplus positional field rejected: {document}");
+			super::do_test(document.as_bytes());
+		}
+		for document in [
+			"agents={claude=[],codex=['Model-B']}",
+			"agents={claude=['Model-A','high'],codex=[]}",
+			"agents=['auto','claude',{model='Model-A'},['Model-B','low']]",
+			"agents=['auto','codex',[],{effort='high'}]",
+			"[agents]\nclaude=['Model-A']\ncodex=['Model-B','low']",
+			"agents={claude=['Model-A','high',false],codex=['Model-B','low',{}]}",
+		] {
+			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(super::legacy_shape(&value), "nested positional agent rejected: {document}");
+			super::do_test(document.as_bytes());
+		}
+	}
+
+	#[test]
+	fn positional_sections_reject_wrong_types() {
+		for section in [
+			"server",
+			"tls",
+			"cache",
+			"runtime",
+			"sandbox",
+			"logging",
+			"agents",
+			"scanner_defaults",
+			"bkb",
+			"broker",
+		] {
+			let document = format!("{section}=[false]");
+			let value = toml::from_str(&document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(!super::legacy_shape(&value), "invalid positional shape: {document}");
+			super::do_test(document.as_bytes());
+		}
+		for document in [
+			"agents={claude=[false]}",
+			"agents=['auto','auto',[],['model',false]]",
+			"agents=['auto','auto',{unknown='value'}]",
+			"cache=['cache',-1]",
+			"scanner_defaults=[1.0]",
+			"logging=['info',1]",
+			"sandbox=['unknown']",
+			"sandbox=['public',[false]]",
+		] {
+			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(!super::legacy_shape(&value), "invalid positional shape: {document}");
+			super::do_test(document.as_bytes());
+		}
+	}
+
+	#[test]
+	fn positional_enum_fields_preserve_tagged_unit_forms() {
+		for document in [
+			"sandbox=[{public={}},[]]",
+			"sandbox=[{allowlist=[]},['example.invalid']]",
+			"agents=[{auto={}},{claude=[]},[],[]]",
+			"agents={scan={codex={}},verify={auto=[]}}",
+		] {
+			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(super::legacy_shape(&value), "tagged unit form rejected: {document}");
+			super::do_test(document.as_bytes());
+		}
+		for document in [
+			"sandbox=[{public={extra=1}}]",
+			"sandbox=[{public=[false]}]",
+			"sandbox=[{public=false}]",
+			"sandbox=[{public={},allowlist={}}]",
+			"agents=[{unknown={}}]",
+		] {
+			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(!super::legacy_shape(&value), "invalid tagged unit admitted: {document}");
+			super::do_test(document.as_bytes());
+		}
+	}
+
+	#[test]
+	fn positional_text_fields_enforce_policy_and_paths_keep_native_spelling() {
+		for document in [
+			"server=[\"bad\\u0001text\"]",
+			"logging=[\"bad\\u0001text\"]",
+			"bkb=[\"bad\\u0001text\"]",
+			"sandbox=['allowlist',[\"bad\\u0001host\"]]",
+			"agents=['auto','auto',[\"bad\\u0001model\"]]",
+			"agents=['auto','auto',['model',\"bad\\u0001effort\"]]",
+			"agents=['auto','auto',[],[\"bad\\u0001model\"]]",
+			"agents=['auto','auto',[],['model',\"bad\\u0001effort\"]]",
+			"agents={claude=[\"bad\\u0001model\"]}",
+			"agents={codex=['model',\"bad\\u0001effort\"]}",
+		] {
+			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(
+				!super::file_text_policy(&value),
+				"positional text bypassed policy: {document}"
+			);
+			super::do_test(document.as_bytes());
+		}
+		for document in [
+			"tls=[\"ca\\u0001path\",\"cert\\tpath\",\"keys/../Cafe\\u0301%2f.KEY\"]",
+			"cache=[\"./cache:Case%2f\\u0001\",17]",
+			"agents=['auto','auto',[' Café-Model ','high'],['MiXeD%2fModel','low']]",
+		] {
+			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
+			assert!(super::file_text_policy(&value), "native spelling rejected: {document}");
+			super::do_test(document.as_bytes());
+		}
+	}
+
+	#[test]
+	fn bkb_urls_reject_credentials_but_allow_public_paths() {
+		for (url, admitted) in [
+			("https:[::@i", false),
+			("https://user@example.com/api", false),
+			("https://user:password@example.com/api", false),
+			("https://:password@example.com/api", false),
+			("https://user:@example.com/api", false),
+			("https://%75ser@example.com/api", false),
+			("https://example.com/api/v2?format=json", true),
+			("https://example.com/@public?contact=user@example.com", true),
+			("https://@example.com/api", true),
+		] {
+			let mut config = super::WorkerConfig::default();
+			config.bkb.api_url = loupe_worker::config::ConfiguredText::Builtin(url);
+			assert_eq!(
+				super::fuzzing::validate(&config).is_ok(),
+				admitted,
+				"BKB URL policy: {url}"
+			);
+			assert_eq!(super::allowed(&config), admitted, "BKB URL oracle: {url}");
+			super::do_test(format!("[bkb]\napi_url={url:?}\n").as_bytes());
+		}
+	}
+
+	#[test]
+	fn config_file_schema_fields_and_closed_errors_are_independent() {
+		for document in [b"".as_slice(),b"[unknown]\nvalue='DO_NOT_ECHO_SENTINEL'",b"[logging]\nlevel='DO_NOT_ECHO_SENTINEL",b"[logging]\nlevel=17",b"[logging]\nlevel=\"bad\\u0001text\"",b"[server]\nurl='https://user:pat-sentinel@example.invalid/'\n[agents.claude]\nmodel='model'\neffort='high'",b"[tls]\nkey='native\tpath'",b"[sandbox]\nallowlist=['example.invalid']\nnetwork='allowlist'",b"\xff"] { super::do_test(document); }
+		for length in 0..5 {
+			let mut input = b"\xffLOUPECFG".to_vec();
+			input.push(length);
+			super::do_test(&input);
+		}
+	}
+	#[test]
+	fn original_argv_bytes_caps_and_native_path_spelling_survive_actual_callbacks() {
+		for input in [
+			b"ordinary".as_slice(),
+			b"https://user:pat-sentinel@example.invalid/",
+			b"a\0b",
+			b"a\tb",
+			b"\xff",
+			b"e\xcc\x81",
+			b"\xc3\xa9",
+		] {
+			super::check_arguments(input);
+		}
+		for length in [2 * 1024 * 1024 - 1, 2 * 1024 * 1024, 2 * 1024 * 1024 + 1] {
+			super::check_arguments(&vec![b'a'; length]);
+		}
+	}
+}

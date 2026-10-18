@@ -7,10 +7,10 @@ The production path is rootful Podman managed by systemd. The images are
 Docker-compatible, but the production helpers install systemd units and keep
 runtime secrets in one protected env file per host.
 
-When upgrading an existing database to schema v3, complete the
+When upgrading an existing database to schema 6, complete the
 [offline upgrade runbook](../upgrading-schema-v3.md) before using the deploy
-helpers. B1 requires a server redeploy and stopping all workers for migration;
-it does not itself require a worker rebuild or protocol upgrade.
+helpers. Stop all workers for migration and deploy server and worker images
+from the same release. Restart workers only after verifying the new server.
 
 ## Host Prerequisites
 
@@ -31,6 +31,14 @@ The deploy helpers run unattended over SSH, so routine deploys need passwordless
 sudo for the required `podman`, `install`, and `systemctl` commands. For the
 one-time bootstrap, password-prompting sudo is fine, but upload the script first
 so sudo can read the password from a TTY instead of from the script's stdin.
+
+Server deployment waits for `loupe-server listening` in the new systemd
+invocation's journal. This message follows successful migration and listener
+binding. Keep INFO logging enabled for the server binary. The default wait is
+300 seconds; set `LOUPE_SERVER_START_TIMEOUT_SECONDS` to allow a longer upgrade.
+An exited/restarted service or timeout makes deployment fail. A timeout does
+not stop the server or roll back a migration that already committed: inspect
+the journal before restarting workers or attempting recovery.
 
 The worker host does not need host Rust, Cargo, Node, npm, Git, `bubblewrap`,
 `slirp4netns`, `nft`, `ip`, `nsenter`, Claude Code, Codex, or `bkb-mcp`.
@@ -136,6 +144,21 @@ sudo podman run --rm --privileged \
 
 These checks run as the image's worker user and use the same container
 privilege setting as deployment. They do not require provider credentials.
+
+## Server Configuration
+
+To configure worker request budgets or other TOML-only server settings, place
+the server TOML file in the host's persistent server data directory. Make it
+readable by container UID 10001, then set the path as seen inside the container:
+
+```bash
+export LOUPE_CONFIG=/var/lib/loupe/server.toml
+```
+
+The deploy helper persists this setting in `server.conf`, and the launcher
+passes it to the server. The default host directory is
+`/var/lib/loupe-container/server`, mounted at `/var/lib/loupe` in the container.
+The helper does not upload the TOML file; provision it before deploying.
 
 ## Bootstrap Server Secrets
 
