@@ -545,9 +545,13 @@ impl Runner {
 		tokio::spawn(async move {
 			loop {
 				tokio::select! {
+					biased;
 					_ = cancel.cancelled() => return,
-					_ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
-						if client.heartbeat(job_id, &job_capability).await.is_err() {
+					result = async {
+						tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+						client.heartbeat(job_id, &job_capability).await
+					} => {
+						if result.is_err() {
 							tracing::warn!(job_id, "heartbeat failed");
 						}
 					},
@@ -674,6 +678,134 @@ async fn checkout(
 		.await
 		.map_err(|_| CheckoutFailure::Task)??;
 	Ok((CheckedOutWorktree { directory: Arc::new(tmp), pin: None }, head_sha))
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+	use tokio::net::{TcpListener, TcpStream};
+
+	use super::*;
+
+	async fn receive_heartbeat(listener: &TcpListener) -> TcpStream {
+		let (mut socket, _) = listener.accept().await.unwrap();
+		let mut headers = Vec::new();
+		while !headers.ends_with(b"\r\n\r\n") {
+			let mut byte = [0];
+			socket.read_exact(&mut byte).await.unwrap();
+			headers.push(byte[0]);
+			assert!(headers.len() < 8192, "fixture heartbeat headers exceeded cap");
+		}
+		let headers = String::from_utf8(headers).unwrap();
+		assert!(headers.starts_with("POST /v1/jobs/7/heartbeat HTTP/1.1\r\n"));
+		let length = headers
+			.lines()
+			.find_map(|line| {
+				let (name, value) = line.split_once(':')?;
+				name.eq_ignore_ascii_case("content-length")
+					.then(|| value.trim().parse::<usize>().unwrap())
+			})
+			.expect("heartbeat JSON has a content length");
+		assert!(length < 8192, "fixture heartbeat body exceeded cap");
+		let mut body = vec![0; length];
+		socket.read_exact(&mut body).await.unwrap();
+		let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+		assert_eq!(body["protocol_version"], PROTOCOL_VERSION);
+		socket
+	}
+
+	fn client(listener: &TcpListener) -> Arc<ServerClient> {
+		Arc::new(ServerClient::from_parts(
+			reqwest::Client::builder().no_proxy().build().unwrap(),
+			format!("http://{}", listener.local_addr().unwrap()).parse().unwrap(),
+		))
+	}
+
+	#[tokio::test]
+	async fn inflight_heartbeat_stops_when_parent_is_cancelled() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let client = client(&listener);
+		let cache_dir = tempfile::tempdir().unwrap();
+		let cache = Arc::new(RepoCache::new(cache_dir.path().to_owned(), 1024, None).unwrap());
+		let runner = Runner::new(client, cache, Vec::new());
+		let parent = CancellationToken::new();
+		let mut heartbeat = runner.spawn_heartbeat(
+			7,
+			JobCapability::from_secret("fixture-capability"),
+			parent.child_token(),
+		);
+		let received = tokio::time::timeout(
+			HEARTBEAT_INTERVAL + Duration::from_secs(15),
+			receive_heartbeat(&listener),
+		)
+		.await;
+		let Ok(socket) = received else {
+			heartbeat.abort();
+			let _ = heartbeat.await;
+			panic!("fixture never received the full heartbeat request: {received:?}");
+		};
+
+		parent.cancel();
+		let finished = tokio::time::timeout(Duration::from_secs(2), &mut heartbeat).await;
+		if finished.is_err() {
+			heartbeat.abort();
+			let _ = heartbeat.await;
+		}
+		assert!(
+			matches!(finished, Ok(Ok(()))),
+			"in-flight heartbeat did not stop after parent cancellation: {finished:?}",
+		);
+		drop(socket);
+	}
+
+	#[tokio::test]
+	async fn idle_heartbeat_stops_when_parent_is_cancelled() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let cache_dir = tempfile::tempdir().unwrap();
+		let cache = Arc::new(RepoCache::new(cache_dir.path().to_owned(), 1024, None).unwrap());
+		let runner = Runner::new(client(&listener), cache, Vec::new());
+		let parent = CancellationToken::new();
+		let mut heartbeat = runner.spawn_heartbeat(
+			7,
+			JobCapability::from_secret("fixture-capability"),
+			parent.child_token(),
+		);
+		parent.cancel();
+		let finished = tokio::time::timeout(Duration::from_secs(2), &mut heartbeat).await;
+		if finished.is_err() {
+			heartbeat.abort();
+			let _ = heartbeat.await;
+		}
+		assert!(matches!(finished, Ok(Ok(()))), "idle heartbeat failed to stop: {finished:?}");
+	}
+
+	#[tokio::test]
+	async fn heartbeat_decodes_a_successful_response() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let client = client(&listener);
+		let peer = tokio::spawn(async move {
+			let mut socket = receive_heartbeat(&listener).await;
+			let body =
+				format!(r#"{{"protocol_version":{PROTOCOL_VERSION},"lease_expires_at":1234}}"#);
+			let response = format!(
+				"HTTP/1.1 200 OK\r\n{}: {PROTOCOL_VERSION}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+				loupe_proto::PROTOCOL_VERSION_HEADER,
+				body.len(),
+			);
+			socket.write_all(response.as_bytes()).await.unwrap();
+		});
+		let response = tokio::time::timeout(
+			Duration::from_secs(2),
+			client.heartbeat(7, &JobCapability::from_secret("fixture-capability")),
+		)
+		.await;
+		if response.is_err() {
+			peer.abort();
+		}
+		let served = peer.await;
+		assert_eq!(response.unwrap().unwrap().lease_expires_at, 1234);
+		served.unwrap();
+	}
 }
 
 #[cfg(test)]

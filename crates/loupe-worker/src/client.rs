@@ -14,6 +14,10 @@ use loupe_provenance::{Agent, Ingress, Repo, Server, Source, Untrusted};
 use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use reqwest::Url;
 
+/// Bound connection, response headers, and body collection while allowing the
+/// server's maximum 60-second lease poll plus transport headroom.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 mod ingress;
 #[cfg(fuzzing)]
 pub use ingress::fuzz_support;
@@ -76,6 +80,7 @@ impl ServerClient {
 	/// Construct from a pre-built `reqwest::Client`. Useful for tests
 	/// (which want `Client::builder().resolve(...)`) and for callers
 	/// that need to inject their own connector / proxy / DNS overrides.
+	/// Requests still use the worker's total request deadline.
 	pub fn from_parts(http: reqwest::Client, base: Url) -> Self {
 		Self { http, base }
 	}
@@ -290,7 +295,7 @@ impl ServerClient {
 	}
 
 	fn with_protocol(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-		req.header(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION.to_string())
+		req.timeout(REQUEST_TIMEOUT).header(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION.to_string())
 	}
 
 	fn with_job_capability(
@@ -372,6 +377,22 @@ mod tests {
 			.with_job_capability(client.http.post(client.url("/v1/jobs/17/heartbeat")), &capability)
 			.build()
 			.unwrap()
+	}
+
+	#[test]
+	fn protocol_requests_have_a_deadline_with_long_poll_headroom() {
+		let client =
+			ServerClient::from_parts(reqwest::Client::new(), "http://127.0.0.1/".parse().unwrap());
+		let lease =
+			client.with_protocol(client.http.post(client.url("/v1/jobs/lease"))).build().unwrap();
+		for request in [lease, request_with_capability()] {
+			let deadline = request.timeout().expect("worker requests must have a total deadline");
+			assert!(
+				*deadline > std::time::Duration::from_secs(60)
+					&& *deadline <= std::time::Duration::from_secs(90),
+				"deadline must allow the maximum 60-second lease poll and bound stalled peers"
+			);
+		}
 	}
 
 	#[test]
