@@ -304,7 +304,6 @@ impl Runner {
 							tracing::warn!(
 								job_id = env.job_id,
 								finding_id,
-								reviewed_sha = %reviewed_sha.expose(),
 								error = %first_error,
 								"verify revision missing from refreshed cache; re-cloning",
 							);
