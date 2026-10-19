@@ -432,6 +432,7 @@ fn request_policy_fixes_model_and_effort() {
 		ModelBrokerBackend::Codex {
 			model: crate::config::ConfiguredText::Builtin(configured_model),
 			effort: crate::config::ConfiguredText::Builtin(configured_effort),
+			daybreak: crate::config::CodexDaybreak::Default,
 		}
 	};
 	let keys = ["mcp_servers", "model", "other", "output_config", "reasoning", "tools"];

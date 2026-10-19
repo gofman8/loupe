@@ -29,6 +29,37 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_MAX_CONCURRENT_FILES: usize = 8;
 const DEFAULT_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Daybreak policy for Codex jobs. Default leaves the client's selection intact.
+// debug-ok: Closed fieldless configuration variants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexDaybreak {
+	#[default]
+	Default,
+	Off,
+	Blue,
+	Red,
+}
+
+impl CodexDaybreak {
+	pub(crate) fn enabled(self) -> Option<bool> {
+		match self {
+			Self::Default => None,
+			Self::Off => Some(false),
+			Self::Blue | Self::Red => Some(true),
+		}
+	}
+
+	pub(crate) fn access_program(self) -> Option<&'static str> {
+		match self {
+			Self::Default => None,
+			Self::Off => Some("standard"),
+			Self::Blue => Some("daybreak_blue"),
+			Self::Red => Some("daybreak_red"),
+		}
+	}
+}
+
 // debug-ok: Effective configuration contains redacted text/path owners, numeric limits and closed modes.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -82,6 +113,7 @@ pub struct AgentsConfig {
 	pub verify: JobAgent,
 	pub claude: CliModelConfig,
 	pub codex: CliModelConfig,
+	pub codex_daybreak: CodexDaybreak,
 }
 
 // debug-ok: Every content field uses the redacted ConfiguredText formatter.
@@ -112,6 +144,7 @@ pub struct WorkerConfigOverrides {
 	pub claude_effort: Option<ConfiguredText>,
 	pub codex_model: Option<ConfiguredText>,
 	pub codex_effort: Option<ConfiguredText>,
+	pub codex_daybreak: Option<CodexDaybreak>,
 	pub max_concurrent_files: Option<usize>,
 	pub max_file_bytes: Option<u64>,
 	pub per_request_timeout_seconds: Option<u64>,
@@ -220,7 +253,19 @@ struct AgentsSection {
 	#[serde(default)]
 	pub claude: AgentSection,
 	#[serde(default)]
-	pub codex: AgentSection,
+	pub codex: CodexAgentSection,
+}
+
+// debug-ok: Private Config decoder scratch; model/effort are taken at ingress and Daybreak is a closed mode.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexAgentSection {
+	#[serde(default)]
+	pub model: Option<String>,
+	#[serde(default)]
+	pub effort: Option<String>,
+	#[serde(default)]
+	pub daybreak: Option<CodexDaybreak>,
 }
 
 // debug-ok: Private Config decoder scratch; raw Debug is used only by the cfg(fuzzing) compatibility projection.
@@ -342,6 +387,9 @@ impl WorkerConfig {
 		if let Some(v) = decoded.codex_effort {
 			self.agents.codex.effort = v;
 		}
+		if let Some(v) = file.agents.codex.daybreak {
+			self.agents.codex_daybreak = v;
+		}
 		if let Some(v) = file.scanner_defaults.max_concurrent_files {
 			self.scanner_defaults.max_concurrent_files = v;
 		}
@@ -423,6 +471,9 @@ impl WorkerConfig {
 		}
 		if let Some(v) = overrides.codex_effort {
 			self.agents.codex.effort = v;
+		}
+		if let Some(v) = overrides.codex_daybreak {
+			self.agents.codex_daybreak = v;
 		}
 		if let Some(v) = overrides.max_concurrent_files {
 			self.scanner_defaults.max_concurrent_files = v;
@@ -623,6 +674,7 @@ impl Default for WorkerConfig {
 					model: ConfiguredText::Builtin(DEFAULT_CODEX_MODEL),
 					effort: ConfiguredText::Builtin(DEFAULT_CODEX_EFFORT),
 				},
+				codex_daybreak: CodexDaybreak::Default,
 			},
 			scanner_defaults: LlmScannerConfig {
 				max_concurrent_files: DEFAULT_MAX_CONCURRENT_FILES,

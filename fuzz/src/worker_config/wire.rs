@@ -98,7 +98,27 @@ pub struct AgentsSection {
 	#[serde(default)]
 	pub claude: AgentSection,
 	#[serde(default)]
-	pub codex: AgentSection,
+	pub codex: CodexAgentSection,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexDaybreak {
+	Default,
+	Off,
+	Blue,
+	Red,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexAgentSection {
+	#[serde(default)]
+	pub model: Option<String>,
+	#[serde(default)]
+	pub effort: Option<String>,
+	#[serde(default)]
+	pub daybreak: Option<CodexDaybreak>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

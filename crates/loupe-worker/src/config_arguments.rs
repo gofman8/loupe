@@ -25,6 +25,7 @@ impl WorkerOverridesDecoder {
 			claude_effort: args.claude_effort.clone(),
 			codex_model: args.codex_model.clone(),
 			codex_effort: args.codex_effort.clone(),
+			codex_daybreak: args.codex_daybreak,
 			max_concurrent_files: args.max_concurrent_files,
 			max_file_bytes: args.max_file_bytes,
 			per_request_timeout_seconds: args.per_request_timeout_seconds,

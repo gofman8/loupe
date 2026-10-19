@@ -34,7 +34,7 @@ use super::model_broker::{
 	bind_model_into_sandbox, ModelBrokerBackend, ModelBrokerContext, SANDBOX_MODEL_SOCKET,
 };
 use super::{LlmBackend, LlmRequest, LlmResponse};
-use crate::config::{SandboxAgentConfig, SandboxLaunchConfig, SandboxNetworkPolicy};
+use crate::config::{CodexDaybreak, SandboxAgentConfig, SandboxLaunchConfig, SandboxNetworkPolicy};
 use crate::sandbox::{PreparedCommand, SandboxBinary, SandboxBuilder, SandboxPath, SandboxValue};
 
 const BACKEND_ID: &str = "codex-cli";
@@ -192,6 +192,7 @@ impl LlmBackend for CodexCliBackend {
 				ModelBrokerBackend::Codex {
 					model: self.agent.model().model_policy()?,
 					effort: self.agent.effort().model_policy()?,
+					daybreak: self.launch.codex_daybreak(),
 				},
 				req.security.clone(),
 			)
@@ -271,7 +272,8 @@ impl LlmBackend for CodexCliBackend {
 			_ => Vec::new(),
 		};
 
-		let agent_args = codex_invocation_args(&self.agent, &mcp_overrides)?;
+		let agent_args =
+			codex_invocation_args(&self.agent, self.launch.codex_daybreak(), &mcp_overrides)?;
 		#[cfg(test)]
 		let mut cmd = if self.disable_sandbox {
 			sandbox.build(SandboxValue::path(agent_binary.sandbox_path()), &agent_args)
@@ -432,7 +434,7 @@ fn codex_model_provider_overrides() -> [SandboxValue; 5] {
 }
 
 fn codex_invocation_args(
-	agent: &SandboxAgentConfig, mcp_overrides: &[SandboxValue],
+	agent: &SandboxAgentConfig, daybreak: CodexDaybreak, mcp_overrides: &[SandboxValue],
 ) -> Result<Vec<SandboxValue>> {
 	let mut args = vec![
 		SandboxValue::r#static("exec"),
@@ -448,6 +450,19 @@ fn codex_invocation_args(
 	{
 		args.push(SandboxValue::r#static("-c"));
 		args.push(ov);
+	}
+	if let Some(enabled) = daybreak.enabled() {
+		// Both daybreak=true and --cyber-access-program reject custom providers.
+		// Enable the feature, but let Loupe's broker select the access program.
+		let overrides: &[&str] = if enabled {
+			&["features.cli_daybreak=true"]
+		} else {
+			&["daybreak=false", "features.cli_daybreak=false"]
+		};
+		for value in overrides {
+			args.push(SandboxValue::r#static("-c"));
+			args.push(SandboxValue::r#static(value));
+		}
 	}
 	for ov in mcp_overrides {
 		args.push(SandboxValue::r#static("-c"));
@@ -851,6 +866,7 @@ mod tests {
 						effort: crate::config::ConfiguredText::Builtin("xhigh"),
 					},
 				),
+				CodexDaybreak::Default,
 				&[],
 			)
 			.unwrap(),
@@ -889,6 +905,45 @@ mod tests {
 	}
 
 	#[test]
+	fn invocation_applies_only_explicit_daybreak_overrides() {
+		for (mode, daybreak, feature) in [
+			("default", None, None),
+			("off", Some(false), Some(false)),
+			("blue", None, Some(true)),
+			("red", None, Some(true)),
+		] {
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("worker.toml");
+			std::fs::write(&path, format!("[agents.codex]\ndaybreak = \"{mode}\"\n")).unwrap();
+			let config = crate::config::WorkerConfig::load(Some(&path), Default::default())
+				.expect("worker must accept a Codex Daybreak policy");
+			let launch = config.sandbox_launch_config().unwrap();
+			let args = SandboxValue::test_text(
+				codex_invocation_args(launch.codex(), launch.codex_daybreak(), &[]).unwrap(),
+			);
+			let overrides = args
+				.windows(2)
+				.filter(|pair| pair[0] == "-c")
+				.map(|pair| pair[1].as_str())
+				.collect::<Vec<_>>();
+			for (key, enabled) in [("daybreak", daybreak), ("features.cli_daybreak", feature)] {
+				let selected = overrides
+					.iter()
+					.filter(|value| value.starts_with(&format!("{key}=")))
+					.copied()
+					.collect::<Vec<_>>();
+				let expected =
+					enabled.map(|value| format!("{key}={value}")).into_iter().collect::<Vec<_>>();
+				assert_eq!(selected, expected, "Daybreak overrides for mode {mode}");
+			}
+			assert!(
+				!args.iter().any(|value| value == "--cyber-access-program"),
+				"the custom Loupe provider does not support the native program selector"
+			);
+		}
+	}
+
+	#[test]
 	fn invocation_args_include_configured_model_and_effort() {
 		let args = SandboxValue::test_text(
 			codex_invocation_args(
@@ -899,6 +954,7 @@ mod tests {
 						effort: crate::config::ConfiguredText::Builtin("xhigh"),
 					},
 				),
+				CodexDaybreak::Default,
 				&[SandboxValue::r#static("mcp_servers.loupe.env={}")],
 			)
 			.unwrap(),
