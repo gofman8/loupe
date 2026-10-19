@@ -52,8 +52,15 @@ type UpstreamByteStream =
 // debug-ok: Closed provider choice with redacted configured model and effort.
 #[derive(Clone, Debug)]
 pub enum ModelBrokerBackend {
-	Claude { model: crate::config::ConfiguredText, effort: crate::config::ConfiguredText },
-	Codex { model: crate::config::ConfiguredText, effort: crate::config::ConfiguredText },
+	Claude {
+		model: crate::config::ConfiguredText,
+		effort: crate::config::ConfiguredText,
+	},
+	Codex {
+		model: crate::config::ConfiguredText,
+		effort: crate::config::ConfiguredText,
+		daybreak: crate::config::CodexDaybreak,
+	},
 }
 
 impl ModelBrokerBackend {
@@ -73,6 +80,13 @@ impl ModelBrokerBackend {
 	fn effort(&self) -> &str {
 		match self {
 			Self::Claude { effort, .. } | Self::Codex { effort, .. } => effort.for_operation(),
+		}
+	}
+
+	fn access_program(&self) -> Option<&'static str> {
+		match self {
+			Self::Claude { .. } => None,
+			Self::Codex { daybreak, .. } => daybreak.access_program(),
 		}
 	}
 }
@@ -812,24 +826,39 @@ pub(crate) fn apply_request_policy(
 		.and_then(|config| config.get("effort"))
 		.and_then(serde_json::Value::as_str)
 		== Some(backend.effort());
-	if model_matches && effort_matches {
+	let program = backend.access_program();
+	let program_matches = program.is_none_or(|program| {
+		object
+			.get("access_programs")
+			.and_then(|access| access.get("cyber"))
+			.and_then(serde_json::Value::as_str)
+			== Some(program)
+	});
+	if model_matches && effort_matches && program_matches {
 		return Ok(false);
 	}
 	object.insert("model".to_owned(), serde_json::Value::String(backend.model().to_owned()));
-	let effort_config = object
-		.entry(effort_field)
-		.or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-	if !effort_config.is_object() {
-		*effort_config = serde_json::Value::Object(serde_json::Map::new());
+	for (field, key, selected) in
+		[(effort_field, "effort", Some(backend.effort())), ("access_programs", "cyber", program)]
+	{
+		let Some(selected) = selected else {
+			continue;
+		};
+		let config = object
+			.entry(field)
+			.or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+		if !config.is_object() {
+			*config = serde_json::Value::Object(serde_json::Map::new());
+		}
+		#[allow(
+			clippy::expect_used,
+			reason = "The preceding branch replaces every non-object with an object before this access."
+		)]
+		config
+			.as_object_mut()
+			.expect("policy config was made an object")
+			.insert(key.to_owned(), serde_json::Value::String(selected.to_owned()));
 	}
-	#[allow(
-		clippy::expect_used,
-		reason = "The preceding branch replaces every non-object with an object before this access."
-	)]
-	effort_config
-		.as_object_mut()
-		.expect("effort config was made an object")
-		.insert("effort".to_owned(), serde_json::Value::String(backend.effort().to_owned()));
 	Ok(true)
 }
 
@@ -1483,6 +1512,7 @@ mod tests {
 		ModelBrokerBackend::Codex {
 			model: crate::config::ConfiguredText::Builtin("gpt-test"),
 			effort: crate::config::ConfiguredText::Builtin("high"),
+			daybreak: crate::config::CodexDaybreak::Default,
 		}
 	}
 
@@ -1791,6 +1821,63 @@ mod tests {
 	}
 
 	#[test]
+	fn daybreak_policy_covers_modes_and_preserves_unrelated_fields() {
+		use crate::config::CodexDaybreak;
+		for (mode, program) in [
+			(CodexDaybreak::Default, None),
+			(CodexDaybreak::Off, Some("standard")),
+			(CodexDaybreak::Blue, Some("daybreak_blue")),
+			(CodexDaybreak::Red, Some("daybreak_red")),
+		] {
+			let backend = ModelBrokerBackend::Codex {
+				model: crate::config::ConfiguredText::Builtin("gpt-test"),
+				effort: crate::config::ConfiguredText::Builtin("high"),
+				daybreak: mode,
+			};
+			for access in [
+				None,
+				Some(serde_json::Value::Null),
+				Some(serde_json::json!("malformed")),
+				Some(serde_json::json!([])),
+				Some(serde_json::json!({})),
+				Some(serde_json::json!({"cyber":null})),
+				Some(serde_json::json!({"cyber":"standard", "other":"retained"})),
+				Some(serde_json::json!({"cyber":"daybreak_blue", "other":"retained"})),
+				Some(serde_json::json!({"cyber":"daybreak_red", "other":"retained"})),
+			] {
+				for model in ["gpt-test", "wrong-model"] {
+					let mut input = serde_json::json!({"model":model, "reasoning":{"effort":"high", "summary":"auto"}, "input":"keep this", "tools":[{"type":"web_search"}]});
+					if let Some(access) = &access {
+						input["access_programs"] = access.clone();
+					}
+					let body =
+						Bytes::from(format!(" {} \n", serde_json::to_string(&input).unwrap()));
+					let output = enforce_request_policy(&body, &backend)
+						.unwrap_or_else(|_| panic!("valid policy fixture"));
+					let mut expected = input.clone();
+					expected["model"] = "gpt-test".into();
+					if let Some(program) = program {
+						if !expected["access_programs"].is_object() {
+							expected["access_programs"] = serde_json::json!({});
+						}
+						expected["access_programs"]["cyber"] = program.into();
+					}
+					assert_eq!(serde_json::from_slice::<serde_json::Value>(&output).unwrap(), expected, "Daybreak mode {mode:?} must enforce its program and preserve unrelated fields");
+					if input == expected {
+						assert_eq!(output, body, "matching requests must retain original bytes");
+					}
+					assert_eq!(
+						enforce_request_policy(&output, &backend)
+							.unwrap_or_else(|_| panic!("rewritten policy fixture")),
+						output,
+						"Daybreak policy must be idempotent"
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
 	fn request_policy_repairs_each_partial_configuration() {
 		for (backend, field) in
 			[(claude_backend(), "output_config"), (codex_backend(), "reasoning")]
@@ -1876,6 +1963,48 @@ mod tests {
 		let body: serde_json::Value = serde_json::from_slice(&captured[0].body).unwrap();
 		assert_eq!(body["model"], "gpt-test");
 		assert_eq!(body["reasoning"]["effort"], "high");
+		session.finish().await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn daybreak_access_errors_propagate_without_downgrading() {
+		let upstream = FakeUpstream::start("{}").await;
+		let backend = ModelBrokerBackend::Codex {
+			model: crate::config::ConfiguredText::Builtin("gpt-test"),
+			effort: crate::config::ConfiguredText::Builtin("high"),
+			daybreak: crate::config::CodexDaybreak::Blue,
+		};
+		let session = ModelBrokerSession::start(
+			backend,
+			upstream.url.clone(),
+			ModelCredential::openai_api_key("host-secret"),
+			limits(),
+		)
+		.await
+		.unwrap();
+		let mut client = connect(&session).await;
+		for (status, code) in [
+			(StatusCode::FORBIDDEN, "access_program_not_enabled"),
+			(StatusCode::BAD_REQUEST, "invalid_access_program"),
+		] {
+			let error = format!(r#"{{"error":{{"code":"{code}"}}}}"#);
+			upstream.respond_with(status, HeaderMap::new(), error.clone()).await;
+			let response = client
+				.send_request(request(
+					"/v1/responses",
+					r#"{"model":"gpt-test","reasoning":{"effort":"high"},"input":"hello"}"#,
+				))
+				.await
+				.unwrap();
+			assert_eq!(response.status(), status);
+			assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), error);
+		}
+		let captured = upstream.captured().await;
+		assert_eq!(captured.len(), 2, "broker must not retry with standard access");
+		for request in captured {
+			let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+			assert_eq!(body["access_programs"]["cyber"], "daybreak_blue");
+		}
 		session.finish().await.unwrap();
 	}
 

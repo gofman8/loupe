@@ -8,6 +8,8 @@ Sandbox integration tests require Bubblewrap (`bwrap`), `curl`, `mawk`,
 and permission to create unprivileged user namespaces. On Ubuntu, install
 the test dependencies with `sudo apt-get install bubblewrap curl jq mawk`.
 These sandbox tests are mandatory and use scripted clients and local servers.
+The normal gate also tests worker Daybreak deployment and container environment
+forwarding with stub SSH and Podman commands in a private Bubblewrap fixture.
 The CI runner grants `/usr/bin/bwrap` user namespace access through its
 AppArmor profile and checks sandbox startup before compiling the workspace.
 Generator checks compare files before and after regeneration, so correct

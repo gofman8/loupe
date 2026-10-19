@@ -177,6 +177,9 @@ struct RunArgs {
 	/// Codex reasoning effort: none, low, medium, high, or xhigh.
 	#[arg(long, env = "LOUPE_CODEX_EFFORT")]
 	codex_effort: Option<ConfiguredText>,
+	/// Codex Daybreak policy: default, off, blue, or red.
+	#[arg(long, env = "LOUPE_CODEX_DAYBREAK", value_enum)]
+	codex_daybreak: Option<loupe_worker::config::CodexDaybreak>,
 	/// Fleet-wide default for concurrent per-file LLM sessions.
 	#[arg(long, env = "LOUPE_MAX_CONCURRENT_FILES")]
 	max_concurrent_files: Option<usize>,
@@ -683,6 +686,106 @@ mod tests {
 				.collect::<Vec<_>>(),
 			["example.com", "203.0.113.9"]
 		);
+	}
+
+	#[test]
+	fn cli_accepts_each_codex_daybreak_mode() {
+		for mode in ["default", "off", "blue", "red"] {
+			let parsed = Cli::try_parse_from(["loupe-worker", "--codex-daybreak", mode]);
+			assert!(parsed.is_ok(), "Codex Daybreak mode {mode} must be accepted: {parsed:?}");
+			assert!(Cli::try_parse_from(["loupe-worker", "run", "--codex-daybreak", mode]).is_ok());
+		}
+	}
+
+	#[test]
+	fn codex_daybreak_precedence_and_default_reset() {
+		use std::ffi::OsStr;
+
+		use loupe_worker::config::CodexDaybreak;
+		if !test_env::in_env(
+			"tests::codex_daybreak_precedence_and_default_reset",
+			"precedence",
+			&[("LOUPE_CODEX_DAYBREAK", Some(OsStr::new("red"))), ("LOUPE_WORKER_CONFIG", None)],
+		) {
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("worker.toml");
+		std::fs::write(&path, "[agents.codex]\ndaybreak = 'blue'\n").unwrap();
+		assert_eq!(WorkerConfig::default().agents.codex_daybreak, CodexDaybreak::Default);
+		assert_eq!(
+			WorkerConfig::load(Some(&path), Default::default()).unwrap().agents.codex_daybreak,
+			CodexDaybreak::Blue
+		);
+		for (flag, expected) in [
+			(None, CodexDaybreak::Red),
+			(Some("off"), CodexDaybreak::Off),
+			(Some("default"), CodexDaybreak::Default),
+		] {
+			let mut args =
+				vec![OsStr::new("loupe-worker"), OsStr::new("--config"), path.as_os_str()];
+			if let Some(flag) = flag {
+				args.extend([OsStr::new("--codex-daybreak"), OsStr::new(flag)]);
+			}
+			let cli = Cli::try_parse_from(args).unwrap();
+			let config = load_worker_config(&cli.run).unwrap();
+			assert_eq!(config.agents.codex_daybreak, expected);
+			assert_eq!(config.sandbox_launch_config().unwrap().codex_daybreak(), expected);
+		}
+	}
+
+	#[test]
+	fn codex_daybreak_environment_can_reset_file_policy() {
+		use std::ffi::OsStr;
+		if !test_env::in_env(
+			"tests::codex_daybreak_environment_can_reset_file_policy",
+			"reset",
+			&[("LOUPE_CODEX_DAYBREAK", Some(OsStr::new("default"))), ("LOUPE_WORKER_CONFIG", None)],
+		) {
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("worker.toml");
+		std::fs::write(&path, "[agents.codex]\ndaybreak = 'blue'\n").unwrap();
+		let cli = Cli::try_parse_from([
+			OsStr::new("loupe-worker"),
+			OsStr::new("--config"),
+			path.as_os_str(),
+		])
+		.unwrap();
+		assert_eq!(
+			load_worker_config(&cli.run).unwrap().agents.codex_daybreak,
+			loupe_worker::config::CodexDaybreak::Default
+		);
+	}
+
+	#[test]
+	fn codex_daybreak_rejects_invalid_values() {
+		use std::ffi::OsStr;
+		for mode in ["", "true", "BLUE", "unknown"] {
+			if !test_env::in_env(
+				"tests::codex_daybreak_rejects_invalid_values",
+				&format!("invalid-{mode}"),
+				&[("LOUPE_CODEX_DAYBREAK", Some(OsStr::new(mode)))],
+			) {
+				continue;
+			}
+			assert!(
+				Cli::try_parse_from(["loupe-worker"]).is_err(),
+				"invalid environment mode {mode:?}"
+			);
+			assert!(
+				Cli::try_parse_from(["loupe-worker", "--codex-daybreak", mode]).is_err(),
+				"invalid CLI mode {mode:?}"
+			);
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("worker.toml");
+			std::fs::write(&path, format!("[agents.codex]\ndaybreak = '{mode}'\n")).unwrap();
+			assert!(
+				WorkerConfig::load(Some(&path), Default::default()).is_err(),
+				"invalid TOML mode {mode:?}"
+			);
+		}
 	}
 
 	#[test]

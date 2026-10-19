@@ -338,6 +338,28 @@ selection, Claude/Codex model + effort, model-broker ceilings, scanner
 defaults, and BKB API URL. CLI flags and matching env vars override the
 config. API keys and PEM contents still belong in env or secret files.
 
+Codex Daybreak selection is configurable with `[agents.codex].daybreak`,
+`LOUPE_CODEX_DAYBREAK`, or `--codex-daybreak`. CLI flags take precedence over
+environment variables, then TOML. The built-in value is `default`.
+
+| Value | Behavior |
+| --- | --- |
+| `default` | Preserve Codex's Daybreak defaults and outgoing access-program selection. |
+| `off` | Disable the CLI feature and require the `standard` access program. |
+| `blue` | Enable the CLI feature and require `daybreak_blue`. |
+| `red` | Enable the CLI feature and require `daybreak_red`. |
+
+For a deployment using a model compatible with Daybreak Blue, set
+`LOUPE_CODEX_DAYBREAK=blue`. Explicit modes apply to every model request in
+Codex scan and verification jobs through the worker broker. Select a compatible
+model with `LOUPE_CODEX_MODEL`; unavailable or incompatible access produces a
+provider error without falling back to standard. The `default` value also
+resets a lower-priority override; an unset variable inherits the TOML setting.
+Loupe selects the program in its broker because Codex's native `daybreak=true`
+and `--cyber-access-program` selectors reject custom providers such as `loupe`.
+See the [Daybreak API guide](https://developers.openai.com/api/docs/guides/daybreak)
+for model compatibility and access requirements.
+
 Every agent invocation receives a private network namespace. The
 default `[sandbox].network = "public"` policy allows public IPv4 while
 blocking host addresses, connected routes, private/special ranges,

@@ -234,6 +234,8 @@ export CODEX_API_KEY=...
 # Optional, defaults preserve Claude scan + Codex verifier when ready:
 export LOUPE_SCAN_AGENT=auto
 export LOUPE_VERIFY_AGENT=auto
+# Optional: force Daybreak Blue with a compatible configured Codex model:
+# export LOUPE_CODEX_DAYBREAK=blue
 export LOUPE_SANDBOX_NETWORK=public
 # Optional per-job model-broker limits:
 # export LOUPE_BROKER_REQUEST_CEILING=1000
@@ -254,13 +256,21 @@ The worker deploy writes `/etc/loupe-container/worker.secrets.env` with mode
 bundle and whichever LLM credentials are set. It also writes
 `/etc/loupe-container/worker.config.toml` for non-secret worker settings
 (cache, sandbox networking, logging, job-agent selection, scanner defaults,
-BKB API URL, broker ceilings, and Claude/Codex model/effort), mounts it
+BKB API URL, broker ceilings, Claude/Codex model/effort, and Codex Daybreak), mounts it
 read-only into the container, and sets
 `LOUPE_WORKER_CONFIG`. `LOUPE_SCAN_AGENT` and `LOUPE_VERIFY_AGENT` accept
 `auto`, `claude`, or `codex`; explicit `claude`/`codex` selections fail
 startup if that CLI is not authenticated. For Codex, use `CODEX_API_KEY`;
 for compatibility the deploy script also writes `CODEX_API_KEY` from
 `OPENAI_API_KEY` when `CODEX_API_KEY` is absent.
+
+`LOUPE_CODEX_DAYBREAK` accepts `default`, `off`, `blue`, or `red`. Deployment
+omits the setting when unset, preserving Codex defaults. `blue` and `red`
+enable the CLI feature and require the selected program on every brokered
+Codex model request; `off` requires `standard`. The model remains separately
+configured, and incompatible or unavailable access returns a provider error.
+Use `default` to override a previously configured policy. The container
+launcher also forwards this variable when supplied directly on the worker host.
 
 Provider credentials remain in the trusted worker process. Each agent
 sandbox receives a fresh job-scoped model socket, a loopback adapter, and a

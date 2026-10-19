@@ -88,6 +88,7 @@ fn section_fields<'a>(
 		"logging" => &["level", "json", "agent_output"],
 		"agents" => &["scan", "verify", "claude", "codex"],
 		"agent" => &["model", "effort"],
+		"codex" => &["model", "effort", "daybreak"],
 		"scanner_defaults" => {
 			&["max_concurrent_files", "max_file_bytes", "per_request_timeout_seconds"]
 		},
@@ -150,10 +151,17 @@ fn legacy_shape(value: &toml::Value) -> bool {
 			}),
 			"agents" => fields.into_iter().all(|(key, v)| match key {
 				"scan" | "verify" => unit_variant(v, &["auto", "claude", "codex"]),
-				"claude" | "codex" => section_fields("agent", v).is_some_and(|items| {
+				"claude" => section_fields("agent", v).is_some_and(|items| {
 					items
 						.into_iter()
 						.all(|(key, v)| ["model", "effort"].contains(&key) && v.is_str())
+				}),
+				"codex" => section_fields("codex", v).is_some_and(|items| {
+					items.into_iter().all(|(key, v)| match key {
+						"model" | "effort" => v.is_str(),
+						"daybreak" => unit_variant(v, &["default", "off", "blue", "red"]),
+						_ => false,
+					})
 				}),
 				_ => false,
 			}),
@@ -183,8 +191,11 @@ fn file_text_policy(value: &toml::Value) -> bool {
 		let Some(fields) = section_fields(section, value) else { return false };
 		fields.into_iter().all(|(key, value)| match (section.as_str(), key) {
 			("server", "url") | ("logging", "level") | ("bkb", "api_url") => allowed(value),
-			("agents", "claude" | "codex") => section_fields("agent", value)
+			("agents", "claude") => section_fields("agent", value)
 				.is_some_and(|fields| fields.into_iter().all(|(_, value)| allowed(value))),
+			("agents", "codex") => section_fields("codex", value).is_some_and(|fields| {
+				fields.into_iter().all(|(key, value)| key == "daybreak" || allowed(value))
+			}),
 			("sandbox", "allowlist") => {
 				value.as_array().is_some_and(|hosts| hosts.iter().all(allowed))
 			},
@@ -313,6 +324,16 @@ pub unsafe extern "C" fn worker_config_run(data: *const u8, datalen: usize) {
 #[cfg(test)]
 mod tests {
 	#[test]
+	fn codex_daybreak_modes_and_invalid_values() {
+		for mode in ["default", "off", "blue", "red", "", "true", "BLUE", "unknown"] {
+			for agent in ["codex", "claude"] {
+				let document = format!("[agents.{agent}]\ndaybreak='{mode}'\n");
+				super::do_test(document.as_bytes());
+			}
+		}
+	}
+
+	#[test]
 	fn positional_sections_preserve_defaults_types_and_fields() {
 		for (section, fields) in [
 			("server", vec!["'https://example.invalid/'"]),
@@ -343,7 +364,7 @@ mod tests {
 			"agents=['auto','claude',{model='Model-A'},['Model-B','low']]",
 			"agents=['auto','codex',[],{effort='high'}]",
 			"[agents]\nclaude=['Model-A']\ncodex=['Model-B','low']",
-			"agents={claude=['Model-A','high',false],codex=['Model-B','low',{}]}",
+			"agents={claude=['Model-A','high',false],codex=['Model-B','low','default',{}]}",
 		] {
 			let value = toml::from_str(document).unwrap_or_else(|e| panic!("fixture: {e}"));
 			assert!(super::legacy_shape(&value), "nested positional agent rejected: {document}");

@@ -108,6 +108,7 @@ impl SandboxRequiredHosts {
 pub struct SandboxLaunchConfig {
 	claude: SandboxAgentConfig,
 	codex: SandboxAgentConfig,
+	codex_daybreak: super::CodexDaybreak,
 	bkb_api_url: ConfigNonSecret,
 	network: SandboxNetworkPolicy,
 	path: ConfigNonSecret,
@@ -118,6 +119,9 @@ impl SandboxLaunchConfig {
 	}
 	pub fn codex(&self) -> &SandboxAgentConfig {
 		&self.codex
+	}
+	pub fn codex_daybreak(&self) -> super::CodexDaybreak {
+		self.codex_daybreak
 	}
 	pub fn bkb_api_url(&self) -> &ConfigNonSecret {
 		&self.bkb_api_url
@@ -150,6 +154,7 @@ pub(super) fn finalize(config: &WorkerConfig, path: ConfigNonSecret) -> SandboxL
 			model: ConfigNonSecret(Value::Configured(config.agents.codex.model.clone())),
 			effort: ConfigNonSecret(Value::Configured(config.agents.codex.effort.clone())),
 		},
+		codex_daybreak: config.agents.codex_daybreak,
 		bkb_api_url: ConfigNonSecret(Value::Configured(config.bkb.api_url.clone())),
 		network: SandboxNetworkPolicy {
 			mode: config.sandbox.mode,

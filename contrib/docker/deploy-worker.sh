@@ -187,7 +187,15 @@ build_worker_config_file() {
 
 		printf '[agents.codex]\n'
 		printf 'model = %s\n' "$(toml_string "${LOUPE_CODEX_MODEL:-gpt-5.5}")"
-		printf 'effort = %s\n\n' "$(toml_string "${LOUPE_CODEX_EFFORT:-xhigh}")"
+		printf 'effort = %s\n' "$(toml_string "${LOUPE_CODEX_EFFORT:-xhigh}")"
+		if [ -n "${LOUPE_CODEX_DAYBREAK+x}" ]; then
+			case "$LOUPE_CODEX_DAYBREAK" in
+				default|off|blue|red) ;;
+				*) echo 'error: LOUPE_CODEX_DAYBREAK must be default, off, blue, or red' >&2; exit 2 ;;
+			esac
+			printf 'daybreak = %s\n' "$(toml_string "$LOUPE_CODEX_DAYBREAK")"
+		fi
+		printf '\n'
 
 		printf '[broker]\n'
 		printf 'request_ceiling = %s\n' "${LOUPE_BROKER_REQUEST_CEILING:-1000}"

@@ -18,6 +18,9 @@ say() { printf '\n== %s\n' "$*"; }
 say "server container deployment"
 bash contrib/docker/test-server-container.sh
 
+say "worker Daybreak deployment"
+bash contrib/docker/test-worker-daybreak.sh
+
 say "server listener readiness"
 bash contrib/docker/test-server-readiness.sh
 

@@ -149,6 +149,18 @@ async fn claude_reaches_fake_upstream_only_through_the_broker() {
 
 #[tokio::test]
 async fn codex_reaches_fake_upstream_only_through_the_broker() {
+	for (mode, program) in [
+		(None, None),
+		(Some("default"), None),
+		(Some("off"), Some("standard")),
+		(Some("blue"), Some("daybreak_blue")),
+		(Some("red"), Some("daybreak_red")),
+	] {
+		codex_daybreak_broker_case(mode, program).await;
+	}
+}
+
+async fn codex_daybreak_broker_case(mode: Option<&str>, program: Option<&str>) {
 	use std::os::unix::fs::PermissionsExt;
 
 	if !bwrap_present() {
@@ -209,7 +221,8 @@ case "$base_url" in
   http://127.0.0.1:*) ;;
   *) echo missing-loopback-provider >&2; exit 91 ;;
 esac
-exec /usr/bin/curl --silent --show-error --fail-with-body -X POST "${base_url}/responses" -H 'content-type: application/json' -H 'authorization: Bearer loupe-brokered' --data '{"model":"repo-controlled","reasoning":{"effort":"low"},"input":"test"}'
+/usr/bin/curl --silent --show-error --fail-with-body -X POST "${base_url}/responses" -H 'content-type: application/json' -H 'authorization: Bearer loupe-brokered' --data '{"model":"repo-controlled","reasoning":{"effort":"low"},"input":"test"}' || exit 93
+exec /usr/bin/curl --silent --show-error --fail-with-body -X POST "${base_url}/responses" -H 'content-type: application/json' -H 'authorization: Bearer loupe-brokered' --data '{"model":"gpt-5.5","reasoning":{"effort":"xhigh"},"input":"follow-up","access_programs":{"cyber":"daybreak_red"}}'
 "#,
 	)
 	.unwrap();
@@ -221,7 +234,17 @@ exec /usr/bin/curl --silent --show-error --fail-with-body -X POST "${base_url}/r
 		ModelCredential::openai_api_key("host-openai-secret"),
 		ModelBrokerLimits::default(),
 	);
+	let config_path = scratch.path().join("worker.toml");
+	if let Some(mode) = mode {
+		std::fs::write(&config_path, format!("[agents.codex]\ndaybreak = '{mode}'\n")).unwrap();
+	}
+	let config = loupe_worker::config::WorkerConfig::load(
+		mode.map(|_| config_path.as_path()),
+		Default::default(),
+	)
+	.unwrap();
 	let backend = CodexCliBackend::with_bin(fake_codex.as_os_str())
+		.with_launch_config(config.sandbox_launch_config().unwrap())
 		.with_network_config(model_only_allowlist())
 		.with_model_broker_context(context);
 	let response = backend
@@ -243,14 +266,24 @@ exec /usr/bin/curl --silent --show-error --fail-with-body -X POST "${base_url}/r
 		})
 		.await
 		.expect("Codex must run through the real no-egress sandbox and model proxy");
-	assert_eq!(response.text.for_log(), "BROKERED-CODEX");
+	assert_eq!(response.text.for_log(), "BROKERED-CODEXBROKERED-CODEX");
 
 	let captured = captured.lock().await;
-	assert_eq!(captured.len(), 1);
-	assert_eq!(captured[0].headers.get("authorization").unwrap(), "Bearer host-openai-secret");
-	let body: serde_json::Value = serde_json::from_slice(&captured[0].body).unwrap();
-	assert_eq!(body["model"], "gpt-5.5");
-	assert_eq!(body["reasoning"]["effort"], "xhigh");
+	assert_eq!(captured.len(), 2);
+	for (index, request) in captured.iter().enumerate() {
+		assert_eq!(request.headers.get("authorization").unwrap(), "Bearer host-openai-secret");
+		let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+		assert_eq!(body["model"], "gpt-5.5");
+		assert_eq!(body["reasoning"]["effort"], "xhigh");
+		assert_eq!(
+			body["access_programs"]["cyber"].as_str(),
+			program.or(if index == 0 { None } else { Some("daybreak_red") }),
+			"Daybreak mode {mode:?} must reach every upstream request"
+		);
+		if program.is_none() && index == 0 {
+			assert!(body.get("access_programs").is_none());
+		}
+	}
 }
 
 #[tokio::test]
@@ -574,6 +607,20 @@ async fn selected_codex_cli_completes_commands_and_mcp_under_the_worker_policy()
 	let Some(codex) = cli_from_env("LOUPE_TEST_CODEX_BIN") else {
 		return;
 	};
+	for (mode, program) in [
+		("default", None),
+		("off", Some("standard")),
+		("blue", Some("daybreak_blue")),
+		("red", Some("daybreak_red")),
+	] {
+		codex_cli_commands_and_mcp_with_daybreak(&codex, mode, program).await;
+	}
+}
+
+async fn codex_cli_commands_and_mcp_with_daybreak(
+	codex: &std::path::Path, mode: &str, program: Option<&str>,
+) {
+	eprintln!("testing Codex Daybreak mode: {mode}");
 	assert!(bwrap_present(), "the real CLI check requires Bubblewrap");
 	let captured = Arc::new(Mutex::new(Vec::<Captured>::new()));
 	let mcp_headers = Arc::new(Mutex::new(Vec::<HeaderMap>::new()));
@@ -683,7 +730,13 @@ async fn selected_codex_cli_completes_commands_and_mcp_under_the_worker_policy()
 	)
 	.unwrap();
 	let expected_prompt = prompt.expose().to_owned();
+	let config_dir = tempfile::tempdir().unwrap();
+	let config_path = config_dir.path().join("worker.toml");
+	std::fs::write(&config_path, format!("[agents.codex]\ndaybreak = '{mode}'\n")).unwrap();
+	let config =
+		loupe_worker::config::WorkerConfig::load(Some(&config_path), Default::default()).unwrap();
 	let result = CodexCliBackend::with_bin(codex.as_os_str())
+		.with_launch_config(config.sandbox_launch_config().unwrap())
 		.with_network_config(model_only_allowlist())
 		.with_model_broker_context(model)
 		.with_mcp_context(mcp)
@@ -743,6 +796,13 @@ async fn selected_codex_cli_completes_commands_and_mcp_under_the_worker_policy()
 	assert_eq!(findings, json!({"repo_id":7, "findings":[]}));
 	for request in captured.iter() {
 		assert_eq!(request.headers.get("authorization").unwrap(), "Bearer host-openai-secret");
+		if let Some(program) = program {
+			let body: Value = serde_json::from_slice(&request.body).unwrap();
+			assert_eq!(
+				body["access_programs"]["cyber"], program,
+				"Daybreak mode {mode} must reach every real CLI request"
+			);
+		}
 		let body = String::from_utf8_lossy(&request.body);
 		assert!(!body.contains("host-openai-secret") && !body.contains("host-job-capability"));
 	}

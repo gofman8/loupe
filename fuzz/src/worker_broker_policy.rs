@@ -2,6 +2,7 @@
 //! declarations, and a bounded sequence of output reservations without I/O.
 
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
+use loupe_worker::config::CodexDaybreak;
 use loupe_worker::llm::model_broker::{fuzzing, ModelBrokerBackend};
 use serde_json::Value;
 
@@ -11,7 +12,13 @@ pub fn do_test(data: &[u8]) {
 	if data.len() > 128 * 1024 {
 		return;
 	}
-	for claude in [true, false] {
+	for (claude, daybreak, program) in [
+		(true, CodexDaybreak::Default, None),
+		(false, CodexDaybreak::Default, None),
+		(false, CodexDaybreak::Off, Some("standard")),
+		(false, CodexDaybreak::Blue, Some("daybreak_blue")),
+		(false, CodexDaybreak::Red, Some("daybreak_red")),
+	] {
 		let backend = if claude {
 			ModelBrokerBackend::Claude {
 				model: loupe_worker::config::ConfiguredText::Builtin("pinned-model"),
@@ -21,6 +28,7 @@ pub fn do_test(data: &[u8]) {
 			ModelBrokerBackend::Codex {
 				model: loupe_worker::config::ConfiguredText::Builtin("pinned-model"),
 				effort: loupe_worker::config::ConfiguredText::Builtin("high"),
+				daybreak,
 			}
 		};
 		let original = serde_json::from_slice::<Value>(data).ok();
@@ -44,15 +52,21 @@ pub fn do_test(data: &[u8]) {
 				Ok(body.clone()),
 				"policy rewrite is not idempotent"
 			);
-			// Rewriting model/effort must preserve every unrelated request field.
+			// The selected policy must preserve every unrelated request field.
 			let mut expected = original.unwrap_or(Value::Null);
 			expected["model"] = Value::String("pinned-model".into());
 			if !expected[field].is_object() {
 				expected[field] = serde_json::json!({});
 			}
 			expected[field]["effort"] = Value::String("high".into());
+			if let Some(program) = program {
+				if !expected["access_programs"].is_object() {
+					expected["access_programs"] = serde_json::json!({});
+				}
+				expected["access_programs"]["cyber"] = Value::String(program.into());
+			}
 			assert_eq!(value, expected, "policy rewrite changed unrelated fields");
-			if original_matches(data, claude) {
+			if original_matches(data, claude, program) {
 				assert_eq!(body, data, "matching request lost original wire bytes");
 			}
 		}
@@ -86,10 +100,11 @@ pub fn do_test(data: &[u8]) {
 	}
 }
 
-fn original_matches(bytes: &[u8], claude: bool) -> bool {
+fn original_matches(bytes: &[u8], claude: bool, program: Option<&str>) -> bool {
 	serde_json::from_slice::<Value>(bytes).ok().is_some_and(|value| {
 		value["model"] == "pinned-model"
 			&& value[if claude { "output_config" } else { "reasoning" }]["effort"] == "high"
+			&& program.is_none_or(|program| value["access_programs"]["cyber"] == program)
 	})
 }
 

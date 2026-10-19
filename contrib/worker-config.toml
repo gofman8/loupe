@@ -49,6 +49,9 @@ effort = "max"
 [agents.codex]
 model = "gpt-5.5"
 effort = "xhigh"
+# Optional: default preserves Codex selection; off, blue, and red force a program.
+# CLI --codex-daybreak or LOUPE_CODEX_DAYBREAK overrides this setting.
+# daybreak = "default"
 
 [broker]
 # Per-job ceilings enforced by the worker-host model broker.
