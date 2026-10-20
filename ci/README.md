@@ -19,7 +19,11 @@ match `HEAD` and have no untracked additions.
 The existing `test (stable)` CI job invokes the same normal gate, including
 production lint and boundary self-tests, per-crate checks and nightly negative
 API doctests. Its stable toolchain remains the default; nightly is selected
-explicitly for formatting and doctests. The separate fuzz-replay job checks
+explicitly for formatting and doctests. The `test (image Rust)` job reads
+`RUST_VERSION` from `contrib/docker/Dockerfile`, builds the image binaries
+with the same locked release command, and runs all workspace test targets
+with that compiler. This catches compatibility failures hidden by newer
+stable compilers. The separate fuzz-replay job checks
 saved inputs and generated runners. The fuzz job selects one registered target
 at random, excluding smoke, and runs it for five minutes on every push and PR.
 Build time is additional; crashes fail the job and are uploaded as artifacts.

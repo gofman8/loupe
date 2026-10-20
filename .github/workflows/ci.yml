@@ -81,6 +81,44 @@ jobs:
       - name: Check tests and security boundaries
         run: ci/check.sh
 
+  image-rust:
+    name: test (image Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read image Rust version
+        id: image_rust
+        run: |
+          version=$(sed -n 's/^ARG RUST_VERSION=//p' contrib/docker/Dockerfile)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Install image Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.image_rust.outputs.version }}
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor bubblewrap curl jq mawk \
+            cmake libssl-dev make perl pkg-config zlib1g-dev
+      - name: Enable sandbox user namespaces
+        run: |
+          sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          bwrap --unshare-user --unshare-net --unshare-pid --ro-bind / / --dev /dev -- /bin/true
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Build image binaries
+        run: cargo build --release --locked -p loupe-server -p loupe-worker -p loupe-cli
+      - name: Test workspace with image Rust
+        run: cargo test --locked --workspace --all-targets
+
   fuzz-replay:
     name: Fuzz corpus replay
     runs-on: ubuntu-latest

@@ -38,9 +38,10 @@ fn inventory_real_paths_win_across_ingestion_batches() {
 	let db = fixture();
 	db.with_conn(|conn| {
 		let invalid = crate::test_support::inventory_path(b"bad\xff.rs");
+		let invalid_blob = crate::test_support::db_text("invalid-blob").unwrap();
 		let first = i::NewEntry::<loupe_provenance::Repo, loupe_provenance::Db, loupe_provenance::Agent> {
 			path: &invalid,
-			blob_sha: Some(&crate::test_support::db_text("invalid-blob").unwrap()),
+			blob_sha: Some(&invalid_blob),
 			kind: i::EntryKind::Tracked,
 			disposition: i::Disposition::Unresolved,
 			reason: None,
@@ -48,9 +49,10 @@ fn inventory_real_paths_win_across_ingestion_batches() {
 		};
 		crate::test_support::scoped(conn, 1, |scope| i::insert(scope,  11, &[first], 0))?;
 		let real = crate::test_support::inventory_path(b"bad%FF.rs");
+		let real_blob = crate::test_support::db_text("real-blob").unwrap();
 		let entry = i::NewEntry::<loupe_provenance::Repo, loupe_provenance::Db, loupe_provenance::Agent> {
 			path: &real,
-			blob_sha: Some(&crate::test_support::db_text("real-blob").unwrap()),
+			blob_sha: Some(&real_blob),
 			kind: i::EntryKind::Tracked,
 			disposition: i::Disposition::Mapped,
 			reason: None,
@@ -72,12 +74,12 @@ fn inventory_real_paths_win_across_ingestion_batches() {
 		})?;
 		// Once evidence refers to an exclusion, replacing its display alias
 		// would silently change that evidence's target; fail closed instead.
-		let first=i::NewEntry::<loupe_provenance::Repo, loupe_provenance::Db, loupe_provenance::Agent>{path:&invalid,blob_sha: Some(&crate::test_support::db_text("invalid-blob").unwrap()),kind:i::EntryKind::Tracked,disposition:i::Disposition::Unresolved,reason:None,highlighted:false};
+		let first=i::NewEntry::<loupe_provenance::Repo, loupe_provenance::Db, loupe_provenance::Agent>{path:&invalid,blob_sha: Some(&invalid_blob),kind:i::EntryKind::Tracked,disposition:i::Disposition::Unresolved,reason:None,highlighted:false};
 		crate::test_support::scoped(conn, 1, |scope| i::insert(scope, 12,&[first],0))?;
 		conn.execute_batch("INSERT INTO review_units (review_unit_id,generation_id,client_review_unit_key,title,objective,source_refs,created_at) VALUES (31,12,'evidence','title','objective','[]',0);
             INSERT INTO review_unit_results (review_unit_id,commit_sha,profile_version,disposition,inspected_refs,result_payload,result_digest,corroborates_inventory_exclusion_id,created_at)
             SELECT 31,'next',1,'not_applicable','[]','{}',zeroblob(32),inventory_entry_id,0 FROM generation_inventory WHERE generation_id=12;")?;
-		let entry=i::NewEntry::<loupe_provenance::Repo, loupe_provenance::Db, loupe_provenance::Agent>{path:&real,blob_sha: Some(&crate::test_support::db_text("real-blob").unwrap()),kind:i::EntryKind::Tracked,disposition:i::Disposition::Mapped,reason:None,highlighted:true};
+		let entry=i::NewEntry::<loupe_provenance::Repo, loupe_provenance::Db, loupe_provenance::Agent>{path:&real,blob_sha: Some(&real_blob),kind:i::EntryKind::Tracked,disposition:i::Disposition::Mapped,reason:None,highlighted:true};
 		assert!(matches!(crate::test_support::scoped(conn, 1, |scope| i::insert(scope, 12,&[entry],1)),Err(crate::Error::Conflict(crate::Conflict::InventoryPath))));
 		assert!(!i::list(&crate::test_support::scope(conn, 1),12)?[0].path.representable());
 		Ok(())
