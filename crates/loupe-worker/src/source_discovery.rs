@@ -180,12 +180,17 @@ fn default_excludes() -> ScannerList<ScannerExcludePattern> {
 		"file:*_tests.*",
 		"file:*.test.*",
 		"file:*.spec.*",
+		// Basename globs also prune matching Xcode / Swift test directories.
+		"file:*Tests",
+		"file:*Tests.swift",
 		"dir:fuzz",
 		// Build artefacts across ecosystems.
 		"dir:target",
 		"dotnet-output:bin",
 		"dotnet-output:obj",
 		"dir:build",
+		"dir:.build",
+		"dir:DerivedData",
 		"dir:dist",
 		"dir:out",
 		"dir:.next",
@@ -194,6 +199,8 @@ fn default_excludes() -> ScannerList<ScannerExcludePattern> {
 		// Vendored deps.
 		"dir:node_modules",
 		"dir:vendor",
+		"dir:Pods",
+		"dir:Carthage",
 		"dir:.venv",
 		"dir:venv",
 		"dir:env",
@@ -201,6 +208,7 @@ fn default_excludes() -> ScannerList<ScannerExcludePattern> {
 		"dir:__pycache__",
 		"dir:.tox",
 		"dir:.gradle",
+		"dir:.swiftpm",
 		"dir:.mypy_cache",
 		"dir:.pytest_cache",
 	])
@@ -215,6 +223,9 @@ fn default_excludes() -> ScannerList<ScannerExcludePattern> {
 /// - C/C++ roots under directories containing common build-system markers.
 /// - .NET roots under directories containing solution or project files.
 /// - Gradle roots under directories containing build or settings scripts.
+/// - Swift Package roots under directories containing `Package.swift`.
+/// - Xcode roots beside `.xcodeproj` or `.xcworkspace` bundles containing
+///   project or workspace metadata.
 /// - Fallback to the whole worktree if no project roots are discovered.
 ///
 /// All walks honour the extension allowlist, exclude patterns, and
@@ -295,6 +306,7 @@ fn discover_roots(
 	add_marker_roots(workdir, cfg, &mut roots, cancel);
 	add_dotnet_roots(workdir, cfg, &mut roots, cancel);
 	add_gradle_roots(workdir, cfg, &mut roots, cancel);
+	add_apple_roots(workdir, cfg, &mut roots, cancel);
 	roots.roots.sort();
 	roots.roots.dedup();
 	roots.files.sort();
@@ -587,6 +599,34 @@ fn add_gradle_roots(
 		if let Some(dir) = entry.path().parent() {
 			// Source sets can use custom paths, including in child modules.
 			roots.roots.push(dir.to_path_buf());
+		}
+	}
+}
+
+fn add_apple_roots(
+	workdir: &Path, cfg: &ScannerConfig, roots: &mut DiscoveryRoots,
+	cancel: &tokio_util::sync::CancellationToken,
+) {
+	for entry in walkdir::WalkDir::new(workdir)
+		.into_iter()
+		.filter_entry(|entry| !cancel.is_cancelled() && !is_excluded_dir(entry.path(), cfg))
+		.take_while(|_| !cancel.is_cancelled())
+		.filter_map(Result::ok)
+		.filter(|entry| entry.file_type().is_file())
+	{
+		let Some(parent) = entry.path().parent() else {
+			continue;
+		};
+		let root =
+			match (entry.file_name().to_str(), parent.extension().and_then(|ext| ext.to_str())) {
+				(Some("Package.swift"), _) => Some(parent),
+				(Some("project.pbxproj"), Some("xcodeproj"))
+				| (Some("contents.xcworkspacedata"), Some("xcworkspace")) => parent.parent(),
+				_ => None,
+			};
+		if let Some(root) = root {
+			// Targets may live outside Sources/ or the directory named after the project.
+			roots.roots.push(root.to_path_buf());
 		}
 	}
 }
@@ -1231,6 +1271,99 @@ mod tests {
 			rel_names(tmp.path(), walk_source_files(tmp.path(), &cfg)),
 			["android/app/src/main/Keep.kt"],
 			"Gradle roots must apply extension, size, and path filters"
+		);
+	}
+
+	#[test]
+	fn apple_projects_are_discovered_in_mixed_repos() {
+		let tmp = tempfile::tempdir().unwrap();
+		write_crate(
+			tmp.path(),
+			&[
+				("src/lib.rs", "// rust\n"),
+				("ios/Wallet/Wallet.xcodeproj/project.pbxproj", "// project\n"),
+				("ios/Wallet/Wallet/App.swift", "// swift\n"),
+				("ios/Wallet/Wallet/Bridge.mm", "// objective c++\n"),
+				("ios/Wallet/Wallet/TestsSupport.swift", "// production support\n"),
+				("ios/Wallet/Wallet/AppTests.swift", "// test\n"),
+				("ios/Wallet/WalletTests/Helper.swift", "// test helper\n"),
+				("ios/Wallet/WalletUITests/Flow.swift", "// ui test\n"),
+				("ios/Wallet/Pods/Dependency/Package.swift", "// vendored marker\n"),
+				("ios/Wallet/Pods/Dependency/Sources/Dep.swift", "// vendored\n"),
+				("ios/Wallet/Carthage/Checkouts/Dep/Dep.swift", "// vendored\n"),
+				("ios/Wallet/DerivedData/Generated.swift", "// build output\n"),
+				("ios/Wallet/build/Generated.swift", "// build output\n"),
+				("swift/Package.swift", "// package\n"),
+				("swift/Sources/Library/Library.swift", "// swift\n"),
+				("swift/Custom/Other.swift", "// custom target path\n"),
+				("swift/Tests/LibraryTests/Helper.swift", "// test helper\n"),
+				("swift/.build/checkouts/Dep/Package.swift", "// cached marker\n"),
+				("swift/.build/checkouts/Dep/Sources/Dep.swift", "// cached source\n"),
+				("swift/.swiftpm/Generated.swift", "// cache\n"),
+				("both/Package.swift", "// package\n"),
+				("both/Both.xcodeproj/project.pbxproj", "// project\n"),
+				("both/App/Shared.swift", "// discovered once\n"),
+				("workspaces/All.xcworkspace/contents.xcworkspacedata", "// workspace\n"),
+				("workspaces/Shared/Support.m", "// objective c\n"),
+				("nested/a/b/c/d/Module/Package.swift", "// deeply nested package\n"),
+				("nested/a/b/c/d/Module/Sources/Deep.swift", "// swift\n"),
+				("vendor/Apple/Apple.xcodeproj/project.pbxproj", "// excluded marker\n"),
+				("vendor/Apple/Vendored.swift", "// vendored\n"),
+				("nonproject/project.pbxproj", "// not inside an xcodeproj\n"),
+				("nonproject/contents.xcworkspacedata", "// not inside an xcworkspace\n"),
+				("nonproject/Loose.swift", "// no project marker\n"),
+				("unrelated/Loose.swift", "// no project marker\n"),
+			],
+		);
+
+		let names = rel_names(tmp.path(), walk_source_files(tmp.path(), &ScannerConfig::default()));
+		assert_eq!(
+			names,
+			[
+				"both/App/Shared.swift",
+				"both/Package.swift",
+				"ios/Wallet/Wallet/App.swift",
+				"ios/Wallet/Wallet/Bridge.mm",
+				"ios/Wallet/Wallet/TestsSupport.swift",
+				"nested/a/b/c/d/Module/Package.swift",
+				"nested/a/b/c/d/Module/Sources/Deep.swift",
+				"src/lib.rs",
+				"swift/Custom/Other.swift",
+				"swift/Package.swift",
+				"swift/Sources/Library/Library.swift",
+				"workspaces/Shared/Support.m",
+			],
+			"Apple production sources must be selected alongside Rust"
+		);
+	}
+
+	#[test]
+	fn apple_roots_honour_scanner_overrides() {
+		let tmp = tempfile::tempdir().unwrap();
+		write_crate(
+			tmp.path(),
+			&[
+				("src/lib.rs", "// rust\n"),
+				("ios/Wallet.xcodeproj/project.pbxproj", "// project\n"),
+				("ios/App/Keep.swift", "// keep\n"),
+				("ios/App/Skip.m", "// objc\n"),
+				("ios/App/Large.swift", "// exceeds the configured size limit\n"),
+				("ios/App/blocked/Skip.swift", "// skip\n"),
+				("blocked/Package.swift", "// package\n"),
+				("blocked/Sources/Skip.swift", "// skip\n"),
+			],
+		);
+		let cfg = ScannerConfig {
+			max_file_bytes: 16,
+			include_extensions: ScannerList::Builtin(&["swift"]),
+			exclude_path_substrings: ScannerList::Builtin(&["dir:blocked"]),
+			..Default::default()
+		};
+
+		assert_eq!(
+			rel_names(tmp.path(), walk_source_files(tmp.path(), &cfg)),
+			["ios/App/Keep.swift"],
+			"Apple roots must apply extension, size, and path filters"
 		);
 	}
 
