@@ -50,7 +50,7 @@ impl<P: TextPolicy> ScannerList<P> {
 			Self::Configured(values) => values.len(),
 			Self::Leased(values) => values.len(),
 		};
-		(0..len).map(|index| match self {
+		(0..len).map(move |index| match self {
 			Self::Builtin(values) => values[index],
 			Self::Configured(values) => values[index].expose(),
 			Self::Leased(values) => values[index].expose(),
