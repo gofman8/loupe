@@ -36,7 +36,8 @@ Before installing, the host needs:
 
 - **Rust 1.88 or newer**. Nightly is only required if you intend to
   run `cargo fmt` — `rustfmt.toml` uses nightly-only options. CI runs
-  `fmt` on nightly and `clippy`/`test` on stable.
+  `fmt` on nightly and `clippy`/`test` on stable, plus release builds
+  and workspace tests with the container image's Rust version.
 - **`git`** on PATH. `loupe-worker` shells out to `git` for repo
   cloning into the local cache.
 - **Sandbox networking tools** on PATH on every machine running
@@ -896,7 +897,7 @@ worker's config.
 
 ## Continuous integration
 
-GitHub Actions (`.github/workflows/ci.yml`) runs four jobs on every
+GitHub Actions (`.github/workflows/ci.yml`) runs these checks on every
 push and pull request:
 
 - **fmt** — `cargo fmt --all -- --check` on a nightly toolchain.
@@ -904,6 +905,8 @@ push and pull request:
   -- -D warnings` on stable.
 - **test** — `ci/check.sh`: tests, boundary gates, production lints,
   per-crate checks and nightly compile-fail doctests.
+- **image-rust** — build the image binaries and test the workspace with
+  the Rust version from `contrib/docker/Dockerfile`.
 - **fuzz-replay** — replay committed seeds and verify generated runners.
 
 ## Layout

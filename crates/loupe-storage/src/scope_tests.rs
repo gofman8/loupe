@@ -244,13 +244,14 @@ fn unit_creation_transitions_and_carry_forward() {
 			let title = crate::test_support::text("Authentication").unwrap();
 			let objective = crate::test_support::text("Review token refresh").unwrap();
 			let refs = crate::test_support::refs::<32>(vec![]).unwrap();
+			let priority_proposal = payload();
 			let mut new = u::NewUnit {
 				generation_id: 11,
 				client_key: &key,
 				title: &title,
 				objective: &objective,
 				priority: u::Priority::High,
-				priority_proposal: Some(&payload()),
+				priority_proposal: Some(&priority_proposal),
 				source_refs: &refs,
 				depends_on: None,
 				closure_criteria: None,
