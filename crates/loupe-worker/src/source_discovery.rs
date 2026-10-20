@@ -173,6 +173,8 @@ fn default_excludes() -> ScannerList<ScannerExcludePattern> {
 		"dir:test",
 		"dir:examples",
 		"dir:__tests__",
+		"dir:androidTest",
+		"dir:testFixtures",
 		"file:test_*.*",
 		"file:*_test.*",
 		"file:*_tests.*",
@@ -212,6 +214,7 @@ fn default_excludes() -> ScannerList<ScannerExcludePattern> {
 /// - JS/TS roots under directories containing `package.json`.
 /// - C/C++ roots under directories containing common build-system markers.
 /// - .NET roots under directories containing solution or project files.
+/// - Gradle roots under directories containing build or settings scripts.
 /// - Fallback to the whole worktree if no project roots are discovered.
 ///
 /// All walks honour the extension allowlist, exclude patterns, and
@@ -291,6 +294,7 @@ fn discover_roots(
 	add_cargo_roots(workdir, cfg, &mut roots, cancel);
 	add_marker_roots(workdir, cfg, &mut roots, cancel);
 	add_dotnet_roots(workdir, cfg, &mut roots, cancel);
+	add_gradle_roots(workdir, cfg, &mut roots, cancel);
 	roots.roots.sort();
 	roots.roots.dedup();
 	roots.files.sort();
@@ -556,6 +560,34 @@ fn add_dotnet_roots(
 		dotnet_marker_dirs(workdir, cfg, &["sln", "slnx", "csproj", "fsproj", "vbproj"], cancel)
 	{
 		roots.roots.push(marker_dir);
+	}
+}
+
+fn add_gradle_roots(
+	workdir: &Path, cfg: &ScannerConfig, roots: &mut DiscoveryRoots,
+	cancel: &tokio_util::sync::CancellationToken,
+) {
+	for entry in walkdir::WalkDir::new(workdir)
+		.into_iter()
+		.filter_entry(|entry| !cancel.is_cancelled() && !is_excluded_dir(entry.path(), cfg))
+		.take_while(|_| !cancel.is_cancelled())
+		.filter_map(Result::ok)
+		.filter(|entry| {
+			entry.file_type().is_file()
+				&& matches!(
+					entry.file_name().to_str(),
+					Some(
+						"build.gradle"
+							| "build.gradle.kts"
+							| "settings.gradle"
+							| "settings.gradle.kts"
+					)
+				)
+		}) {
+		if let Some(dir) = entry.path().parent() {
+			// Source sets can use custom paths, including in child modules.
+			roots.roots.push(dir.to_path_buf());
+		}
 	}
 }
 
@@ -1120,6 +1152,86 @@ mod tests {
 			assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
 		}
 		assert!(names.iter().all(|n| n != "src/widget.test.ts"), "names: {names:?}");
+	}
+
+	#[test]
+	fn gradle_projects_are_discovered_in_mixed_repos() {
+		let tmp = tempfile::tempdir().unwrap();
+		write_crate(
+			tmp.path(),
+			&[
+				("src/lib.rs", "// rust\n"),
+				("android/build.gradle.kts", "// build\n"),
+				("android/app/build.gradle.kts", "// module\n"),
+				("android/app/src/main/java/app/MainActivity.kt", "// kotlin\n"),
+				("android/app/src/release/java/app/Release.kt", "// variant\n"),
+				("android/app/src/test/java/app/UnitTest.kt", "// test\n"),
+				("android/app/src/androidTest/java/app/DeviceTest.kt", "// test\n"),
+				("android/app/src/testFixtures/java/app/Fixture.kt", "// fixture\n"),
+				("android/app/build/generated/Generated.kt", "// build output\n"),
+				("android/.gradle/cache/Cached.kt", "// cache\n"),
+				("jvm/build.gradle", "// groovy build\n"),
+				("jvm/src/main/java/app/Main.java", "// java\n"),
+				("settings/settings.gradle", "// settings\n"),
+				("settings/client/custom/Client.kt", "// custom source layout\n"),
+				("settings-kts/settings.gradle.kts", "// settings\n"),
+				("settings-kts/core/src/commonMain/kotlin/Shared.kt", "// multiplatform\n"),
+				("nested/a/b/c/d/module/build.gradle.kts", "// deeply nested build\n"),
+				("nested/a/b/c/d/module/src/main/kotlin/Deep.kt", "// kotlin\n"),
+				("vendor/ignored/build.gradle.kts", "// excluded marker\n"),
+				("vendor/ignored/src/main/kotlin/Vendored.kt", "// vendored\n"),
+				("unrelated/Loose.kt", "// no project marker\n"),
+			],
+		);
+
+		let names = rel_names(tmp.path(), walk_source_files(tmp.path(), &ScannerConfig::default()));
+		assert_eq!(
+			names,
+			[
+				"android/app/build.gradle.kts",
+				"android/app/src/main/java/app/MainActivity.kt",
+				"android/app/src/release/java/app/Release.kt",
+				"android/build.gradle.kts",
+				"jvm/src/main/java/app/Main.java",
+				"nested/a/b/c/d/module/build.gradle.kts",
+				"nested/a/b/c/d/module/src/main/kotlin/Deep.kt",
+				"settings/client/custom/Client.kt",
+				"settings-kts/core/src/commonMain/kotlin/Shared.kt",
+				"settings-kts/settings.gradle.kts",
+				"src/lib.rs",
+			],
+			"Gradle production sources must be selected alongside Rust"
+		);
+	}
+
+	#[test]
+	fn gradle_roots_honour_scanner_overrides() {
+		let tmp = tempfile::tempdir().unwrap();
+		write_crate(
+			tmp.path(),
+			&[
+				("src/lib.rs", "// rust\n"),
+				("android/build.gradle.kts", "// build\n"),
+				("android/app/src/main/Keep.kt", "// keep\n"),
+				("android/app/src/main/Skip.java", "// java\n"),
+				("android/app/src/main/Large.kt", "// exceeds the configured size limit\n"),
+				("android/app/src/main/blocked/Skip.kt", "// skip\n"),
+				("blocked/build.gradle.kts", "// build\n"),
+				("blocked/Skip.kt", "// skip\n"),
+			],
+		);
+		let cfg = ScannerConfig {
+			max_file_bytes: 16,
+			include_extensions: ScannerList::Builtin(&["kt"]),
+			exclude_path_substrings: ScannerList::Builtin(&["dir:blocked"]),
+			..Default::default()
+		};
+
+		assert_eq!(
+			rel_names(tmp.path(), walk_source_files(tmp.path(), &cfg)),
+			["android/app/src/main/Keep.kt"],
+			"Gradle roots must apply extension, size, and path filters"
+		);
 	}
 
 	#[test]
