@@ -29,6 +29,7 @@ use reqwest::header::{HeaderValue, InvalidHeaderValue, AUTHORIZATION};
 use reqwest::{StatusCode, Url};
 use ring::rand::SystemRandom;
 use ring::signature::{self, RsaKeyPair};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::PrivateKeyDer;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -75,8 +76,9 @@ impl GithubAppKey {
 	/// GitHub produces PKCS#1 (`BEGIN RSA PRIVATE KEY`); PKCS#8 (`BEGIN
 	/// PRIVATE KEY`) is accepted too for operators who re-encoded it.
 	pub fn from_pem(app_id: u64, pem: &str) -> Result<Self> {
-		let mut bytes = pem.as_bytes();
-		let mut key = rustls_pemfile::private_key(&mut bytes)
+		let mut key = PrivateKeyDer::pem_slice_iter(pem.as_bytes())
+			.next()
+			.transpose()
 			.map_err(|_| anyhow!("invalid GitHub App private key PEM"))?
 			.ok_or_else(|| anyhow!("GitHub App private key PEM contains no private key"))?;
 		let key = PrivateDerGuard(&mut key);

@@ -1,5 +1,5 @@
-//! Keep worker image builds on current agent CLIs without invalidating
-//! the server or Rust build cache. No container engine is required.
+//! Keep image builds on current base images, OS packages and agent CLIs.
+//! No container engine is required.
 
 #![cfg(unix)]
 
@@ -83,10 +83,10 @@ fn run_image_build(
 		.collect()
 }
 
-fn cli_refresh_argument(args: &[String]) -> Option<&str> {
+fn dependency_refresh_argument(args: &[String]) -> Option<&str> {
 	args.windows(2)
 		.filter(|pair| pair[0] == "--build-arg")
-		.find_map(|pair| pair[1].strip_prefix("AGENT_CLI_REFRESH="))
+		.find_map(|pair| pair[1].strip_prefix("DEPENDENCY_REFRESH="))
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn revision_metadata_follows_the_package_layers() {
 }
 
 #[test]
-fn successive_worker_builds_refresh_only_the_cli_install_layer() {
+fn successive_image_builds_refresh_all_dependencies() {
 	use std::os::unix::fs::PermissionsExt;
 
 	let scratch = tempfile::tempdir().unwrap();
@@ -303,22 +303,53 @@ fn successive_worker_builds_refresh_only_the_cli_install_layer() {
 		assert_eq!(builds.len(), 2, "build both the server and worker images");
 		assert!(builds[0].windows(2).any(|pair| pair == ["--target", "loupe-server"]));
 		assert!(builds[1].windows(2).any(|pair| pair == ["--target", "loupe-worker"]));
-		assert!(cli_refresh_argument(&builds[0]).is_none(), "server builds should stay cached");
-		assert!(
-			cli_refresh_argument(&builds[1]).is_some_and(|value| !value.is_empty()),
-			"worker builds must refresh the CLI install layer, even at the same Git revision"
+		for build in builds {
+			assert!(
+				build.iter().any(|arg| arg == "--pull"),
+				"each build must pull current base images"
+			);
+			assert!(
+				dependency_refresh_argument(build).is_some_and(|value| !value.is_empty()),
+				"each image must refresh package layers, even at the same Git revision"
+			);
+		}
+		assert_eq!(
+			dependency_refresh_argument(&builds[0]),
+			dependency_refresh_argument(&builds[1]),
+			"both targets must share freshly built dependency layers within one invocation"
 		);
 		assert!(
 			builds.iter().flatten().all(|arg| !arg.starts_with("--no-cache")),
-			"refreshing CLIs must not discard the Rust or system-package caches"
+			"a blanket cache flush would discard shared layers between the two targets"
 		);
 	}
-	assert_ne!(cli_refresh_argument(&first[1]), cli_refresh_argument(&second[1]));
+	assert_ne!(dependency_refresh_argument(&first[0]), dependency_refresh_argument(&second[0]));
+}
 
+#[test]
+fn dependency_refresh_precedes_package_updates_in_every_stage() {
 	let dockerfile = std::fs::read_to_string(repo_root().join("contrib/docker/Dockerfile"))
-		.expect("read worker Dockerfile");
-	let worker = dockerfile.split(" AS loupe-worker\n").nth(1).unwrap();
-	let refresh = worker.find("ARG AGENT_CLI_REFRESH").expect("declare the CLI cache argument");
-	assert!(worker.find("apt-get install").unwrap() < refresh);
-	assert!(refresh < worker.find("npm install").unwrap());
+		.expect("read Dockerfile");
+	for target in ["app-builder", "bkb-mcp-builder", "loupe-server", "loupe-worker"] {
+		let stage = dockerfile
+			.split(&format!(" AS {target}\n"))
+			.nth(1)
+			.unwrap()
+			.split("\nFROM ")
+			.next()
+			.unwrap();
+		let refresh =
+			stage.find("ARG DEPENDENCY_REFRESH").expect("declare the dependency cache argument");
+		let update = stage.find("apt-get update").expect("refresh package indexes");
+		let upgrade = stage.find("apt-get upgrade -y").expect("upgrade preinstalled OS packages");
+		assert!(
+			refresh < update && update < upgrade,
+			"{target}: refresh cached and preinstalled packages"
+		);
+		for command in ["apt-get install", "npm install", "cargo install"] {
+			if let Some(install) = stage.find(command) {
+				assert!(upgrade < install, "{target}: upgrade before {command}");
+			}
+		}
+	}
 }

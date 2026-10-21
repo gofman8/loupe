@@ -9,8 +9,9 @@ fn v2(f: &Fixture) {
 }
 fn admin(f: &Fixture) -> PeerCert {
 	let bundle = f.state.ca.mint_client("lifecycle-admin").unwrap();
-	let peer =
-		PeerCert(rustls_pemfile::certs(&mut bundle.cert_pem.as_bytes()).next().unwrap().unwrap());
+	let peer = PeerCert(
+		CertificateDer::pem_slice_iter(bundle.cert_pem.as_bytes()).next().unwrap().unwrap(),
+	);
 	registry::bootstrap_admin(&f.state.db, &loupe_tls::cert_fingerprint(peer.0.as_ref()), now())
 		.unwrap();
 	peer

@@ -22,8 +22,9 @@ API doctests. Its stable toolchain remains the default; nightly is selected
 explicitly for formatting and doctests. The `test (image Rust)` job reads
 `RUST_VERSION` from `contrib/docker/Dockerfile`, builds the image binaries
 with the same locked release command, and runs all workspace test targets
-with that compiler. This catches compatibility failures hidden by newer
-stable compilers. The separate fuzz-replay job checks
+with that compiler. Its `minimum` matrix entry reads `rust-version` from the
+workspace manifest and runs the same checks, independently preserving MSRV
+coverage when the image compiler advances. The separate fuzz-replay job checks
 saved inputs and generated runners. The fuzz job selects one registered target
 at random, excluding smoke, and runs it for five minutes on every push and PR.
 Build time is additional; crashes fail the job and are uploaded as artifacts.

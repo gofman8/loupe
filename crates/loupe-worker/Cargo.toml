@@ -58,7 +58,6 @@ walkdir = { workspace = true }
 loupe-worker = { path = ".", features = ["test-support"] }
 axum = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
 # Keep this test dependency path-only: Cargo omits it on publication,
 # avoiding a server/worker cycle in the registry dependency graph.

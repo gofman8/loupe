@@ -8,6 +8,8 @@ use axum::http::{Request, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use loupe_storage::{registry, repos};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde_json::{json, Value};
 use tower::Service;
 
@@ -88,7 +90,7 @@ pub async fn configure(
 pub async fn admin(state: &AppState, finding: i64, action: &str) -> StatusCode {
 	let certificate = state.ca.mint_client(&format!("admin-{action}")).unwrap();
 	let peer = PeerCert(
-		rustls_pemfile::certs(&mut certificate.cert_pem.as_bytes()).next().unwrap().unwrap(),
+		CertificateDer::pem_slice_iter(certificate.cert_pem.as_bytes()).next().unwrap().unwrap(),
 	);
 	registry::bootstrap_admin(&state.db, &loupe_tls::cert_fingerprint(peer.0.as_ref()), 0).unwrap();
 	let mut request = Request::post(format!("/v1/findings/{finding}/{action}"))

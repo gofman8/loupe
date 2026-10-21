@@ -24,6 +24,8 @@ use loupe_storage::secrets::MasterKey;
 use loupe_storage::workers::WorkerKind;
 use loupe_storage::Db;
 use loupe_tls::{cert_fingerprint, Ca, CertBundle};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 
 use crate::config::{ConfiguredHostname, ConfiguredPath};
 
@@ -238,12 +240,11 @@ fn write_secret_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
 
 /// Strip a single CERTIFICATE PEM block back to its DER bytes.
 fn pem_first_cert_der(pem: &str) -> Result<Vec<u8>> {
-	let mut reader = pem.as_bytes();
-	let mut iter = rustls_pemfile::certs(&mut reader);
+	let mut iter = CertificateDer::pem_slice_iter(pem.as_bytes());
 	let der = iter
 		.next()
 		.context("PEM contained no CERTIFICATE block")?
-		.context("rustls-pemfile failed to parse certificate")?;
+		.context("failed to parse certificate")?;
 	Ok(der.to_vec())
 }
 

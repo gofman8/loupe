@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use loupe_tls::{reqwest_client_config, server_config, Ca};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -183,8 +185,9 @@ async fn reqwest_mtls_preserves_http11_and_certificate_chain_order() {
 	let server = ca.mint_server("server", &["localhost".into()]).unwrap();
 	let leaf = ca.mint_client("client").unwrap();
 	let chain = format!("{}{}", leaf.cert_pem, ca.cert_pem());
-	let expected: Vec<_> =
-		rustls_pemfile::certs(&mut chain.as_bytes()).map(|cert| cert.unwrap().to_vec()).collect();
+	let expected: Vec<_> = CertificateDer::pem_slice_iter(chain.as_bytes())
+		.map(|cert| cert.unwrap().to_vec())
+		.collect();
 	let client = client(&chain, leaf.key_pem.expose(), ca.cert_pem()).unwrap();
 	let server = server_config(&server.cert_pem, server.key_pem.expose(), ca.cert_pem()).unwrap();
 	let (response, peer) = exchange(client, server).await;
@@ -223,7 +226,7 @@ async fn reqwest_preserves_tls12_and_tls13() {
 		// A test-only restricted peer proves both protocol versions are enabled
 		// by the shared adapter; no custom certificate verifier is involved.
 		let mut roots = rustls::RootCertStore::empty();
-		for cert in rustls_pemfile::certs(&mut ca.cert_pem().as_bytes()) {
+		for cert in CertificateDer::pem_slice_iter(ca.cert_pem().as_bytes()) {
 			roots.add(cert.unwrap()).unwrap();
 		}
 		let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -233,11 +236,10 @@ async fn reqwest_preserves_tls12_and_tls13() {
 		)
 		.build()
 		.unwrap();
-		let certs = rustls_pemfile::certs(&mut server.cert_pem.as_bytes())
+		let certs = CertificateDer::pem_slice_iter(server.cert_pem.as_bytes())
 			.collect::<std::result::Result<Vec<_>, _>>()
 			.unwrap();
-		let key =
-			rustls_pemfile::private_key(&mut server.key_pem.expose().as_bytes()).unwrap().unwrap();
+		let key = PrivateKeyDer::from_pem_slice(server.key_pem.expose().as_bytes()).unwrap();
 		let config = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[version])
 			.unwrap()

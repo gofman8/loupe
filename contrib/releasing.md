@@ -10,10 +10,14 @@ Run these commands from the workspace root. Use Rust 1.88 or newer for builds;
 the workspace publication commands below use Cargo 1.95 or newer. Formatting
 requires nightly Rust.
 
-The Docker build uses `rust:1.88.0-bookworm` for compilation, then copies the
-binaries into Debian Trixie runtime images (`debian:trixie-slim` for the server
-and `node:22-trixie-slim` for the worker). The runtime images do not need Rust.
-Building directly on a Trixie host still requires Rust 1.88 or newer.
+The Docker build uses the Rust version pinned in `contrib/docker/Dockerfile`
+on Debian Trixie, then copies the binaries into Trixie runtime images
+(`debian:trixie-slim` for the server and `node:24-trixie-slim` for the worker).
+The worker also includes Rust and other toolchains for sandboxed project builds.
+Building Loupe directly still requires Rust 1.88 or newer; that compatibility
+floor is independent of the current compiler shipped in the worker image.
+Use `contrib/docker/build-images.sh` to refresh base images and package layers,
+then scan and smoke-test the actual resulting images before deployment.
 
 ```sh
 export CARGO_TARGET_DIR="$(mktemp -d /tmp/cargo-target-loupe-release-XXXXXX)"

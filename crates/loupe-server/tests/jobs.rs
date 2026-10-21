@@ -18,6 +18,8 @@ use loupe_server::init::run_init;
 use loupe_server::{serve, AppState, Config};
 use loupe_storage::Db;
 use loupe_tls::Ca;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 
 mod common;
 use common::{pem_to_certificate, pem_to_identity};
@@ -451,8 +453,10 @@ async fn bring_up_with_repo_and_worker() -> Fixture {
 		ca_key_pem: common::config_pem(&ca_key_pem),
 	};
 	let db = database.open();
-	let admin_der =
-		rustls_pemfile::certs(&mut init.admin_bundle.cert_pem.as_bytes()).next().unwrap().unwrap();
+	let admin_der = CertificateDer::pem_slice_iter(init.admin_bundle.cert_pem.as_bytes())
+		.next()
+		.unwrap()
+		.unwrap();
 	loupe_storage::registry::bootstrap_admin(
 		&db,
 		&loupe_tls::cert_fingerprint(admin_der.as_ref()),

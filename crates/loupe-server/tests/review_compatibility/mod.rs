@@ -4,8 +4,9 @@ use super::*;
 
 pub(super) fn admin(state: &AppState, offline: &common::offline::OfflineDatabase) -> PeerCert {
 	let bundle = state.ca.mint_client("reset-admin").unwrap();
-	let peer =
-		PeerCert(rustls_pemfile::certs(&mut bundle.cert_pem.as_bytes()).next().unwrap().unwrap());
+	let peer = PeerCert(
+		CertificateDer::pem_slice_iter(bundle.cert_pem.as_bytes()).next().unwrap().unwrap(),
+	);
 	let id = registry::register_worker(
 		&state.db,
 		&common::marked::operator_ingress(),

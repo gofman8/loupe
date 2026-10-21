@@ -41,7 +41,6 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
 loupe-server = { version = "0.1.0", path = "../loupe-server" }
 loupe-storage = { version = "0.1.0", path = "../loupe-storage" }

@@ -250,6 +250,8 @@ mod tls_constructor_controls {
 	use std::time::Duration;
 
 	use loupe_tls::Ca;
+	use rustls::pki_types::pem::PemObject;
+	use rustls::pki_types::CertificateDer;
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 	use super::*;
@@ -332,7 +334,7 @@ mod tls_constructor_controls {
 		let unused = ca.mint_client("unused").unwrap();
 		let roots = format!("{}{}", unused.key_pem.expose(), ca.cert_pem());
 		let chain = format!("{}{}", client.cert_pem, ca.cert_pem());
-		let expected: Vec<_> = rustls_pemfile::certs(&mut chain.as_bytes())
+		let expected: Vec<_> = CertificateDer::pem_slice_iter(chain.as_bytes())
 			.map(|cert| cert.unwrap().to_vec())
 			.collect();
 		let http = application_client(&roots, &chain, client.key_pem.expose()).unwrap();
