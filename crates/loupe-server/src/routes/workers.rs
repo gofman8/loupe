@@ -13,7 +13,8 @@ use axum::Extension;
 use loupe_proto::{RegisterWorkerResponse, PROTOCOL_VERSION};
 use loupe_storage::registry;
 use loupe_tls::cert_fingerprint;
-use rustls_pemfile::certs;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 
 use crate::auth::AuthedWorker;
 use crate::state::AppState;
@@ -80,8 +81,7 @@ pub async fn revoke(
 }
 
 fn first_cert_fingerprint(pem: &str) -> anyhow::Result<[u8; 32]> {
-	let mut reader = pem.as_bytes();
-	let der = certs(&mut reader)
+	let der = CertificateDer::pem_slice_iter(pem.as_bytes())
 		.next()
 		.ok_or_else(|| anyhow::anyhow!("no CERTIFICATE block in minted PEM"))??;
 	Ok(cert_fingerprint(der.as_ref()))

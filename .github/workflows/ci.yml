@@ -18,7 +18,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check all shell scripts
@@ -28,7 +28,7 @@ jobs:
     name: rustfmt (nightly)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install nightly toolchain with rustfmt
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -40,13 +40,13 @@ jobs:
     name: clippy (stable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install stable toolchain with clippy
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -54,7 +54,7 @@ jobs:
     name: test (stable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install nightly formatting and doctest tools
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -77,22 +77,32 @@ jobs:
           sudo apparmor_parser -r /etc/apparmor.d/bwrap
           bwrap --unshare-user --unshare-net --unshare-pid --ro-bind / / --dev /dev -- /bin/true
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
       - name: Check tests and security boundaries
         run: ci/check.sh
 
   image-rust:
-    name: test (image Rust)
+    name: test (${{ matrix.rust }} Rust)
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [image, minimum]
     steps:
-      - uses: actions/checkout@v4
-      - name: Read image Rust version
+      - uses: actions/checkout@v7.0.1
+      - name: Read required Rust version
         id: image_rust
+        env:
+          RUST_SOURCE: ${{ matrix.rust }}
         run: |
-          version=$(sed -n 's/^ARG RUST_VERSION=//p' contrib/docker/Dockerfile)
+          if [ "$RUST_SOURCE" = image ]; then
+            version=$(sed -n 's/^ARG RUST_VERSION=//p' contrib/docker/Dockerfile)
+          else
+            version=$(sed -n 's/^rust-version = "\([^"]*\)"/\1/p' Cargo.toml)
+            if [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then version="$version.0"; fi
+          fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - name: Install image Rust toolchain
+      - name: Install required Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.image_rust.outputs.version }}
@@ -113,10 +123,10 @@ jobs:
           sudo apparmor_parser -r /etc/apparmor.d/bwrap
           bwrap --unshare-user --unshare-net --unshare-pid --ro-bind / / --dev /dev -- /bin/true
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
       - name: Build image binaries
         run: cargo build --release --locked -p loupe-server -p loupe-worker -p loupe-cli
-      - name: Test workspace with image Rust
+      - name: Test workspace with required Rust
         run: cargo test --locked --workspace --all-targets
 
   fuzz-replay:
@@ -126,7 +136,7 @@ jobs:
       RUSTFLAGS: --cfg=fuzzing
       CARGO_TARGET_DIR: /tmp/cargo-target-loupe-fuzz-replay
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - name: Replay helpers and committed inputs
         run: |
@@ -146,7 +156,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: /tmp/cargo-target-loupe-ci-fuzz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked --version 0.13.2
@@ -157,7 +167,7 @@ jobs:
           ci/fuzz.sh "$target" 300
       - name: Preserve crash inputs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fuzz-crashes
           path: fuzz/runners/artifacts/

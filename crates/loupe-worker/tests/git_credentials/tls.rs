@@ -11,6 +11,8 @@ use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::TlsAcceptor;
 
 use super::*;
@@ -40,11 +42,10 @@ impl TlsGit {
 		let ca_path = root.join("test-ca.pem");
 		std::fs::write(&ca_path, ca.cert_pem()).unwrap();
 		git(root, &["config", "--global", "http.sslCAInfo", ca_path.to_str().unwrap()]);
-		let certs = rustls_pemfile::certs(&mut cert.cert_pem.as_bytes())
+		let certs = CertificateDer::pem_slice_iter(cert.cert_pem.as_bytes())
 			.collect::<Result<Vec<_>, _>>()
 			.unwrap();
-		let key =
-			rustls_pemfile::private_key(&mut cert.key_pem.expose().as_bytes()).unwrap().unwrap();
+		let key = PrivateKeyDer::from_pem_slice(cert.key_pem.expose().as_bytes()).unwrap();
 		let config = rustls::ServerConfig::builder()
 			.with_no_client_auth()
 			.with_single_cert(certs, key)

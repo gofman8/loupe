@@ -198,9 +198,28 @@ mod tests {
 	use super::*;
 	use crate::migrations::LATEST_SCHEMA_VERSION;
 
+	fn fts_error_fixture() -> (Db, i64) {
+		// Newer SQLite can skip MATCH evaluation when the scoped join is empty.
+		// Seed a real finding so these tests still exercise the diagnostic boundary.
+		let (db, repo, job) = crate::findings::tests::fixture();
+		db.with_conn(|conn| {
+			Ok(crate::findings::insert_or_ignore(
+				conn,
+				repo,
+				job,
+				&crate::findings::tests::sample("fts-error"),
+				false,
+				0,
+			)?)
+		})
+		.unwrap()
+		.unwrap();
+		(db, repo)
+	}
+
 	#[test]
 	fn sqlite_error_debug_does_not_repeat_scoped_query_input() {
-		let db = Db::open_in_memory(&MasterKey::for_tests()).unwrap();
+		let (db, repo) = fts_error_fixture();
 		let operator = crate::test_support::operator_ingress();
 		let query = crate::findings::SearchQuery::syntax(
 			crate::test_support::text("private_fts_marker:word").unwrap(),
@@ -208,11 +227,17 @@ mod tests {
 		let error = crate::scope::with_operator_repository(
 			&db,
 			&operator,
-			crate::scope::OperatorTarget::Repository(1),
+			crate::scope::OperatorTarget::Repository(repo),
 			|scope| crate::findings::search(scope, &query, 1),
 		)
 		.unwrap_err();
 		assert!(matches!(error, Error::Sqlite(_)), "exercise an actual SQLite FTS error");
+		if let Error::Sqlite(raw) = &error {
+			assert!(
+				raw.to_string().contains("private_fts_marker"),
+				"fixture must produce sensitive diagnostics"
+			);
+		}
 		for diagnostic in [format!("{error:?}"), format!("{error:#?}")] {
 			assert!(
 				!diagnostic.contains("private_fts_marker"),
@@ -224,18 +249,24 @@ mod tests {
 	#[test]
 	fn sqlite_error_display_and_sources_do_not_repeat_scoped_query_input() {
 		use std::error::Error as _;
-		let db = Db::open_in_memory(&MasterKey::for_tests()).unwrap();
+		let (db, repo) = fts_error_fixture();
 		let query = crate::findings::SearchQuery::syntax(
 			crate::test_support::text("private_fts_marker:word").unwrap(),
 		);
 		let error = crate::scope::with_operator_repository(
 			&db,
 			&crate::test_support::operator_ingress(),
-			crate::scope::OperatorTarget::Repository(1),
+			crate::scope::OperatorTarget::Repository(repo),
 			|scope| crate::findings::search(scope, &query, 1),
 		)
 		.unwrap_err();
 		assert!(matches!(error, Error::Sqlite(_)));
+		if let Error::Sqlite(raw) = &error {
+			assert!(
+				raw.to_string().contains("private_fts_marker"),
+				"fixture must produce sensitive diagnostics"
+			);
+		}
 		for diagnostic in [error.to_string(), format!("{error:#}")] {
 			assert!(
 				!diagnostic.contains("private_fts_marker"),

@@ -1,8 +1,10 @@
-ARG RUST_VERSION=1.88.0
+ARG RUST_VERSION=1.99.1
 
-FROM rust:${RUST_VERSION}-bookworm AS app-builder
+FROM rust:${RUST_VERSION}-trixie AS app-builder
 WORKDIR /src
+ARG DEPENDENCY_REFRESH
 RUN apt-get update \
+	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends \
 		ca-certificates \
 		cmake \
@@ -16,21 +18,29 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release --locked -p loupe-server -p loupe-worker -p loupe-cli
 
-FROM rust:${RUST_VERSION}-bookworm AS bkb-mcp-builder
-ARG BKB_MCP_VERSION=0.2.0
-RUN cargo install bkb-mcp --version "${BKB_MCP_VERSION}" --locked
+FROM rust:${RUST_VERSION}-trixie AS bkb-mcp-builder
+ARG DEPENDENCY_REFRESH
+RUN apt-get update \
+	&& apt-get upgrade -y \
+	&& rm -rf /var/lib/apt/lists/*
+ARG BKB_MCP_VERSION=0.3.0
+# Resolve current compatible dependencies when building, just as the agent CLIs
+# below do, never at runtime.
+RUN cargo install bkb-mcp --version "=${BKB_MCP_VERSION}"
 
-FROM rust:${RUST_VERSION}-bookworm AS worker-rust
+FROM rust:${RUST_VERSION}-trixie AS worker-rust
 # Export real binaries and their sysroot, without per-user rustup state.
 RUN rustup component add rustfmt clippy \
 	&& cp -a "$(rustc --print sysroot)" /worker-rust
 
 FROM debian:trixie-slim AS loupe-server
+ARG DEPENDENCY_REFRESH
 # No `ca-certificates` here: loupe-server's only outbound TLS is the
 # GitHub reporter, which uses reqwest + rustls with webpki-roots
 # compiled into the binary (see workspace Cargo.toml). Sendmail is
 # local. Worker / admin mTLS pins the private loupe CA explicitly.
 RUN apt-get update \
+	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends tini \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& useradd --uid 10001 --user-group --home-dir /var/lib/loupe --create-home --shell /usr/sbin/nologin loupe
@@ -52,11 +62,13 @@ EXPOSE 8443
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/loupe-container-entrypoint"]
 CMD ["loupe-server", "serve"]
 
-FROM node:22-trixie-slim AS loupe-worker
+FROM node:24-trixie-slim AS loupe-worker
 ENV NPM_CONFIG_AUDIT=false \
 	NPM_CONFIG_FUND=false \
 	NPM_CONFIG_UPDATE_NOTIFIER=false
+ARG DEPENDENCY_REFRESH
 RUN apt-get update \
+	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends \
 		bubblewrap ca-certificates git iproute2 nftables slirp4netns tini util-linux \
 		autoconf automake bison build-essential cmake curl flex libtool ninja-build patch pkgconf \
@@ -82,9 +94,7 @@ ARG CLAUDE_CODE_VERSION=latest
 ARG CODEX_VERSION=latest
 ARG INSTALL_CLAUDE=1
 ARG INSTALL_CODEX=1
-# build-images.sh changes this argument for each worker build so the CLI
-# install layer is refreshed without rebuilding Rust or system packages.
-ARG AGENT_CLI_REFRESH
+# DEPENDENCY_REFRESH also invalidates this layer on every helper invocation.
 RUN if [ "$INSTALL_CLAUDE" = "1" ]; then npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; fi \
 	&& if [ "$INSTALL_CODEX" = "1" ]; then npm install -g "@openai/codex@${CODEX_VERSION}"; fi
 # See the server stage: revision metadata sits below every package layer.

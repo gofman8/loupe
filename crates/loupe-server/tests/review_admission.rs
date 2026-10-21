@@ -7,6 +7,8 @@ use loupe_proto::PROTOCOL_VERSION;
 use loupe_server::{router, AppState, PeerCert};
 use loupe_storage::registry;
 use loupe_tls::Ca;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde_json::{json, Value};
 use tower::Service;
 
@@ -31,7 +33,7 @@ fn fixture_with_scanner(scanner: &str) -> Fixture {
 	let ca = Ca::new("admission-tests").unwrap();
 	let cert = ca.mint_client("worker").unwrap();
 	let peer =
-		PeerCert(rustls_pemfile::certs(&mut cert.cert_pem.as_bytes()).next().unwrap().unwrap());
+		PeerCert(CertificateDer::pem_slice_iter(cert.cert_pem.as_bytes()).next().unwrap().unwrap());
 	registry::register_worker(
 		&db,
 		&common::marked::operator_ingress(),

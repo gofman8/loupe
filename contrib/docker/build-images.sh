@@ -29,15 +29,16 @@ WORKER_IMAGE="${LOUPE_WORKER_IMAGE:-localhost/loupe-worker:$TAG}"
 DOCKERFILE="${LOUPE_DOCKERFILE:-$ROOT/contrib/docker/Dockerfile}"
 RUST_VERSION="${LOUPE_RUST_VERSION:-}"
 
-build_args=(--build-arg "LOUPE_BUILD_REVISION=$BUILD_REVISION")
+# One stamp refreshes package layers for both targets while allowing them to
+# share the app-builder output. A repeated build must pick up security updates.
+build_args=(--pull --build-arg "DEPENDENCY_REFRESH=$(date +%s)-$$"
+	--build-arg "LOUPE_BUILD_REVISION=$BUILD_REVISION")
 if [ -n "$RUST_VERSION" ]; then
 	build_args+=(--build-arg "RUST_VERSION=$RUST_VERSION")
 fi
 
 "$ENGINE" build "${build_args[@]}" -f "$DOCKERFILE" --target loupe-server -t "$SERVER_IMAGE" "$ROOT" >&2
-# A mutable npm tag alone does not invalidate the image build cache.
-# Refresh only the CLI install layer, including rebuilds of the same commit.
-"$ENGINE" build "${build_args[@]}" --build-arg "AGENT_CLI_REFRESH=$(date +%s)-$$" \
+"$ENGINE" build "${build_args[@]}" \
 	-f "$DOCKERFILE" --target loupe-worker -t "$WORKER_IMAGE" "$ROOT" >&2
 
 printf 'export LOUPE_SERVER_IMAGE=%q\n' "$SERVER_IMAGE"

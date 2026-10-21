@@ -50,7 +50,7 @@ impl<E: From<Error>> From<Error> for Failure<E> {
 				| rusqlite::Error::InvalidColumnType(..)
 				| rusqlite::Error::IntegralValueOutOfRange(..)
 				| rusqlite::Error::QueryReturnedNoRows
-				| rusqlite::Error::Utf8Error(_),
+				| rusqlite::Error::Utf8Error(..),
 			) => invalid(),
 			other => Self::Unexpected(other.into()),
 		}

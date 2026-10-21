@@ -441,6 +441,9 @@ fn parse_master_key_hex(s: &str) -> Result<MasterKey> {
 
 #[cfg(test)]
 mod tests {
+	use rustls::pki_types::pem::PemObject;
+	use rustls::pki_types::CertificateDer;
+
 	use super::*;
 
 	#[test]
@@ -464,12 +467,12 @@ mod tests {
 			InitOptions { persist_secrets: false },
 		)
 		.unwrap();
-		let leaf = rustls_pemfile::certs(&mut out.server_bundle.cert_pem.as_bytes())
+		let leaf = CertificateDer::pem_slice_iter(out.server_bundle.cert_pem.as_bytes())
 			.next()
 			.unwrap()
 			.unwrap();
 		let mut roots = rustls::RootCertStore::empty();
-		let ca = rustls_pemfile::certs(&mut out.ca_cert_pem.expose().as_bytes())
+		let ca = CertificateDer::pem_slice_iter(out.ca_cert_pem.expose().as_bytes())
 			.next()
 			.unwrap()
 			.unwrap();

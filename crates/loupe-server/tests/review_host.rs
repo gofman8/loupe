@@ -14,6 +14,8 @@ use loupe_server::{router, AppState, PeerCert};
 use loupe_storage::registry;
 use loupe_tls::Ca;
 use rusqlite::params;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde_json::{json, Value};
 use tower::Service;
 
@@ -70,7 +72,9 @@ fn fixture() -> Fixture {
 	let ca = Ca::new("host-tests").unwrap();
 	let cert = |name| {
 		let bundle = ca.mint_client(name).unwrap();
-		PeerCert(rustls_pemfile::certs(&mut bundle.cert_pem.as_bytes()).next().unwrap().unwrap())
+		PeerCert(
+			CertificateDer::pem_slice_iter(bundle.cert_pem.as_bytes()).next().unwrap().unwrap(),
+		)
 	};
 	let peer = cert("host");
 	let other_peer = cert("other");

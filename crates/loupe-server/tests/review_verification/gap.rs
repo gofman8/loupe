@@ -17,6 +17,8 @@ use loupe_storage::{
 	terminal_payloads, StoredEvidence,
 };
 use rusqlite::params;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde_json::json;
 use tower::Service;
 
@@ -51,7 +53,7 @@ async fn committed_verification_without_dispatch_is_recovered_only_by_admin_retr
 	let ca = Arc::new(loupe_tls::Ca::new("gap").unwrap());
 	let certificate = ca.mint_client("gap-worker").unwrap();
 	let peer = crate::PeerCert(
-		rustls_pemfile::certs(&mut certificate.cert_pem.as_bytes()).next().unwrap().unwrap(),
+		CertificateDer::pem_slice_iter(certificate.cert_pem.as_bytes()).next().unwrap().unwrap(),
 	);
 	let fingerprint = loupe_tls::cert_fingerprint(peer.0.as_ref());
 	let mut offline = common::offline::OfflineDatabase::new();

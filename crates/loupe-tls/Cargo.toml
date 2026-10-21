@@ -18,7 +18,6 @@ loupe-provenance = { path = "../loupe-provenance" }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["zeroize"] }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 sha2 = { workspace = true }
 webpki-roots = { workspace = true }
 zeroize = { workspace = true }

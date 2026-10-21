@@ -7,6 +7,8 @@ use futures_util::{stream, StreamExt};
 use loupe_proto::{PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER};
 use loupe_storage::{registry, Db};
 use loupe_tls::{cert_fingerprint, Ca};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use tower::ServiceExt;
 
 use crate::{router, AppState, PeerCert};
@@ -53,7 +55,7 @@ fn identities() -> &'static Identities {
 		let ca = Arc::new(Ca::new("transport-fuzz-ca").expect("fixture CA"));
 		let peers = ["worker", "operator", "unknown", "revoked"].map(|name| {
 			let bundle = ca.mint_client(name).expect("fixture certificate");
-			let cert = rustls_pemfile::certs(&mut bundle.cert_pem.as_bytes())
+			let cert = CertificateDer::pem_slice_iter(bundle.cert_pem.as_bytes())
 				.next()
 				.expect("certificate block")
 				.expect("certificate DER");

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use loupe_provenance::Secret;
-use rustls::pki_types::pem::{self, SectionKind};
+use rustls::pki_types::pem::{self, PemObject, SectionKind};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
@@ -166,8 +166,9 @@ fn scan_certs(input: &str) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn parse_key(pem: &str) -> Result<Secret<OwnedDer>> {
-	let mut reader = pem.as_bytes();
-	let key = rustls_pemfile::private_key(&mut reader)
+	let key = PrivateKeyDer::pem_slice_iter(pem.as_bytes())
+		.next()
+		.transpose()
 		.map_err(|_| anyhow::anyhow!("invalid private key PEM"))?
 		.context("no PRIVATE KEY block found in PEM input")?;
 	Ok(Secret::new(OwnedDer(key)))
@@ -231,10 +232,10 @@ mod tests {
 				format!("{}{extra}{}", first.cert_pem(), second.cert_pem()),
 				format!("{}{}{extra}", first.cert_pem(), second.cert_pem()),
 			] {
-				let legacy = rustls_pemfile::certs(&mut mixed.as_bytes())
+				let filtered = CertificateDer::pem_slice_iter(mixed.as_bytes())
 					.collect::<std::result::Result<Vec<_>, _>>()
 					.unwrap();
-				assert_eq!(legacy, expected);
+				assert_eq!(filtered, expected);
 				assert_eq!(parse_certs(&mixed).unwrap(), expected);
 				let mut expected_roots = RootCertStore::empty();
 				for cert in &expected {

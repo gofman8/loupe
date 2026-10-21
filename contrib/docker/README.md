@@ -59,16 +59,29 @@ the network policy, or the prompts' restrictions on dependency sources.
 Jobs that need downloaded dependencies also need an explicit source policy
 and either permitted download hosts or an approved offline cache.
 
-Worker image builds default to the npm `latest` releases of Claude Code and
-Codex. `build-images.sh` refreshes their install layer on every build while
-retaining the Rust and system-package caches. Rebuild and deploy the worker
-image to pick up new CLI releases; restarting or redeploying an existing
-image keeps its installed versions. Running agents do not auto-update.
+`build-images.sh` pulls current base images and refreshes OS packages on every
+build, including upgrades of packages already present in the base. Worker
+images track Node's supported LTS line and the npm `latest` releases of Claude
+Code and Codex. The pinned BKB MCP release is built with current compatible
+dependencies rather than freezing its published lockfile. Running containers do
+not auto-update: rebuild and deploy both images to pick up security fixes.
+Restarting or redeploying an existing image keeps its installed versions.
 
-For manual builds, pass a fresh `--build-arg AGENT_CLI_REFRESH="$(date +%s)-$$"`
-to avoid reusing a cached CLI install. The `CLAUDE_CODE_VERSION` and
+Both targets share one dependency-refresh stamp, allowing reuse of the freshly
+built Rust binaries within that invocation. Refreshing builder packages also
+invalidates the downstream compilation cache between invocations; security
+updates take precedence over that cache. Host OS/kernel/Podman updates remain
+separate operator maintenance and are not performed by these helpers.
+
+For manual builds, use `--pull` and pass a fresh
+`--build-arg DEPENDENCY_REFRESH="$(date +%s)-$$"` for both targets.
+The `CLAUDE_CODE_VERSION` and
 `CODEX_VERSION` build arguments still accept explicit versions for rollback
 or diagnosis. Retain a known-good image for rollback when tracking `latest`.
+Before deployment, inspect the installed versions, scan both resulting images
+with a current vulnerability database, and run the sandbox/toolchain checks
+below. A successful Rust dependency audit does not cover OS packages or every
+bundled native library.
 
 Set `LOUPE_TEST_CLAUDE_BIN` and `LOUPE_TEST_CODEX_BIN` to the candidate
 executables when running `cargo test -p loupe-worker --test model_broker`.

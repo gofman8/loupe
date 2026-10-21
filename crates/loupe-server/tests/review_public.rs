@@ -12,6 +12,8 @@ use loupe_server::review::policy::ReviewPolicy;
 use loupe_server::{router, AppState, PeerCert};
 use loupe_storage::registry;
 use loupe_tls::Ca;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde_json::{json, Value};
 use tower::Service;
 
@@ -46,7 +48,7 @@ fn fixture(mut offline: common::offline::OfflineDatabase, policy: ReviewPolicy) 
 		.map(|i| {
 			let bundle = ca.mint_client(&format!("worker-{i}")).unwrap();
 			PeerCert(
-				rustls_pemfile::certs(&mut bundle.cert_pem.as_bytes()).next().unwrap().unwrap(),
+				CertificateDer::pem_slice_iter(bundle.cert_pem.as_bytes()).next().unwrap().unwrap(),
 			)
 		})
 		.collect();
