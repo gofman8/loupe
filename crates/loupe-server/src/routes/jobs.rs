@@ -22,8 +22,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::{Extension, Json};
 use loupe_core::{JobKind, JobState};
 use loupe_proto::{
-	CompleteOutcome, HeartbeatResponse, JobCapability, JobInfo, LeaseEnvelope, LeasePayload,
-	LeaseResponse, ScanResponse, LLM_CODE_REVIEW_SCANNER_ID, PROTOCOL_VERSION,
+	CompleteOutcome, HeartbeatResponse, JobInfo, LeaseResponse, ScanResponse,
+	LLM_CODE_REVIEW_SCANNER_ID, PROTOCOL_VERSION,
 };
 use loupe_provenance::{Agent, Db, Operator};
 use loupe_storage::jobs::{self, JobRow, QueuedJob, DEFAULT_LEASE_SECONDS};
@@ -300,127 +300,67 @@ pub(crate) const DEFAULT_VALIDATING_BUDGET_SECS: i64 = 7 * 24 * 60 * 60;
 pub async fn lease(
 	State(state): State<AppState>, Extension(worker): Extension<AuthedWorker>,
 	body: crate::ingress::WorkerJson,
-) -> Result<axum::response::Response, (StatusCode, String)> {
-	let req = crate::ingress::jobs::LeaseRequestDecoder::decode(body)?;
-	check_version(req.protocol_version)?;
-	// Any `verify:*` capability makes the worker eligible for verify jobs;
-	// the tag suffix does not restrict which findings it can verify.
-	let accepts_verify = req.capabilities.iter().any(|c| c.expose().starts_with("verify:"));
+) -> axum::response::Response {
+	use axum::response::IntoResponse;
+	use loupe_proto::review_lease::ReviewCapability;
 
-	if let Some(env) = try_lease(&state, worker.id(), accepts_verify)? {
-		return super::credential_response::lease(&LeaseResponse::Lease(Box::new(env)));
+	use crate::review::http::ApiError;
+	let req = match crate::ingress::jobs::LeaseRequestDecoder::decode(body) {
+		Ok(req) => req,
+		Err(error) => return error.into_response(),
+	};
+	if let Err(error) = check_version(req.protocol_version) {
+		return error.into_response();
 	}
-	if req.wait_seconds == 0 {
-		return super::credential_response::lease(&LeaseResponse::Empty {
+	let mut legacy = vec![JobKind::Scan];
+	if req.capabilities.iter().any(|c| c.expose().starts_with("verify:")) {
+		legacy.push(JobKind::Verify);
+	}
+	let phases: Vec<_> = req
+		.review_capabilities
+		.as_slice()
+		.iter()
+		.map(|cap| match cap {
+			ReviewCapability::Survey => JobKind::Survey,
+			ReviewCapability::Drilldown => JobKind::Drilldown,
+			ReviewCapability::Verify => JobKind::Verify,
+		})
+		.collect();
+	let mut repairs_left = loupe_storage::admission_claim::MAX_REPAIRS;
+	let empty = || {
+		super::credential_response::lease(&LeaseResponse::Empty {
 			protocol_version: PROTOCOL_VERSION,
-		});
-	}
-
-	let wait = std::time::Duration::from_secs(req.wait_seconds.min(MAX_LEASE_WAIT_SECS) as u64);
-	let deadline = tokio::time::Instant::now() + wait;
+		})
+		.unwrap_or_else(|_| {
+			ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error").into_response()
+		})
+	};
+	let deadline = tokio::time::Instant::now()
+		+ std::time::Duration::from_secs(u64::from(req.wait_seconds.min(MAX_LEASE_WAIT_SECS)));
 	loop {
-		// Subscribe to notify *before* the lease check so we can't
-		// miss a notify_waiters fired between our two attempts.
+		// Subscribe before checking; repairs are shared by the entire long poll.
 		let notified = state.job_arrived.notified();
 		tokio::pin!(notified);
-
-		if let Some(env) = try_lease(&state, worker.id(), accepts_verify)? {
-			return super::credential_response::lease(&LeaseResponse::Lease(Box::new(env)));
+		match crate::review::scheduler::claim_for_worker(
+			&state,
+			&worker,
+			&legacy,
+			&phases,
+			&mut repairs_left,
+		) {
+			Ok(Some(response)) => return response,
+			Ok(None) => {},
+			Err(error) => return error.into_response(),
 		}
-
+		if repairs_left == 0 || req.wait_seconds == 0 {
+			return empty();
+		}
 		let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
 		if remaining.is_zero() {
-			return super::credential_response::lease(&LeaseResponse::Empty {
-				protocol_version: PROTOCOL_VERSION,
-			});
+			return empty();
 		}
-		tokio::select! {
-			_ = &mut notified => {
-				// New job — loop and try the lease again.
-			}
-			_ = tokio::time::sleep(remaining) => {
-				return super::credential_response::lease(&LeaseResponse::Empty { protocol_version: PROTOCOL_VERSION });
-			}
-		}
+		tokio::select! {_=&mut notified=>{},_=tokio::time::sleep(remaining)=>return empty()}
 	}
-}
-
-/// One non-blocking lease attempt. `None` means no eligible job is
-/// queued. `accepts_verify` gates verify-kind jobs.
-fn try_lease(
-	state: &AppState, worker_id: i64, accepts_verify: bool,
-) -> Result<Option<LeaseEnvelope<Agent, Db>>, (StatusCode, String)> {
-	let now = now_secs();
-	let (job_capability, job_capability_hash) = job_capability::issue();
-	let kinds: Vec<JobKind<Db>> =
-		if accepts_verify { vec![JobKind::Scan, JobKind::Verify] } else { vec![JobKind::Scan] };
-	let row = crate::review::scheduler::claim_for_worker(
-		state,
-		worker_id,
-		&kinds,
-		now,
-		&job_capability_hash,
-	)
-	.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("lease: {e}")))?;
-	let Some(row) = row else { return Ok(None) };
-	let env = build_lease_envelope(row, job_capability)
-		.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("envelope: {e}")))?;
-	Ok(Some(env))
-}
-
-fn build_lease_envelope(
-	selected: loupe_storage::scheduler::ClaimedLease, job_capability: JobCapability,
-) -> anyhow::Result<LeaseEnvelope<Agent, Db>> {
-	let repo = selected.repository;
-	let row = selected.claimed.job;
-	// No clone-side credential is stored separately. We deliberately do
-	// not ship the reporting PAT to the worker.
-	let github_pat = None;
-
-	let payload = match row.kind {
-		JobKind::Scan => LeasePayload::Scan { since_sha: row.since_sha.clone() },
-		JobKind::Verify => {
-			let target_id = row
-				.target_finding_id
-				.ok_or_else(|| anyhow::anyhow!("verify job missing target_finding_id"))?;
-			let finding_row = selected
-				.target
-				.ok_or_else(|| anyhow::anyhow!("verify target finding not found"))?;
-			if finding_row.repo_id != row.repo_id {
-				anyhow::bail!(
-					"verify target finding {} belongs to repo {}, not job repo {}",
-					target_id,
-					finding_row.repo_id,
-					row.repo_id
-				);
-			}
-			let reviewed_sha = selected.reviewed_revision;
-			let finding = finding_row.into_finding();
-			LeasePayload::Verify { finding_id: target_id, finding: Box::new(finding), reviewed_sha }
-		},
-		JobKind::Survey | JobKind::Drilldown | JobKind::Unknown(_) => {
-			anyhow::bail!("unsupported job kind in legacy lease envelope");
-		},
-	};
-
-	Ok(LeaseEnvelope {
-		protocol_version: PROTOCOL_VERSION,
-		job_id: row.id,
-		job_capability,
-		repo_id: repo.id,
-		repo: loupe_core::RepoSpec {
-			host: repo.host.clone(),
-			owner: repo.owner.clone(),
-			repo: repo.repo.clone(),
-			clone_url: repo.clone_url.clone(),
-			branch: repo.default_branch.clone(),
-		},
-		head_branch: repo.default_branch,
-		lease_expires_at: row.lease_expires_at.unwrap_or(0),
-		scanner_config: repo.scanner_config,
-		github_pat,
-		payload,
-	})
 }
 
 /// `POST /v1/jobs/:id/heartbeat` — worker extends its lease.
@@ -516,7 +456,9 @@ pub async fn submit_findings(
 fn storage_write_error(context: &str, error: loupe_storage::Error) -> (StatusCode, String) {
 	use loupe_storage::Error;
 	let status = match &error {
-		Error::Validation(_) | Error::UnknownPaths(_) => StatusCode::BAD_REQUEST,
+		Error::Validation(_) | Error::ReviewPayload(_) | Error::UnknownPaths(_) => {
+			StatusCode::BAD_REQUEST
+		},
 		Error::Conflict(_) => StatusCode::CONFLICT,
 		Error::Ownership(_) => StatusCode::FORBIDDEN,
 		Error::ScopeDenied => StatusCode::FORBIDDEN,
@@ -712,7 +654,7 @@ pub async fn complete(
 	)?;
 	let job = &authorized.row;
 	// Same set the storage guards use; the two must never drift apart.
-	if !jobs::RUNTIME_KINDS.contains(&job.kind) {
+	if !jobs::LEGACY_RUNTIME_KINDS.contains(&job.kind) {
 		return Err((StatusCode::BAD_REQUEST, "unsupported job kind".into()));
 	}
 	if matches!(new_state, JobState::Succeeded) {
@@ -898,6 +840,13 @@ mod storage_error_tests {
 	fn domain_errors_keep_their_http_meaning() {
 		use loupe_storage::{Conflict, Entity, Error, Ownership};
 		for (error, status) in [
+			(
+				Error::ReviewPayload(loupe_core::review_payload::Error::Invalid {
+					field: "version",
+					rule: "unsupported version",
+				}),
+				StatusCode::BAD_REQUEST,
+			),
 			(Error::Conflict(Conflict::Checkpoint), StatusCode::CONFLICT),
 			(Error::Ownership(Ownership::LeadJob), StatusCode::FORBIDDEN),
 			(Error::NotFound(Entity::Job, 1), StatusCode::NOT_FOUND),

@@ -24,7 +24,7 @@ pub(crate) use findings::{reset_observations, take_observations};
 pub use findings::{Field, FieldObservation, FieldSource};
 #[cfg_attr(test, allow(unused_imports))]
 // Binary and fuzz fixtures exercise the full inventory.
-pub(super) use jobs::{cancel_job, get_job, list_jobs, retry_job};
+pub(super) use jobs::{cancel_job, get_job, list_jobs, retry_job, CancelResponse};
 #[cfg_attr(test, allow(unused_imports))]
 // Binary and fuzz fixtures exercise the full inventory.
 pub(super) use registry::{list_repos, register_worker_bundle, show_github_app};

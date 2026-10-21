@@ -27,8 +27,18 @@ fn request(
 	}
 }
 
+fn assert_campaign_allocations(db: &loupe_storage::Db, repo: i64, campaign: i64) {
+	let count =
+		common::jobs(db, repo).into_iter().filter(|job| job.campaign_id == Some(campaign)).count();
+	let spent = common::with_repo(db, repo, |scope| {
+		loupe_storage::admission::get_spending(scope, campaign)?.unwrap().total()
+	})
+	.unwrap();
+	assert_eq!((count, spent), (1, 1), "campaign {campaign} allocations");
+}
+
 #[tokio::test]
-async fn background_scheduler_notifies_waiters_for_replenished_campaign_work() {
+async fn background_scheduler_does_not_allocate_or_notify_speculative_coverage() {
 	let mut fixture = common::offline::OfflineDatabase::new();
 	let db = fixture.open();
 	let repo = common::register_repo(&db, &common::new_repo(), None);
@@ -57,11 +67,24 @@ async fn background_scheduler_notifies_waiters_for_replenished_campaign_work() {
 	.unwrap();
 	// Inventory finalization has no runtime producer. Author that worker state
 	// in this test-owned encrypted file, then reopen the ordinary Db.
+	let entry = loupe_proto::review_api::ManifestEntry {
+		raw_path_hex: common::marked::operator::identifier("7372632e7273"),
+		git_mode: 0o100644,
+		object_id: common::marked::operator::identifier(SHA),
+	}
+	.to_manifest()
+	.unwrap();
+	let mut manifest = loupe_core::inventory_manifest::ManifestHasher::new(SHA, 1).unwrap();
+	manifest.push(&entry).unwrap();
+	let bytes = manifest.bytes();
+	let digest = manifest.finish().unwrap();
 	drop(db);
 	fixture.edit(|conn| {
-        conn.execute("UPDATE review_generations SET inventory_digest=zeroblob(32) WHERE generation_id=?1",[generation])?;
-        conn.execute("UPDATE jobs SET state='succeeded',finished_at=?2 WHERE id=?1",rusqlite::params![job,now])?;
-        conn.execute("INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,source_refs,priority_band,created_at) VALUES(?1,'u','t','o','[]','high',0)",[generation])?;
+        conn.execute("UPDATE review_generations SET inventory_digest=?2 WHERE generation_id=?1",rusqlite::params![generation,digest.as_slice()])?;
+        conn.execute("INSERT INTO generation_manifests(generation_id,format_version,owner_job_id,expected_entry_count,received_entry_count,received_canonical_bytes,expected_digest,created_at,sealed_at) VALUES(?1,1,?2,1,1,?3,?4,0,0)",rusqlite::params![generation,job,bytes,digest.as_slice()])?;
+        conn.execute("INSERT INTO generation_inventory(generation_id,path,source_path,raw_path,manifest_position,git_mode,blob_sha,entry_kind,disposition,disposition_reason,created_at) VALUES(?1,'src.rs','src.rs',?2,0,33188,?3,'tracked','context','fixture source',0)",rusqlite::params![generation,b"src.rs".as_slice(),SHA])?;
+        conn.execute("UPDATE jobs SET state='succeeded',finished_at=?2,head_sha=?3 WHERE id=?1",rusqlite::params![job,now,SHA])?;
+        conn.execute("INSERT INTO review_units(generation_id,client_review_unit_key,title,objective,source_refs,priority_band,created_by_job_id,created_at) VALUES(?1,'u','t','o','[{\"path\":\"src.rs\"}]','high',?2,0)",rusqlite::params![generation,job])?;
         Ok(())
     });
 	let db = fixture.open();
@@ -71,6 +94,7 @@ async fn background_scheduler_notifies_waiters_for_replenished_campaign_work() {
 		Ok(())
 	})
 	.unwrap();
+	assert_campaign_allocations(&db, repo, campaign);
 	assert!(common::jobs(&db, repo).iter().all(|job| job.state != JobState::Queued));
 	let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
 	let cancelled = tokio_util::sync::CancellationToken::new();
@@ -79,17 +103,23 @@ async fn background_scheduler_notifies_waiters_for_replenished_campaign_work() {
 	notified.as_mut().enable();
 	let handle =
 		loupe_server::background::spawn_scheduler(db.clone(), arrived.clone(), cancelled.clone());
-	let notification = tokio::time::timeout(std::time::Duration::from_secs(2), notified).await;
+	let notification = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
 	cancelled.cancel();
 	handle.await.unwrap();
-	assert!(notification.is_ok(), "campaign replenishment must wake leasing workers");
+	assert!(notification.is_err(), "unchanged pending coverage is not a newly queued job");
+	assert_campaign_allocations(&db, repo, campaign);
 	let queued: Vec<_> =
 		common::jobs(&db, repo).into_iter().filter(|job| job.state == JobState::Queued).collect();
-	assert_eq!(queued.len(), 1, "the notification must correspond to the new coverage survey");
-	assert_eq!(queued[0].kind, JobKind::Survey);
-	assert_eq!(queued[0].campaign_id, Some(campaign));
-	assert_eq!(queued[0].generation_id, Some(generation));
-	common::assert_survey_recipe(&queued[0], "coverage");
+	assert!(queued.is_empty(), "only a winning first claim may create coverage work");
+	common::with_repo(&db, repo, |scope| {
+		assert_eq!(
+			campaigns::get(scope, campaign)?.unwrap().state,
+			campaigns::State::Active,
+			"no worker is not a completion condition"
+		);
+		Ok(())
+	})
+	.unwrap();
 }
 
 #[test]
@@ -114,7 +144,7 @@ fn open_pins_only_known_commits_and_freezes_policy() {
 			assert_eq!(row.deadline_at, Some(21700));
 			assert_eq!(
 				serde_json::from_str::<serde_json::Value>(row.effective_policy.expose()).unwrap(),
-				serde_json::to_value(policy.snapshot().unwrap()).unwrap()
+				serde_json::to_value(policy.snapshot_v2().unwrap()).unwrap()
 			);
 			assert_eq!(row.generation_id.is_some(), pinned);
 			let job = jobs::get(scope, job)?.unwrap();

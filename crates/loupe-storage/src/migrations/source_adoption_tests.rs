@@ -193,7 +193,8 @@ fn atomic_m_deadline_note_requires_the_exact_mixed_host_tuple() {
 #[test]
 fn atomic_m_source_columns_cover_only_designated_tables() {
 	let mut conn = historical();
-	apply_pending(&mut conn).unwrap();
+	// This asserts the published v6 adoption, not later content tables.
+	apply_migrations(&mut conn, &MIGRATIONS[..6]).unwrap();
 	let mut actual: Vec<String> = conn
 		.prepare("SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) p WHERE m.type='table' AND p.name='source' ORDER BY m.name")
 		.unwrap()

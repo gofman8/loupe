@@ -16,19 +16,21 @@ string_enum!(State { Active => "active", Finished => "finished", Cancelled => "c
 pub enum CampaignPolicyInput<'a, S: Source> {
 	Submitted(&'a BoundedJson<Payload, S>),
 	Resolved(&'a crate::scheduler::CampaignPolicy),
+	ResolvedV2(&'a crate::admission_policy::CampaignPolicyV2),
 }
 impl<S: Source> CampaignPolicyInput<'_, S> {
-	fn canonical(&self) -> Vec<u8> {
+	fn canonical(&self) -> Result<Vec<u8>> {
 		match self {
-			Self::Submitted(value) => value.canonical().to_vec(),
+			Self::Submitted(value) => Ok(value.canonical().to_vec()),
 			Self::Resolved(value) => {
 				#[expect(
 					clippy::expect_used,
 					reason = "CampaignPolicy contains only fixed keys and integer fields; its derived serializer cannot fail"
 				)]
 				let json = serde_json::to_value(value).expect("numeric campaign policy serializes");
-				loupe_core::canonical::canonical_bytes(&json)
+				Ok(loupe_core::canonical::canonical_bytes(&json))
 			},
+			Self::ResolvedV2(value) => value.canonical_bytes(),
 		}
 	}
 }
@@ -91,6 +93,7 @@ pub struct CampaignCounts {
 	lead_disposition: CountGroup,
 	findings: CountGroup,
 	verdicts: CountGroup,
+	pending_work: crate::campaign_work::Summary,
 	canonical: String,
 }
 impl std::fmt::Debug for CampaignCounts {
@@ -106,11 +109,17 @@ impl CampaignCounts {
 		use loupe_core::text::{JsonPolicy, Rule};
 		let groups = [&self.lead_status, &self.lead_disposition, &self.findings, &self.verdicts];
 		// This closed schema has seven container nodes, four nodes per job,
-		// one per grouped scalar, and depth four. Keys are not JSON nodes.
-		let nodes =
-			groups.iter().fold(7usize.saturating_add(self.jobs.len().saturating_mul(4)), |n, g| {
+		// one per grouped scalar, plus pending-work nodes at maximum depth five.
+		// Keys are not JSON nodes.
+		let nodes = groups
+			.iter()
+			.fold(7usize.saturating_add(self.jobs.len().saturating_mul(4)), |n, g| {
 				n.saturating_add(g.len())
-			});
+			})
+			.saturating_add(self.pending_work.nodes());
+		if Payload::MAX_DEPTH < 5 {
+			return Err(loupe_core::text::Error::new(Payload::FIELD, Rule::JsonDepth).into());
+		}
 		let render = |normalized: bool| {
 			let group = |values: &CountGroup| {
 				values
@@ -119,7 +128,7 @@ impl CampaignCounts {
 					.collect::<serde_json::Map<_, _>>()
 			};
 			let jobs: Vec<_> = self.jobs.iter().map(|job| serde_json::json!({ "kind": if normalized { job.leaf.expose() } else { job.kind.expose() }, "state": job.state, "count": job.count })).collect();
-			serde_json::json!({ "jobs": jobs, "leads": { "status": group(&self.lead_status), "disposition": group(&self.lead_disposition) }, "findings": group(&self.findings), "verdicts": group(&self.verdicts) })
+			serde_json::json!({ "jobs": jobs, "leads": { "status": group(&self.lead_status), "disposition": group(&self.lead_disposition) }, "findings": group(&self.findings), "verdicts": group(&self.verdicts), "pending_work": self.pending_work.render() })
 		};
 		if render(false).to_string().len() > Payload::MAX_BYTES {
 			return Err(loupe_core::text::Error::new(Payload::FIELD, Rule::Bytes).into());
@@ -187,15 +196,21 @@ pub(crate) fn validate_stored_rows(conn: &Connection) -> Result<()> {
 				)?;
 			}
 		}
-		crate::scheduler::CampaignPolicy::from_snapshot(&campaign.effective_policy).map_err(
-			|_| {
+		// Preserve historical v1 admission. V2 validates the original SQL TEXT
+		// and digest through its separate strict reader, never normalized JSON.
+		crate::scheduler::CampaignPolicy::from_snapshot(&campaign.effective_policy)
+			.map(|_| ())
+			.or_else(|_| {
+				crate::admission::load_policy_raw(conn, campaign.repo_id, campaign.campaign_id)
+					.map(|_| ())
+			})
+			.map_err(|_| {
 				crate::migrations::MigrationFailure::new(
 					crate::migrations::MigrationStage::Admission,
 					crate::migrations::MigrationReason::CampaignPolicy,
 				)
 				.at("review_campaigns", "effective_policy", None)
-			},
-		)?;
+			})?;
 		Ok(())
 	})?;
 	crate::migrations::admission::scan(conn, "review_campaigns", "effective_policy_digest", |_| {
@@ -216,10 +231,10 @@ pub fn create<RevisionS: Source, PolicyS: Source>(
 	if let Some(id) = new.continuation_of_campaign_id {
 		ownership::campaign(tx, scope.repo_id, id, Ownership::CampaignContinuation)?;
 	}
-	let policy = new.effective_policy.canonical();
+	let policy = new.effective_policy.canonical()?;
 	#[expect(
 		clippy::expect_used,
-		reason = "both private CampaignPolicyInput branches return only canonical JSON UTF-8"
+		reason = "private CampaignPolicyInput branches return only canonical JSON UTF-8"
 	)]
 	let policy_text = std::str::from_utf8(&policy).expect("canonical policy is UTF-8");
 	let policy_digest = loupe_core::canonical::digest(&policy);
@@ -239,11 +254,13 @@ pub(crate) fn get_raw(conn: &Connection, id: i64) -> Result<Option<Campaign>> {
 }
 
 pub fn get(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Option<Campaign>> {
-	Ok(scope
-		.conn
+	get_scoped_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_scoped_raw(conn: &Connection, repo: i64, id: i64) -> Result<Option<Campaign>> {
+	Ok(conn
 		.query_row(
 			&format!("SELECT {COLUMNS} FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2"),
-			params![id, scope.repo_id],
+			params![id, repo],
 			row,
 		)
 		.optional()?)
@@ -252,11 +269,10 @@ pub fn list_for_repo(scope: &crate::scope::RepoScope<'_>) -> Result<Vec<Campaign
 	let tx = scope.conn;
 	Ok(tx.prepare(&format!("SELECT {COLUMNS} FROM review_campaigns WHERE repo_id=?1 ORDER BY created_at DESC,campaign_id DESC"))?.query_map([scope.repo_id],row)?.collect::<rusqlite::Result<_>>()?)
 }
-fn counts(scope: &crate::scope::RepoScope<'_>, sql: &str, id: Option<i64>) -> Result<CountGroup> {
-	let tx = scope.conn;
+fn counts(tx: &Connection, repo: i64, sql: &str, id: Option<i64>) -> Result<CountGroup> {
 	let mut object = Vec::new();
 	let mut statement = tx.prepare(sql)?;
-	for pair in statement.query_map(params![id, scope.repo_id], |r| {
+	for pair in statement.query_map(params![id, repo], |r| {
 		Ok((crate::ingress::count_json_key(r, 0)?, r.get::<_, i64>(1)?))
 	})? {
 		let (key, count) = pair?;
@@ -265,13 +281,31 @@ fn counts(scope: &crate::scope::RepoScope<'_>, sql: &str, id: Option<i64>) -> Re
 	Ok(object)
 }
 pub fn summarize(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<TerminalSummary> {
-	let tx = scope.conn;
-	let campaign = get(scope, id)?.ok_or(Error::NotFound(Entity::Campaign, id))?;
-	let coverage = if let Some(generation) = campaign.generation_id {
-		ownership::generation(tx, campaign.repo_id, generation, Ownership::CampaignGeneration)?;
-		crate::generations::get(scope, generation)?
-			.ok_or(Error::NotFound(Entity::Generation, generation))?
-			.coverage
+	summarize_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn summarize_raw(tx: &Connection, repo: i64, id: i64) -> Result<TerminalSummary> {
+	let generation: Option<i64> = tx
+		.query_row(
+			"SELECT generation_id FROM review_campaigns WHERE campaign_id=?1 AND repo_id=?2",
+			params![id, repo],
+			|row| row.get(0),
+		)
+		.optional()?
+		.ok_or(Error::NotFound(Entity::Campaign, id))?;
+	let coverage = if let Some(generation) = generation {
+		ownership::generation(tx, repo, generation, Ownership::CampaignGeneration)?;
+		let coverage = tx.query_row(
+			"SELECT coverage FROM review_generations WHERE generation_id=?1 AND repo_id=?2",
+			params![generation, repo],
+			|row| parsed(row, 0),
+		)?;
+		if coverage == crate::generations::Coverage::Complete
+			&& !crate::generations::coverage_rollup_raw(tx, repo, generation)?.complete()
+		{
+			crate::generations::Coverage::Partial
+		} else {
+			coverage
+		}
 	} else {
 		crate::generations::Coverage::Unknown
 	};
@@ -284,7 +318,7 @@ pub fn summarize(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Termina
 		"SELECT kind,state,COUNT(*) FROM jobs WHERE campaign_id=?1 AND repo_id=?2
 		 GROUP BY kind,state ORDER BY kind,state",
 	)?;
-	for record in statement.query_map(params![id, scope.repo_id], |r| {
+	for record in statement.query_map(params![id, repo], |r| {
 		Ok(JobCount {
 			kind: crate::ingress::job_kind_text(r, 0)?,
 			leaf: crate::ingress::count_json_leaf(r, 0)?,
@@ -294,12 +328,11 @@ pub fn summarize(scope: &crate::scope::RepoScope<'_>, id: i64) -> Result<Termina
 	})? {
 		jobs.push(record?);
 	}
-	let generation = campaign.generation_id;
 	let counts = CampaignCounts { jobs,
-		lead_status: counts(scope,"SELECT status,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) GROUP BY status",generation)?,
-		lead_disposition: counts(scope,"SELECT disposition,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) AND disposition IS NOT NULL GROUP BY disposition",generation)?,
-		findings: counts(scope,"SELECT f.state,COUNT(*) FROM findings f JOIN finding_review_details d ON d.finding_id=f.id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND f.repo_id=?2 GROUP BY f.state",generation)?,
-		verdicts: counts(scope,"SELECT v.verdict,COUNT(*) FROM finding_verifications v JOIN finding_review_details d ON d.finding_id=v.finding_id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND EXISTS(SELECT 1 FROM findings f WHERE f.id=v.finding_id AND f.repo_id=?2) GROUP BY v.verdict",generation)?, canonical: String::new() }.finish()?;
+		lead_status: counts(tx,repo,"SELECT status,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) GROUP BY status",generation)?,
+		lead_disposition: counts(tx,repo,"SELECT disposition,COUNT(*) FROM leads WHERE generation_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=leads.generation_id AND g.repo_id=?2) AND disposition IS NOT NULL GROUP BY disposition",generation)?,
+		findings: counts(tx,repo,"SELECT f.state,COUNT(*) FROM findings f JOIN finding_review_details d ON d.finding_id=f.id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND f.repo_id=?2 GROUP BY f.state",generation)?,
+		verdicts: counts(tx,repo,"SELECT v.verdict,COUNT(*) FROM finding_verifications v JOIN finding_review_details d ON d.finding_id=v.finding_id JOIN leads l ON l.lead_id=d.origin_lead_id WHERE l.generation_id=?1 AND EXISTS(SELECT 1 FROM findings f WHERE f.id=v.finding_id AND f.repo_id=?2) GROUP BY v.verdict",generation)?, pending_work: crate::campaign_work::summary(tx, repo, id)?, canonical: String::new() }.finish()?;
 	Ok(TerminalSummary { campaign_id: id, coverage, counts })
 }
 pub fn finish<S: Source>(
@@ -309,12 +342,21 @@ pub fn finish<S: Source>(
 	scope.require_operator()?;
 	finish_with_reason(scope, id, summary, reason.expose(), now)
 }
+/// Closed phase-host outcome after cancelling the last live campaign job.
+pub(crate) fn finish_unsupported(tx: &Connection, repo: i64, id: i64, now: i64) -> Result<()> {
+	let summary = summarize_raw(tx, repo, id)?;
+	changed(tx.execute("UPDATE review_campaigns SET state='finished',terminal_reason='unsupported_recipe',coverage_at_finish=?2,terminal_counts=?3,finished_at=?4 WHERE campaign_id=?1 AND repo_id=?5 AND state='active'",params![id,summary.coverage.as_str(),summary.counts.expose(),now,repo])?,Conflict::CampaignState)
+}
+
 /// Scheduler outcomes are closed host facts, not attributed input text.
 // debug-ok: completion reasons are closed host scheduling outcomes.
 #[derive(Debug, Clone, Copy)]
 pub enum FinishedReason {
 	Completed,
 	Deadline,
+	Partial,
+	Blocked(crate::review_intents::BlockReason),
+	Unsupported,
 }
 pub(crate) fn finish_scheduled(
 	scope: &crate::scope::RepoScope<'_>, id: i64, summary: &TerminalSummary,
@@ -328,6 +370,9 @@ pub(crate) fn finish_scheduled(
 		match reason {
 			FinishedReason::Completed => "completed",
 			FinishedReason::Deadline => "deadline",
+			FinishedReason::Partial => "partial",
+			FinishedReason::Blocked(reason) => reason.as_str(),
+			FinishedReason::Unsupported => "unsupported_recipe",
 		},
 		now,
 	)

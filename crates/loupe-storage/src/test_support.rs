@@ -36,6 +36,7 @@ macro_rules! fixture {
 	};
 }
 fixture!(agent, Agent);
+fixture!(worker, loupe_provenance::Worker);
 fixture!(database, Db);
 fixture!(configured, Config);
 fixture!(repository, Repo);

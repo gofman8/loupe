@@ -1,10 +1,11 @@
-//! One transactional claim for legacy and campaign queues.
+//! Legacy transactional claims. Production review claims are validated and
+//! serialized through storage's delivery-before-commit admission owner.
 use loupe_core::JobKind;
 use loupe_provenance::Source;
-use rusqlite::{named_params, params, OptionalExtension, Transaction};
+use rusqlite::{named_params, params, Connection, OptionalExtension, Transaction};
 
-use super::{invalid, CampaignPolicy, ClaimPolicy, PHASE_RUNTIME_KINDS};
-use crate::jobs::{self, JobRow, JOB_COLUMNS, RUNTIME_KINDS};
+use super::{invalid, CampaignPolicy, ClaimPolicy};
+use crate::jobs::{self, JobRow, JOB_COLUMNS, LEGACY_RUNTIME_KINDS};
 use crate::{campaigns, checkpoints, review_units, Entity, Error, Result};
 
 pub struct ClaimRequest<'a, S: Source> {
@@ -30,10 +31,9 @@ const PROMOTED: &str =
 	"j.campaign_id IS NOT NULL AND j.kind='survey' AND COALESCE(s.burst,0)>=:burst_length";
 const ANTI_AFFINITY: &str = "CASE WHEN j.kind='verify' AND j.campaign_id IS NOT NULL AND EXISTS(SELECT 1 FROM finding_review_details d JOIN jobs p ON p.assigned_lead_id=d.origin_lead_id AND p.kind='drilldown' WHERE d.finding_id=j.target_finding_id AND p.worker_id=:worker) THEN 1 ELSE 0 END";
 
-/// Runtime gating is mandatory, even when callers request unsupported kinds.
-/// Legacy rows follow `RUNTIME_KINDS`; campaign rows additionally need a
-/// phase handler for their kind (`PHASE_RUNTIME_KINDS`), because `verify`
-/// has a legacy runtime handler but no campaign phase endpoint.
+/// This legacy entry point never claims campaign work. Review claims must use
+/// the owner that validates and serializes the full envelope in the same
+/// transaction as admission; widening runtime support cannot bypass that owner.
 pub(crate) fn claim_raw<S: Source>(
 	tx: &Transaction<'_>, req: &ClaimRequest<'_, S>,
 ) -> Result<Option<Claimed>> {
@@ -41,24 +41,17 @@ pub(crate) fn claim_raw<S: Source>(
 		.kinds
 		.iter()
 		.filter(|kind| {
-			RUNTIME_KINDS.iter().any(|allowed| kind.is_known() && allowed.as_str() == kind.as_str())
-		})
-		.cloned()
-		.collect();
-	let campaign_kinds: Vec<_> = kinds
-		.iter()
-		.filter(|kind| {
-			PHASE_RUNTIME_KINDS
+			LEGACY_RUNTIME_KINDS
 				.iter()
 				.any(|allowed| kind.is_known() && allowed.as_str() == kind.as_str())
 		})
 		.cloned()
 		.collect();
-	claim_filtered(tx, req, &kinds, &campaign_kinds)
+	claim_filtered(tx, req, &kinds, &[])
 }
 
-/// Private fixture entry point bypassing the absent runtime phase handlers.
-/// Campaign rows are offered for every requested kind.
+/// Private queue-policy fixture entry point. Production phase claims must use
+/// validated admission; these tests offer campaign rows for every requested kind.
 #[cfg(test)]
 pub(super) fn claim_kinds<S: Source>(
 	tx: &Transaction<'_>, req: &ClaimRequest<'_, S>, kinds: &[JobKind<S>],
@@ -176,39 +169,74 @@ fn claim_filtered<S: Source>(
 			.ok_or_else(|| invalid("lease_expires_at"))?
 			.min(bound);
 		tx.execute("UPDATE jobs SET hard_deadline_at=?2,submit_by=?3,soft_deadline_at=?3,lease_expires_at=?4 WHERE id=?1",params![job.id,hard,submit,lease])?;
-		if job.kind == JobKind::Survey
-			&& let Some(generation) = job.generation_id
-		{
-			let batch_exists: bool = tx.query_row(
-				"SELECT EXISTS(SELECT 1 FROM job_assigned_review_units WHERE job_id=?1)",
-				[job.id],
-				|r| r.get(0),
-			)?;
-			if batch_exists {
-				resumed = true;
-			} else if !is_bootstrap(&job) {
-				// This host-only, once-per-job operation has no request payload.
-				// Record even an empty selection atomically with the lease so a
-				// retry cannot confuse it with a skipped (e.g. unpinned) batch.
-				let initialized = checkpoints::initialize_survey_batch(
-					tx,
-					job.repo_id,
-					job.id,
-					req.now,
-					|tx| {
-						let units = tx.prepare(&format!("SELECT u.review_unit_id,u.assignment_epoch FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.generation_id=?1 AND {} ORDER BY CASE u.priority_band WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,u.created_at,u.review_unit_id LIMIT ?2",*review_units::UNIT_NEEDS_WORK))?
-							.query_map(params![generation,policy.survey_units_per_job],|r|Ok(review_units::Assignment{unit_id:r.get(0)?,expected_epoch:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
-						review_units::assign_selected(tx, job.repo_id, job.id, &units)?;
-						Ok(())
-					},
-				)?;
-				resumed = initialized;
-			}
-			assigned_units = tx.prepare("SELECT review_unit_id FROM job_assigned_review_units WHERE job_id=?1 AND completed=0 ORDER BY position")?.query_map([job.id],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+		if job.kind == JobKind::Survey && job.generation_id.is_some() {
+			let batch = initialize_ordinary_batch(tx, job.id, req.now)?;
+			assigned_units = batch.units;
+			resumed = batch.resumed;
 		}
 		job = jobs::get_raw(tx, job.id)?.ok_or(Error::NotFound(Entity::Job, job.id))?;
 	}
 	Ok(Some(Claimed { job, assigned_units, resumed }))
+}
+
+// debug-ok: batch results contain only numeric unit IDs and a replay flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BatchInitialization {
+	pub units: Vec<i64>,
+	pub resumed: bool,
+}
+
+/// Host-only, once-per-logical-job selection, reusable after an unpinned lease
+/// acquires its generation. The caller authorizes recipe and preparation first.
+pub(crate) fn initialize_ordinary_batch(
+	tx: &Connection, job_id: i64, now: i64,
+) -> Result<BatchInitialization> {
+	let job = jobs::get_raw(tx, job_id)?.ok_or(Error::NotFound(Entity::Job, job_id))?;
+	let generation = job.generation_id.ok_or(Error::Conflict(crate::Conflict::Assignment))?;
+	if job.kind != JobKind::Survey {
+		return Err(Error::Conflict(crate::Conflict::Assignment));
+	}
+	let campaign_id = job.campaign_id.ok_or(Error::Conflict(crate::Conflict::Assignment))?;
+	let exact: Option<i64> = tx.query_row(
+		"SELECT batch_id FROM survey_continuation_batches WHERE admitted_job_id=?1 AND repo_id=?2",
+		params![job.id, job.repo_id], |row| row.get(0),
+	).optional()?;
+	if let Some(batch) = exact {
+		let units = crate::unit_holds::admit_exact_batch_raw(tx, job.repo_id, batch, job.id, now)?
+			.into_iter()
+			.filter(|a| !a.completed)
+			.map(|a| a.unit_id)
+			.collect();
+		return Ok(BatchInitialization { units, resumed: true });
+	}
+	let campaign = campaigns::get_raw(tx, campaign_id)?
+		.ok_or(Error::NotFound(Entity::Campaign, campaign_id))?;
+	let version = serde_json::from_str::<serde_json::Value>(campaign.effective_policy.expose())
+		.map_err(|_| Error::Conflict(crate::Conflict::CampaignPolicy))?["version"]
+		.as_u64();
+	let survey_units_per_job = if version == Some(2) {
+		crate::admission::load_policy_raw(tx, job.repo_id, campaign_id)?.survey_units_per_job
+	} else {
+		CampaignPolicy::from_snapshot(&campaign.effective_policy)?.survey_units_per_job
+	};
+	let batch_exists: bool = tx.query_row(
+		"SELECT EXISTS(SELECT 1 FROM job_assigned_review_units WHERE job_id=?1)",
+		[job.id],
+		|row| row.get(0),
+	)?;
+	let mut resumed = batch_exists;
+	if !batch_exists && !is_bootstrap(&job) {
+		// Even an empty batch is recorded. A retry cannot select newly added work.
+		resumed = checkpoints::initialize_survey_batch(tx, job.repo_id, job.id, now, |tx| {
+			let units = tx.prepare(&format!("SELECT u.review_unit_id,u.assignment_epoch FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.generation_id=?1 AND {} ORDER BY CASE u.priority_band WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,u.created_at,u.review_unit_id LIMIT ?2",*review_units::UNIT_NEEDS_WORK))?
+				.query_map(params![generation,survey_units_per_job],|r|Ok(review_units::Assignment{unit_id:r.get(0)?,expected_epoch:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+			review_units::assign_selected(tx, job.repo_id, job.id, &units)?;
+			Ok(())
+		})?;
+	}
+	let units = tx.prepare("SELECT review_unit_id FROM job_assigned_review_units WHERE job_id=?1 AND completed=0 ORDER BY position")?
+		.query_map([job.id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+	Ok(BatchInitialization { units, resumed })
 }
 
 fn is_bootstrap(job: &JobRow) -> bool {

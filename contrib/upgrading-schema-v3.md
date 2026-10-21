@@ -1,5 +1,9 @@
 # Upgrading the database to schema 6
 
+This is the historical schema-6 procedure. For the current B4 branch, use the
+[schema-v7 runbook](upgrading-schema-v7.md), including its coordinated
+protocol-3 rollout and cleared-lease requirement.
+
 Current schema-4 installations upgrade to schema 6 when the new server opens
 the database. Schema 5 adds stable finding identities for report completion;
 schema 6 records conservative source labels for stored content. Existing

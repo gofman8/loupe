@@ -21,6 +21,8 @@ pub(crate) enum DecodeError {
 	Json { reason: &'static str, line: usize, column: usize },
 	#[error(transparent)]
 	Policy(#[from] loupe_core::text::Error),
+	#[error(transparent)]
+	ReviewLease(#[from] loupe_proto::review_lease::ReviewLeaseDecodeError),
 }
 
 impl From<serde_json::Error> for DecodeError {

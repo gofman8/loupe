@@ -34,6 +34,7 @@ impl std::fmt::Debug for PeerCert {
 /// integration tests can mount it without spinning up TLS.
 pub fn router(state: AppState) -> Router {
 	let admin_only = Router::new()
+		.route("/v1/review-generations/{id}/reset", post(routes::review_compatibility::reset))
 		.route("/v1/repos", post(routes::repos::create).get(routes::repos::list))
 		.route("/v1/repos/{id}", delete(routes::repos::delete).patch(routes::repos::update))
 		.route("/v1/repos/{id}/reporting/github-pat", post(routes::repos::rotate_github_pat))
@@ -55,16 +56,33 @@ pub fn router(state: AppState) -> Router {
 		.route("/v1/jobs", get(routes::jobs::list))
 		.route("/v1/jobs/{id}", get(routes::jobs::get))
 		.route("/v1/jobs/{id}/retry", post(routes::jobs::retry))
-		.route("/v1/jobs/{id}/cancel", post(routes::jobs::cancel))
+		.route("/v1/jobs/{id}/cancel", post(routes::review_lifecycle::cancel))
 		.route_layer(axum::middleware::from_fn(auth::require_admin));
 
 	let worker_only = Router::new()
 		.route("/v1/jobs/lease", post(routes::jobs::lease))
-		.route("/v1/jobs/{id}/heartbeat", post(routes::jobs::heartbeat))
+		.route("/v1/jobs/{id}/heartbeat", post(routes::review_lifecycle::heartbeat))
 		.route("/v1/jobs/{id}/findings", post(routes::jobs::submit_findings))
 		.route("/v1/jobs/{id}/llm-findings", post(routes::jobs::submit_llm_finding))
 		.route("/v1/jobs/{id}/verdict", post(routes::jobs::submit_verdict))
-		.route("/v1/jobs/{id}/complete", post(routes::jobs::complete))
+		.route("/v1/jobs/{id}/complete", post(routes::review_lifecycle::complete))
+		.route("/v1/jobs/{id}/pin-target", post(routes::review_host::pin_target))
+		.route("/v1/jobs/{id}/inventory-batches", post(routes::review_host::inventory_batch))
+		.route("/v1/jobs/{id}/seal-inventory", post(routes::review_host::seal_inventory))
+		.route("/v1/jobs/{id}/publish-profile", post(routes::review_host::publish_profile))
+		.route("/v1/jobs/{id}/inventory-dispositions", post(routes::review_inventory::submit))
+		.route("/v1/jobs/{id}/review-units", post(routes::review_units::submit))
+		.route("/v1/jobs/{id}/leads", post(routes::review_evidence::submit_lead))
+		.route("/v1/jobs/{id}/sibling-leads", post(routes::review_evidence::submit_sibling_lead))
+		.route(
+			"/v1/jobs/{id}/review-unit-results",
+			post(routes::review_evidence::submit_unit_result),
+		)
+		.route("/v1/jobs/{id}/finalize-survey", post(routes::review_survey::finalize))
+		.route("/v1/jobs/{id}/finalize-drilldown", post(routes::review_drilldown::finalize))
+		.route("/v1/jobs/{id}/finalize-verification", post(routes::review_verification::finalize))
+		.route("/v1/jobs/{id}/limits", get(routes::review_context::limits))
+		.route("/v1/jobs/{id}/lead-candidates", get(routes::review_context::candidates))
 		.route_layer(axum::middleware::from_fn(auth::require_worker));
 
 	let authed = Router::new()
@@ -88,7 +106,10 @@ pub fn router(state: AppState) -> Router {
 		.with_state(state)
 		.layer(axum::middleware::from_fn(
 			|req: axum::extract::Request, next: axum::middleware::Next| async move {
-				let mut resp = next.run(req).await;
+				let (phase,control,lease)=req.extensions().get::<axum::extract::MatchedPath>()
+     .map(|path|(crate::review::http::is_phase_route(path.as_str()),crate::review::http::is_control_route(path.as_str()),path.as_str()=="/v1/jobs/lease")).unwrap_or_default();
+				let resp = next.run(req).await;
+				let mut resp = if lease {crate::review::http::bound_lease_response(resp).await} else if phase { crate::review::http::bound_phase_errors(resp).await } else if control {crate::review::http::bound_control_errors(resp).await} else { resp };
 				#[expect(clippy::expect_used, reason = "decimal formatting of the fixed u16 protocol version produces only ASCII header digits")]
 				let version = PROTOCOL_VERSION.to_string().parse().expect("u16 parses as header value");
 				resp.headers_mut().insert(
@@ -103,7 +124,15 @@ pub fn router(state: AppState) -> Router {
 async fn check_request_protocol(
 	req: axum::extract::Request, next: axum::middleware::Next,
 ) -> axum::response::Response {
-	if let Some(msg) = request_protocol_error(req.headers().get(PROTOCOL_VERSION_HEADER)) {
+	if req
+		.extensions()
+		.get::<axum::extract::MatchedPath>()
+		.is_some_and(|path| crate::review::http::is_phase_route(path.as_str()))
+	{
+		if let Err(error) = crate::review::http::require_version(req.headers()) {
+			return error.into_response();
+		}
+	} else if let Some(msg) = request_protocol_error(req.headers().get(PROTOCOL_VERSION_HEADER)) {
 		return (StatusCode::BAD_REQUEST, msg).into_response();
 	}
 	next.run(req).await

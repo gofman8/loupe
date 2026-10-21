@@ -21,6 +21,17 @@ pub(crate) fn operator() -> Ingress<loupe_provenance::Operator> {
 	unsafe { Ingress::new() }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn worker_body(raw: &[u8]) -> crate::ingress::WorkerBody {
+	let mut buffer = crate::ingress::RequestBuffer::default();
+	buffer.append(raw).unwrap();
+	// SAFETY: synthetic Worker request bytes confined to cfg(test), not a
+	// production capture or a way to construct authenticated worker authority.
+	crate::ingress::WorkerBody(Untrusted::new(bytes::Bytes::from_owner(buffer), unsafe {
+		Ingress::<loupe_provenance::Worker>::new()
+	}))
+}
+
 pub(crate) type Events =
 	std::sync::Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>;
 pub(crate) fn capture_security_events() -> (tracing::subscriber::DefaultGuard, Events) {

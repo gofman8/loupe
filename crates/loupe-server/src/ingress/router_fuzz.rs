@@ -136,11 +136,12 @@ pub async fn request_route(case: RequestCase) -> RequestObservation {
 		_ if case.route == 1 => format!(r#"{{"protocol_version":{version},"capabilities":[],"wait_seconds":0}}"#),
 		_ => format!(r#"{{"protocol_version":{version},"clone_url":"https://example.org/fixture/repo","reporting":{{"kind":"manual"}}}}"#),
 	}.into_bytes();
+	let cap = if case.route == 1 { 8192 } else { 2 * 1024 * 1024 };
 	let length = match case.boundary {
 		0 => prefix.len(),
-		1 => 2 * 1024 * 1024 - 1,
-		2 => 2 * 1024 * 1024,
-		_ => 2 * 1024 * 1024 + 1,
+		1 => cap - 1,
+		2 => cap,
+		_ => cap + 1,
 	};
 	let chunk_size = if case.boundary == 0 { case.chunk_size } else { case.chunk_size.max(4096) };
 	let polled = Arc::new(Mutex::new(Vec::new()));

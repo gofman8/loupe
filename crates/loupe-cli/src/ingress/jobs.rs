@@ -75,7 +75,50 @@ macro_rules! job_decoder {
 }
 job_decoder!(get_job, GetJob);
 job_decoder!(retry_job, RetryJob);
-job_decoder!(cancel_job, CancelJob);
+// debug-ok: phase values are closed scalars; legacy fields implement redacted Debug.
+#[derive(Debug)]
+pub(crate) enum CancelResponse {
+	Phase(loupe_proto::review_lifecycle::PhaseControlResponse),
+	Legacy(loupe_proto::JobInfo<Server>),
+}
+struct CancelJob;
+impl Validate<&[u8], Server> for CancelJob {
+	type Output = CancelResponse;
+	type Error = anyhow::Error;
+	fn validate<'v>(
+		self, u: Unvalidated<'v, &[u8]>, mark: Mark<'v, Server>,
+	) -> Result<Self::Output> {
+		fn present<'de, D: serde::Deserializer<'de>>(
+			deserializer: D,
+		) -> std::result::Result<bool, D::Error> {
+			serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+		}
+		#[derive(Deserialize)]
+		struct Shape {
+			#[serde(default, deserialize_with = "present")]
+			protocol_version: bool,
+		}
+		// Positional legacy JobInfo is still admitted by the historical decoder.
+		// An object marker, even null, commits to the strict phase schema. Decode
+		// original bytes a second time, never an erased/reserialized Value.
+		let phase = if u.get().iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+			serde_json::from_slice::<Shape>(u.get()).map_err(|_| invalid())?.protocol_version
+		} else {
+			false
+		};
+		if phase {
+			serde_json::from_slice(u.get()).map(CancelResponse::Phase).map_err(|_| invalid())
+		} else {
+			let raw = serde_json::from_slice(u.get()).map_err(|_| invalid())?;
+			job_info(&mark, raw).map(CancelResponse::Legacy)
+		}
+	}
+}
+pub(crate) fn cancel_job(body: Untrusted<Bytes, Server>) -> Result<CancelResponse> {
+	#[cfg(fuzzing)]
+	entered(Entry::CancelJob);
+	body.as_bytes().validate(CancelJob)
+}
 struct ListJobs;
 impl Validate<&[u8], Server> for ListJobs {
 	type Output = Vec<loupe_proto::JobInfo<Server>>;

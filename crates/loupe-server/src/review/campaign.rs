@@ -1,7 +1,7 @@
 //! Resolve deployment policy; storage owns campaign selection and mutation.
 use loupe_provenance::Source;
 pub use loupe_storage::campaign_workflow::{
-	activate_generation, cancel, pin, replenish, try_finish, Finish, KindHint, OpenCampaign,
+	activate_generation, cancel, pin, replenish, Finish, KindHint, Maintenance, OpenCampaign,
 	Opened, RequestedRef, TickReport,
 };
 use loupe_storage::scope::RepoScope;
@@ -12,12 +12,26 @@ use super::policy::ReviewPolicy;
 pub fn open<S: Source>(
 	scope: &RepoScope<'_>, new: &OpenCampaign<'_, S>, policy: &ReviewPolicy, now: i64,
 ) -> Result<Opened> {
-	let policy = policy.snapshot().map_err(|_| Error::Conflict(Conflict::CampaignPolicy))?;
+	let policy = policy.snapshot_v2().map_err(|_| Error::Conflict(Conflict::CampaignPolicy))?;
 	loupe_storage::campaign_workflow::open(scope, new, &policy, now)
 }
 
-pub fn tick(db: &Db, now: i64) -> Result<TickReport> {
-	let report = loupe_storage::campaign_workflow::tick(db, now)?;
+pub fn try_finish(scope: &RepoScope<'_>, campaign_id: i64, now: i64) -> Result<Option<Finish>> {
+	loupe_storage::campaign_workflow::try_finish(
+		scope,
+		campaign_id,
+		now,
+		super::authority::admission_policy,
+	)
+}
+
+pub fn tick(db: &Db, now: i64, maintenance: &mut Maintenance) -> Result<TickReport> {
+	let report = loupe_storage::campaign_workflow::tick(
+		db,
+		now,
+		maintenance,
+		super::authority::admission_policy,
+	)?;
 	if report.failed != 0 {
 		tracing::warn!(failed = report.failed, "campaign transactions rolled back");
 	}
@@ -71,20 +85,45 @@ mod tests {
 					campaign_handoff_reserve: 1,
 					..Default::default()
 				};
-				let Opened::Created { campaign_id, .. } = open(
+				// Historical V1 scheduler accounting retains its closed budget event.
+				let frozen = policy.snapshot().unwrap();
+				let campaign_id = loupe_storage::campaigns::create(
 					scope,
-					&OpenCampaign {
+					&loupe_storage::campaigns::NewCampaign {
+						recipe: loupe_storage::campaigns::Recipe::Bootstrap,
 						trigger: loupe_storage::campaigns::Trigger::Manual,
-						requested_ref: RequestedRef::Branch(&crate::test_support::text("main")),
-						base_sha: None,
-						kind_hint: KindHint::Incremental,
+						requested_base_sha: None,
+						target_commit_sha: &crate::test_support::text("main"),
+						generation_id: None,
+						effective_policy: loupe_storage::campaigns::CampaignPolicyInput::<
+							loupe_provenance::Db,
+						>::Resolved(&frozen),
+						deadline_at: Some(policy.campaign_deadline_seconds),
+						root_campaign_id: None,
+						continuation_of_campaign_id: None,
 					},
-					&policy,
 					0,
-				)?
-				else {
-					panic!("created")
-				};
+				)?;
+				loupe_storage::scheduler::enqueue_phase(
+					scope,
+					&loupe_storage::scheduler::NewPhaseJob {
+						kind: loupe_core::JobKind::<loupe_provenance::Db>::Survey,
+						campaign_id,
+						generation_id: None,
+						assigned_lead_id: None,
+						target_finding_id: None,
+						continuation_of_job_id: None,
+						band: loupe_storage::scheduler::Band::Normal,
+						effective_priority: 0,
+						eligible_at: 0,
+						token_budget: None,
+						recipe: loupe_storage::scheduler::PhaseRecipeInput::Survey(
+							loupe_storage::scheduler::SurveyRecipe::Bootstrap,
+						),
+						handoff: false,
+					},
+					0,
+				)?;
 				assert!(
 					events.lock().unwrap().is_empty(),
 					"admitted jobs must not emit budget exhaustion"

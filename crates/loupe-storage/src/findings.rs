@@ -340,7 +340,10 @@ pub(crate) fn reap_stale_validating(conn: &mut Connection, now: i64) -> rusqlite
 			"SELECT id,repo_id FROM findings
 			 WHERE state = ?2
 			   AND validating_deadline IS NOT NULL
-			   AND validating_deadline < ?1",
+			   AND validating_deadline < ?1
+			   AND NOT EXISTS (SELECT 1 FROM finding_review_details d WHERE d.finding_id=findings.id)
+			   AND NOT EXISTS (SELECT 1 FROM finding_verification_intents i WHERE i.finding_id=findings.id)
+			   AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.id=findings.job_id AND p.campaign_id IS NOT NULL)",
 		)?;
 		let rows = stmt.query_map((now, source_state.as_str()), |r| Ok((r.get(0)?, r.get(1)?)))?;
 		rows.collect::<rusqlite::Result<_>>()?

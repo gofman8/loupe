@@ -67,6 +67,7 @@ pub fn spawn_scheduler(
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		let mut interval = tokio::time::interval(SCHEDULER_TICK);
+		let mut maintenance = crate::review::campaign::Maintenance::default();
 		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			tokio::select! {
@@ -78,10 +79,8 @@ pub fn spawn_scheduler(
 						Ok(_) => job_arrived.notify_waiters(),
 						Err(e) => tracing::warn!(error = %e, "scheduler tick failed"),
 					}
-					match crate::review::campaign::tick(&db, now) {
-						Ok(report) if report.enqueued > 0 => job_arrived.notify_waiters(),
-						Ok(_) => {},
-						Err(e) => tracing::warn!(error = %e, "campaign scheduler tick failed"),
+					if let Err(e) = crate::review::campaign::tick(&db, now, &mut maintenance) {
+						tracing::warn!(error = %e, "campaign scheduler tick failed");
 					}
 				}
 			}

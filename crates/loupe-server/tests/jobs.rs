@@ -55,6 +55,351 @@ async fn review_scheduler_preserves_legacy_verify_first_through_http() {
 	f.handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn phase_advertisements_enable_only_validated_review_work() {
+	use loupe_proto::review_lease::{LeaseList, ReviewCapability};
+	use loupe_server::review::campaign;
+	use loupe_server::review::policy::ReviewPolicy;
+	let f = bring_up_with_repo_and_worker().await;
+	let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+		as i64;
+	let (campaign_id, job_id, generation_id) = common::with_repo(&f.db, f.repo_id, |scope| {
+		let branch = common::marked::operator::text("main");
+		let campaign::Opened::Created { campaign_id, job_id } = campaign::open(
+			scope,
+			&campaign::OpenCampaign {
+				trigger: loupe_storage::campaigns::Trigger::Manual,
+				requested_ref: campaign::RequestedRef::Branch(&branch),
+				base_sha: None,
+				kind_hint: campaign::KindHint::Incremental,
+			},
+			&ReviewPolicy::default(),
+			now,
+		)?
+		else {
+			panic!("created campaign")
+		};
+		let sha = common::marked::operator::text(&"a".repeat(40));
+		let generation_id = campaign::pin(scope, campaign_id, job_id, &sha, now)?;
+		Ok((campaign_id, job_id, generation_id))
+	})
+	.unwrap();
+	let (lead_id, finding_id) = f.database.external_corruption(|conn| {
+		let sha = "a".repeat(40);
+		conn.execute("INSERT INTO leads(generation_id,identity_family,identity_anchor,identity_fingerprint,anchored_payload,anchored_digest,commit_sha,created_at) VALUES(?1,'memory-safety','allocation',?2,'{}',?2,?3,?4)",(generation_id,&[7_u8;32][..],&sha,now))?;
+		let lead_id = conn.last_insert_rowid();
+		conn.execute("INSERT INTO findings(repo_id,job_id,scanner_id,severity,title,description,fingerprint,state,created_at,report_identity) VALUES(?1,?2,'review','high','t','d','phase-gate','validating',?3,randomblob(16))",(f.repo_id,job_id,now))?;
+		Ok((lead_id, conn.last_insert_rowid()))
+	}).unwrap();
+	let ids = f.database.external_corruption(|conn| {
+		let mut ids = vec![job_id];
+		for kind in ["drilldown", "verify"] {
+			// Unsupported children have no admission authority; advertising
+			// their phase cannot make them leaseable. Deliberately persist
+			// these invalid V2 rows without using the V1 enqueue-policy API.
+			let recipe = serde_json::json!({"version":1,"phase":kind}).to_string();
+			conn.execute("INSERT INTO jobs(repo_id,kind,state,enqueued_at,campaign_id,generation_id,assigned_lead_id,target_finding_id,scheduling_band,effective_priority,eligible_at,recipe,workflow_contract_version) VALUES(?1,?2,'queued',?3,?4,?5,?6,?7,'urgent',100,?3,?8,?9)", rusqlite::params![f.repo_id,kind,now,campaign_id,generation_id,(kind=="drilldown").then_some(lead_id),(kind=="verify").then_some(finding_id),recipe,loupe_core::WORKFLOW_CONTRACT_VERSION])?;
+			ids.push(conn.last_insert_rowid());
+		}
+		Ok(ids)
+	})
+	.unwrap();
+	for (index, review_capabilities) in [
+		LeaseList::default(),
+		LeaseList::new(vec![
+			ReviewCapability::Survey,
+			ReviewCapability::Drilldown,
+			ReviewCapability::Verify,
+		])
+		.unwrap(),
+	]
+	.into_iter()
+	.enumerate()
+	{
+		let response = f
+			.worker
+			.post("https://loupe-server/v1/jobs/lease")
+			.json(&LeaseRequest {
+				protocol_version: PROTOCOL_VERSION,
+				capabilities: vec!["verify:llm".into()],
+				review_capabilities,
+				wait_seconds: 0,
+			})
+			.send()
+			.await
+			.unwrap();
+		assert!(response.status().is_success());
+		// Observe the wire without reintroducing Deserialize on marked DTOs.
+		let response = response.json::<serde_json::Value>().await.unwrap();
+		if index == 0 {
+			assert_eq!(response["kind"], "empty");
+		} else {
+			assert_eq!(response["kind"], "lease", "valid bootstrap must lease");
+			assert_eq!(response["job_id"], ids[0]);
+			assert_eq!(response["repo"]["branch"], "main");
+			assert_eq!(response["head_branch"], "main");
+			assert!(response.get("github_pat").is_none());
+			assert_eq!(response["payload"]["kind"], "review_survey");
+		}
+		common::with_repo(&f.db, f.repo_id, |scope| {
+			for (position, id) in ids.iter().enumerate() {
+				let row = loupe_storage::jobs::get(scope, *id)?.unwrap();
+				let expected =
+					if index == 1 && position == 0 { JobState::Leased } else { JobState::Queued };
+				assert_eq!(row.state, expected);
+				assert_eq!(row.attempts, u32::from(index == 1 && position == 0));
+			}
+			Ok(())
+		})
+		.unwrap();
+	}
+	// Fairness TEMP-table assertions live with the storage-owned claim tests
+	// so they observe the same connection that owns scheduler history.
+	let scan = enqueue_scan(&f, f.repo_id).await;
+	assert_eq!(
+		lease_job(&f.worker).await.job_id,
+		scan.job_id,
+		"phase admission must preserve legacy progress"
+	);
+	f.handle.shutdown().await;
+}
+
+// Deliberately persisted lease fixture isolates control and legacy-access
+// boundaries independently of phase evidence admission.
+async fn campaign_verify_fixture() -> (Fixture, LeaseEnvelope, i64) {
+	use loupe_server::review::campaign;
+	use loupe_server::review::policy::ReviewPolicy;
+	let f = bring_up_with_repo_and_worker().await;
+	let scan = enqueue_scan(&f, f.repo_id).await;
+	let scan_lease = lease_job(&f.worker).await;
+	submit_finding(&f.worker, &scan_lease, finding("Phase boundary", "phase-boundary")).await;
+	let finding_id = f
+		.database
+		.external_corruption(|conn| {
+			let id =
+				conn.query_row("SELECT id FROM findings WHERE job_id=?1", [scan.job_id], |row| {
+					row.get::<_, i64>(0)
+				})?;
+			conn.execute("UPDATE findings SET state='validating' WHERE id=?1", [id])?;
+			Ok(id)
+		})
+		.unwrap();
+	common::with_repo(&f.db, f.repo_id, |scope| {
+		loupe_storage::jobs::enqueue(
+			scope,
+			&loupe_storage::jobs::QueuedJob::<loupe_provenance::Operator> {
+				kind: loupe_core::JobKind::Verify,
+				incremental: false,
+				since_sha: None,
+				parent_job_id: Some(scan.job_id),
+				target_finding_id: Some(finding_id),
+			},
+			0,
+		)
+	})
+	.unwrap();
+	let env = lease_verify_job(&f.worker).await;
+	assert_eq!(
+		f.worker
+			.get(format!("https://loupe-server/v1/findings/{finding_id}"))
+			.header(JOB_CAPABILITY_HEADER, env.job_capability.expose_secret())
+			.send()
+			.await
+			.unwrap()
+			.status(),
+		200,
+		"ordinary verifier retains read access"
+	);
+	let job = common::job(&f.db, f.repo_id, env.job_id);
+	let hash = blake3::hash(env.job_capability.expose_secret().as_bytes());
+	assert_eq!(
+		loupe_storage::scope::with_active_lease(
+			&f.db,
+			loupe_storage::jobs::ActiveLease {
+				identity: loupe_storage::jobs::LeaseIdentity {
+					job_id: job.id,
+					worker_id: job.worker_id.unwrap(),
+					capability_hash: hash.as_bytes()
+				},
+				now: job.lease_expires_at.unwrap() - 1,
+			},
+			|_| Ok(7)
+		)
+		.unwrap(),
+		Some(7),
+		"ordinary verifier retains transaction authority"
+	);
+	let campaign_id = common::with_repo(&f.db, f.repo_id, |scope| {
+		let branch = common::marked::operator::text("main");
+		let campaign::Opened::Created { campaign_id, .. } = campaign::open(
+			scope,
+			&campaign::OpenCampaign {
+				trigger: loupe_storage::campaigns::Trigger::Manual,
+				requested_ref: campaign::RequestedRef::Branch(&branch),
+				base_sha: None,
+				kind_hint: campaign::KindHint::Incremental,
+			},
+			&ReviewPolicy::default(),
+			0,
+		)?
+		else {
+			panic!("new campaign")
+		};
+		Ok(campaign_id)
+	})
+	.unwrap();
+	f.database
+		.external_corruption(|conn| {
+			conn.execute("UPDATE jobs SET campaign_id=?2 WHERE id=?1", (env.job_id, campaign_id))?;
+			Ok(())
+		})
+		.unwrap();
+	(f, env, finding_id)
+}
+
+#[tokio::test]
+async fn campaign_capability_cannot_read_legacy_finding_routes() {
+	let (f, env, finding_id) = campaign_verify_fixture().await;
+	let mut responses = Vec::new();
+	for path in [
+		format!("/v1/repos/{}/findings/search?q=Phase", f.repo_id),
+		format!("/v1/findings/{finding_id}"),
+		"/v1/findings/9223372036854775807".into(),
+	] {
+		let response = f
+			.worker
+			.get(format!("https://loupe-server{path}"))
+			.header(JOB_CAPABILITY_HEADER, env.job_capability.expose_secret())
+			.send()
+			.await
+			.unwrap();
+		responses.push((response.status().as_u16(), response.text().await.unwrap()));
+	}
+	assert_eq!(
+		responses,
+		vec![(403, "invalid or expired job capability".into()); 3],
+		"campaign capability must not inherit repository-wide reads or an existence oracle"
+	);
+	assert_eq!(
+		f.admin
+			.get(format!("https://loupe-server/v1/findings/{finding_id}"))
+			.send()
+			.await
+			.unwrap()
+			.status(),
+		200
+	);
+	f.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn campaign_capability_cannot_submit_legacy_verdict() {
+	let (f, env, finding_id) = campaign_verify_fixture().await;
+	let response = f
+		.worker
+		.post(format!("https://loupe-server/v1/jobs/{}/verdict", env.job_id))
+		.header(JOB_CAPABILITY_HEADER, env.job_capability.expose_secret())
+		.json(&VerdictSubmission {
+			protocol_version: PROTOCOL_VERSION,
+			verdict: Verdict::Dismissed { notes: Some("legacy route bypass".into()) },
+		})
+		.send()
+		.await
+		.unwrap();
+	assert_eq!(response.status(), 403, "campaign verify must use phase finalization");
+	f.database
+		.external_corruption(|conn| {
+			assert_eq!(
+				conn.query_row("SELECT state FROM findings WHERE id=?1", [finding_id], |r| r
+					.get::<_, String>(
+					0
+				))?,
+				"validating"
+			);
+			assert_eq!(
+				conn.query_row(
+					"SELECT COUNT(*) FROM finding_verifications WHERE job_id=?1",
+					[env.job_id],
+					|r| r.get::<_, i64>(0)
+				)?,
+				0
+			);
+			Ok(())
+		})
+		.unwrap();
+	f.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn campaign_control_requires_phase_protocol_header() {
+	let mut statuses = Vec::new();
+	for operation in ["heartbeat", "complete"] {
+		let (f, env, _) = campaign_verify_fixture().await;
+		let body = if operation == "heartbeat" {
+			serde_json::json!({"protocol_version":PROTOCOL_VERSION})
+		} else {
+			serde_json::json!({"protocol_version":PROTOCOL_VERSION,"outcome":"failed","error":"failed execution"})
+		};
+		let response = f
+			.worker
+			.post(format!("https://loupe-server/v1/jobs/{}/{operation}", env.job_id))
+			.header(JOB_CAPABILITY_HEADER, env.job_capability.expose_secret())
+			.json(&body)
+			.send()
+			.await
+			.unwrap();
+		statuses.push(response.status().as_u16());
+		assert_eq!(response.headers()["cache-control"], "no-store");
+		let error: serde_json::Value = response.json().await.unwrap();
+		assert_eq!(error["error"]["code"], "invalid_request");
+		assert_eq!(
+			error["error"]["detail"],
+			serde_json::Value::Null,
+			"closed errors never reflect request diagnostics"
+		);
+		f.database
+			.external_corruption(|conn| {
+				assert_eq!(
+					conn.query_row("SELECT state FROM jobs WHERE id=?1", [env.job_id], |r| r
+						.get::<_, String>(
+						0
+					))?,
+					"leased"
+				);
+				Ok(())
+			})
+			.unwrap();
+		f.handle.shutdown().await;
+	}
+	assert_eq!(
+		statuses,
+		vec![400, 400],
+		"phase control requires its protocol header even though legacy control permits omission"
+	);
+}
+
+#[tokio::test]
+async fn campaign_capability_is_rejected_by_legacy_transaction_recheck() {
+	let (f, env, _) = campaign_verify_fixture().await;
+	let job = common::job(&f.db, f.repo_id, env.job_id);
+	let hash = blake3::hash(env.job_capability.expose_secret().as_bytes());
+	let result = loupe_storage::scope::with_active_lease(
+		&f.db,
+		loupe_storage::jobs::ActiveLease {
+			identity: loupe_storage::jobs::LeaseIdentity {
+				job_id: job.id,
+				worker_id: job.worker_id.unwrap(),
+				capability_hash: hash.as_bytes(),
+			},
+			now: job.lease_expires_at.unwrap() - 1,
+		},
+		|_| Ok(7),
+	)
+	.unwrap();
+	assert_eq!(result, None, "transaction recheck must not grant campaign work legacy authority");
+	f.handle.shutdown().await;
+}
+
 fn client(ca_cert_pem: &str, cert_pem: &str, key_pem: &str, addr: SocketAddr) -> reqwest::Client {
 	reqwest::Client::builder()
 		.add_root_certificate(pem_to_certificate(ca_cert_pem))
@@ -213,6 +558,7 @@ async fn lease_job(worker: &reqwest::Client) -> LeaseEnvelope {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec!["scan:secrets".into()],
+			review_capabilities: Default::default(),
 			wait_seconds: 0,
 		})
 		.send()
@@ -233,6 +579,7 @@ async fn lease_verify_job(worker: &reqwest::Client) -> LeaseEnvelope {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec!["verify:llm".into()],
+			review_capabilities: Default::default(),
 			wait_seconds: 0,
 		})
 		.send()
@@ -797,6 +1144,7 @@ async fn end_to_end_scan_lifecycle() {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec!["scan:secrets".into()],
+			review_capabilities: Default::default(),
 			wait_seconds: 0,
 		})
 		.send()
@@ -1293,6 +1641,7 @@ async fn admin_can_cancel_queued_job() {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec!["scan:secrets".into()],
+			review_capabilities: Default::default(),
 			wait_seconds: 0,
 		})
 		.send()
@@ -2533,6 +2882,7 @@ async fn job_capabilities_bind_worker_operations_to_one_lease() {
 			.json(&LeaseRequest {
 				protocol_version: PROTOCOL_VERSION,
 				capabilities: vec!["scan:secrets".into()],
+				review_capabilities: Default::default(),
 				wait_seconds: 0,
 			})
 			.send()
@@ -2888,6 +3238,7 @@ async fn admin_cannot_lease_jobs() {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec![],
+			review_capabilities: Default::default(),
 			wait_seconds: 0,
 		})
 		.send()
@@ -2922,6 +3273,7 @@ async fn long_poll_lease_wakes_on_enqueue() {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec![],
+			review_capabilities: Default::default(),
 			wait_seconds: 5,
 		})
 		.send();
@@ -2961,6 +3313,7 @@ async fn empty_queue_returns_empty_lease_response() {
 		.json(&LeaseRequest {
 			protocol_version: PROTOCOL_VERSION,
 			capabilities: vec![],
+			review_capabilities: Default::default(),
 			wait_seconds: 0,
 		})
 		.send()

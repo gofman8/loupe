@@ -62,11 +62,24 @@ fn job() -> Value {
 		"incremental":false,"attempts":0,"enqueued_at":0})
 }
 
+async fn cancel_legacy(
+	body: loupe_provenance::Untrusted<bytes::Bytes, Server>,
+) -> Result<JobInfo<Server>> {
+	match ingress::cancel_job(body)? {
+		ingress::CancelResponse::Legacy(job) => Ok(job),
+		ingress::CancelResponse::Phase(_) => panic!("legacy fixture must use legacy shape"),
+	}
+}
+
 #[tokio::test]
 async fn original_optional_defaults_survive_actual_response_owners() {
 	let old_job = job().to_string();
-	for decode in [ingress::get_job, ingress::retry_job, ingress::cancel_job] {
-		let decoded = decode(received(old_job.as_bytes()).await).unwrap();
+	for decoded in [
+		ingress::get_job(received(old_job.as_bytes()).await),
+		ingress::retry_job(received(old_job.as_bytes()).await),
+		cancel_legacy(received(old_job.as_bytes()).await).await,
+	] {
+		let decoded = decoded.unwrap();
 		assert_eq!(decoded.worker_id, None);
 		assert_eq!(decoded.lease_expires_at, None);
 		assert_eq!(decoded.started_at, None);
@@ -142,8 +155,12 @@ async fn original_job_parentage_and_failure_fields_survive_response_owners() {
 		"error":"lease expired after max attempts"});
 	for expected in [&verify, &failed] {
 		let wire = serde_json::to_vec(expected).unwrap();
-		for decode in [ingress::get_job, ingress::retry_job, ingress::cancel_job] {
-			let decoded = decode(received(&wire).await).unwrap();
+		for decoded in [
+			ingress::get_job(received(&wire).await),
+			ingress::retry_job(received(&wire).await),
+			cancel_legacy(received(&wire).await).await,
+		] {
+			let decoded = decoded.unwrap();
 			assert_eq!(serde_json::to_value(&decoded).unwrap(), *expected);
 			if expected == &failed {
 				assert_eq!(decoded.finished_at.unwrap() - decoded.started_at.unwrap(), 390);

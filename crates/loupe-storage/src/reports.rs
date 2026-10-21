@@ -3,7 +3,7 @@
 //! Selected settings, content and completion rights have no public constructors.
 //! ```compile_fail,E0451
 //! use loupe_storage::reports::ReportFinding;
-//! let _ = ReportFinding { id: 1, finding: todo!(), reviewed_revision: None };
+//! let _ = ReportFinding { id: 1, finding: todo!(), reviewed_revision: None, phase_review: false };
 //! ```
 //! ```compile_fail,E0599
 //! use loupe_storage::reports::StoredMailSettings;
@@ -30,7 +30,7 @@ use loupe_core::text::policy::{
 use loupe_core::text::BoundedText;
 use loupe_core::{Finding, FindingState, JobKind, JobState, ReportingDestination, Verdict};
 use loupe_provenance::{Agent, Db as DbSource, Secret, Source};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, TransactionBehavior};
 
 use crate::findings::{FindingIdentity, FindingRow};
 use crate::scope::{AssignmentScope, RepoScope};
@@ -101,6 +101,7 @@ pub struct ReportFinding {
 	id: i64,
 	finding: Finding<Agent>,
 	reviewed_revision: Option<BoundedText<RevisionText, DbSource>>,
+	phase_review: bool,
 }
 impl ReportFinding {
 	pub fn id(&self) -> i64 {
@@ -111,6 +112,44 @@ impl ReportFinding {
 	}
 	pub fn reviewed_revision(&self) -> Option<&BoundedText<RevisionText, DbSource>> {
 		self.reviewed_revision.as_ref()
+	}
+	/// Retained review details, not scanner names or fingerprints, select this layout.
+	pub fn is_phase_review(&self) -> bool {
+		self.phase_review
+	}
+
+	fn selected(
+		scope: &SelectionContext<'_>, row: FindingRow,
+	) -> std::result::Result<Self, Unavailable> {
+		let evidence =
+			crate::finding_details::read_review_evidence_raw(scope.conn, scope.repo_id, row.id)
+				.map_err(|_| Unavailable::StoredInput)?;
+		let (phase_review, reviewed_revision) = match evidence {
+			crate::StoredEvidence::Missing => {
+				let (revision, campaign): (_, Option<i64>) = scope
+					.conn
+					.query_row(
+						"SELECT head_sha,campaign_id FROM jobs WHERE id=?1 AND repo_id=?2",
+						params![row.job_id, scope.repo_id],
+						|row| Ok((crate::ingress::optional_revision(row, 0)?, row.get(1)?)),
+					)
+					.map_err(|_| Unavailable::Revision)?;
+				if campaign.is_some() {
+					return Err(Unavailable::StoredInput);
+				}
+				(false, revision)
+			},
+			crate::StoredEvidence::Historical => {
+				let revision = scope.conn.query_row(
+					"SELECT reviewed_commit_sha FROM finding_review_details WHERE finding_id=?1 AND repo_id=?2",
+					params![row.id, scope.repo_id],
+					|row| crate::ingress::revision(row, 0),
+				).map_err(|_| Unavailable::Revision)?;
+				(true, Some(revision))
+			},
+			crate::StoredEvidence::Recorded(evidence) => (true, Some(evidence.reviewed_commit_sha)),
+		};
+		Ok(Self { id: row.id, finding: row.into_finding(), reviewed_revision, phase_review })
 	}
 }
 impl std::fmt::Debug for ReportFinding {
@@ -226,6 +265,34 @@ impl ReportReceipt {
 		}
 		Ok(changed)
 	}
+}
+
+// Private report-selection facts; neither repository nor operator authority.
+struct SelectionContext<'a> {
+	conn: &'a rusqlite::Connection,
+	repo_id: i64,
+	identity: &'a Arc<crate::db::DbIdentity>,
+	committed: &'a Arc<AtomicBool>,
+}
+impl<'a> SelectionContext<'a> {
+	fn from_scope(scope: &'a RepoScope<'_>) -> Self {
+		Self {
+			conn: scope.conn,
+			repo_id: scope.repo_id,
+			identity: scope.identity,
+			committed: scope.committed,
+		}
+	}
+}
+
+pub(crate) fn prepare_verification(
+	conn: &rusqlite::Connection, repo_id: i64, finding_id: i64,
+	identity: &Arc<crate::db::DbIdentity>, committed: &Arc<AtomicBool>,
+) -> Result<Preparation> {
+	prepare(
+		&SelectionContext { conn, repo_id, identity, committed },
+		Selection::Finding(finding_id),
+	)
 }
 
 enum Selection {
@@ -372,15 +439,15 @@ pub fn prepare_assignment(scope: &AssignmentScope<'_>) -> Result<Preparation> {
 		},
 		_ => return Err(Error::ScopeDenied),
 	};
-	prepare(&scope.repo, selection)
+	prepare(&SelectionContext::from_scope(&scope.repo), selection)
 }
 
 pub fn prepare_operator(scope: &RepoScope<'_>, finding_id: i64) -> Result<Preparation> {
 	scope.require_operator()?;
-	prepare(scope, Selection::Finding(finding_id))
+	prepare(&SelectionContext::from_scope(scope), Selection::Finding(finding_id))
 }
 
-fn prepare(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
+fn prepare(scope: &SelectionContext<'_>, selection: Selection) -> Result<Preparation> {
 	// Read failures in this report-only projection must not undo an otherwise
 	// completed domain mutation. Its caller still propagates domain SQL errors.
 	match select(scope, selection) {
@@ -395,7 +462,7 @@ fn prepare(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
 	}
 }
 
-fn select(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
+fn select(scope: &SelectionContext<'_>, selection: Selection) -> Result<Preparation> {
 	let repo = crate::repos::get_raw(scope.conn, scope.repo_id)?.ok_or(Error::ScopeDenied)?;
 	if matches!(repo.reporting, ReportingDestination::Manual) {
 		return Ok(Preparation::NoReport);
@@ -452,22 +519,7 @@ fn select(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
 	for row in rows {
 		let id = row.id;
 		members.push(Member { id, identity: row.report_identity(), completed: false });
-		let revision = scope
-			.conn
-			.query_row(
-				"SELECT head_sha FROM jobs WHERE id=?1 AND repo_id=?2",
-				params![row.job_id, scope.repo_id],
-				|row| crate::ingress::optional_revision(row, 0),
-			)
-			.optional();
-		let content = match revision {
-			Ok(revision) => Ok(ReportFinding {
-				id,
-				finding: row.into_finding(),
-				reviewed_revision: revision.flatten(),
-			}),
-			Err(_) => Err(Unavailable::Revision),
-		};
+		let content = ReportFinding::selected(scope, row);
 		entries.push(ReportEntry { id, content });
 	}
 	Ok(Preparation::Ready(Box::new(PreparedReport {
@@ -484,6 +536,9 @@ fn select(scope: &RepoScope<'_>, selection: Selection) -> Result<Preparation> {
 		},
 	})))
 }
+
+#[cfg(test)]
+mod review_tests;
 
 #[cfg(test)]
 mod tests {
@@ -775,7 +830,7 @@ mod tests {
 			&db,
 			&crate::test_support::operator_ingress(),
 			OperatorTarget::Repository(repo),
-			|scope| prepare(scope, Selection::Job(job)),
+			|scope| prepare(&SelectionContext::from_scope(scope), Selection::Job(job)),
 		)
 		.unwrap();
 		let Preparation::Ready(ref mut batch) = batch else { panic!("batch") };

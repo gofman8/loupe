@@ -22,23 +22,34 @@
 //! `Db::open_in_memory` so the migration code path is exercised on every
 //! run.
 
+pub mod admission;
+pub mod admission_candidates;
+pub mod admission_claim;
+pub mod admission_policy;
+mod admission_preparation;
+mod admission_quarantine;
+mod campaign_work;
 pub mod campaign_workflow;
 pub mod campaigns;
 pub mod checkpoints;
 mod db;
+pub mod duplicate_candidates;
 pub mod finding_details;
 pub mod findings;
 pub mod generations;
 pub mod github_app;
+pub mod host_preparation;
 pub mod identity;
 mod ingress;
 pub mod inventory;
+pub mod inventory_disposition;
 pub mod jobs;
 pub mod lead_observations;
 pub mod leads;
 pub mod maintenance;
 pub mod migrations;
 mod ownership;
+pub mod phase_lifecycle;
 pub mod proofs;
 pub mod recovery;
 pub mod registry;
@@ -46,6 +57,11 @@ mod report_identity;
 pub mod reports;
 pub mod repos;
 mod review;
+pub mod review_authority;
+pub mod review_compatibility;
+mod review_coverage;
+pub mod review_findings;
+pub mod review_intents;
 pub mod review_unit_results;
 pub mod review_units;
 pub mod scheduler;
@@ -54,9 +70,16 @@ pub mod scope;
 pub mod scope_sequence_fuzz;
 pub mod secrets;
 pub mod source_refs;
+pub mod terminal_payloads;
 pub mod terminal_receipt;
 pub(crate) mod transaction;
+pub mod unit_holds;
 pub mod workers;
+
+#[cfg(test)]
+mod checkpoint_evidence_feature_tests;
+#[cfg(test)]
+mod checkpoint_evidence_tests;
 
 #[cfg(test)]
 extern crate self as loupe_storage;
@@ -76,9 +99,13 @@ mod source_migration_tests;
 mod sql_ingress_tests;
 
 #[cfg(test)]
+mod evidence_tests;
+#[cfg(test)]
 mod proof_tests;
 #[cfg(test)]
 mod replay_tests;
+#[cfg(test)]
+mod review_coverage_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]
@@ -97,6 +124,23 @@ mod test_support;
 pub use db::{Db, Error, Result};
 pub use loupe_core::canonical;
 pub use review::{Conflict, Entity, Ownership};
+
+/// A malformed modern payload is an error, never historical or missing evidence.
+#[derive(Clone, PartialEq, Eq)]
+pub enum StoredEvidence<T> {
+	Missing,
+	Historical,
+	Recorded(T),
+}
+impl<T> std::fmt::Debug for StoredEvidence<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(match self {
+			Self::Missing => "StoredEvidence::Missing",
+			Self::Historical => "StoredEvidence::Historical",
+			Self::Recorded(_) => "StoredEvidence::Recorded([redacted])",
+		})
+	}
+}
 
 #[cfg(test)]
 mod scope_agreement_tests;

@@ -1,5 +1,9 @@
 use loupe_core::text::{decode_json_string_bounded, policy, BoundedText};
 use loupe_core::{Finding, RepoSpec};
+use loupe_proto::review_lease::{
+	ReviewDrilldownLease, ReviewDrilldownLeaseDecoder, ReviewSurveyLease, ReviewSurveyLeaseDecoder,
+	ReviewVerifyLease, ReviewVerifyLeaseDecoder,
+};
 use loupe_provenance::{Agent, Mark, Secret, Server, Unvalidated};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -21,6 +25,9 @@ enum Kind {
 	Empty,
 	Scan,
 	Verify,
+	ReviewSurvey,
+	ReviewDrilldown,
+	ReviewVerify,
 }
 fn kind(raw: &str) -> Result<Kind, DecodeError> {
 	let token = if raw.starts_with('[') {
@@ -35,6 +42,9 @@ fn kind(raw: &str) -> Result<Kind, DecodeError> {
 		"empty" => Ok(Kind::Empty),
 		"scan" => Ok(Kind::Scan),
 		"verify" => Ok(Kind::Verify),
+		"review_survey" => Ok(Kind::ReviewSurvey),
+		"review_drilldown" => Ok(Kind::ReviewDrilldown),
+		"review_verify" => Ok(Kind::ReviewVerify),
 		_ => Err(DecodeError::Data("unknown lease kind")),
 	}
 }
@@ -99,6 +109,9 @@ struct RawVerify<'a> {
 enum Payload {
 	Scan { since_sha: Option<BoundedText<RevisionText, Server>> },
 	Verify { finding_id: i64, finding: Box<Finding<Agent>>, reviewed_sha: ReviewedRevisionFact },
+	ReviewSurvey(Box<ReviewSurveyLease<Agent, Server>>),
+	ReviewDrilldown(Box<ReviewDrilldownLease<Agent, Server>>),
+	ReviewVerify(Box<ReviewVerifyLease<Agent, Server>>),
 }
 pub(super) struct Envelope {
 	protocol_version: u16,
@@ -183,6 +196,15 @@ pub(super) fn decode(
 						reviewed_sha: reviewed_revision(&u.mark(), raw.reviewed_sha)?,
 					}
 				},
+				Kind::ReviewSurvey => Payload::ReviewSurvey(Box::new(
+					ReviewSurveyLeaseDecoder::decode_payload(u, raw.payload)?,
+				)),
+				Kind::ReviewDrilldown => Payload::ReviewDrilldown(Box::new(
+					ReviewDrilldownLeaseDecoder::decode_payload(u, raw.payload)?,
+				)),
+				Kind::ReviewVerify => Payload::ReviewVerify(Box::new(
+					ReviewVerifyLeaseDecoder::decode_payload(u, raw.payload)?,
+				)),
 				_ => return Err(DecodeError::Data("unknown payload kind")),
 			};
 			// The capability's bounded decoded allocation moves straight into its
@@ -230,6 +252,11 @@ impl DecodedLeaseResponse {
 			Self::Lease(env) => {
 				let payload = match env.payload {
 					Payload::Scan { since_sha } => loupe_proto::LeasePayload::Scan { since_sha },
+					Payload::ReviewSurvey(value) => loupe_proto::LeasePayload::ReviewSurvey(value),
+					Payload::ReviewDrilldown(value) => {
+						loupe_proto::LeasePayload::ReviewDrilldown(value)
+					},
+					Payload::ReviewVerify(value) => loupe_proto::LeasePayload::ReviewVerify(value),
 					Payload::Verify { finding_id, finding, reviewed_sha } => {
 						loupe_proto::LeasePayload::Verify {
 							finding_id,

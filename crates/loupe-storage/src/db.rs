@@ -11,6 +11,7 @@ pub enum Error {
 	Sqlite(rusqlite::Error),
 	UnknownJobKinds(usize),
 	Validation(loupe_core::text::Error),
+	ReviewPayload(loupe_core::review_payload::Error),
 	Conflict(crate::Conflict),
 	Ownership(crate::Ownership),
 	NotFound(crate::Entity, i64),
@@ -35,6 +36,11 @@ impl From<loupe_core::text::Error> for Error {
 		Self::Validation(error)
 	}
 }
+impl From<loupe_core::review_payload::Error> for Error {
+	fn from(error: loupe_core::review_payload::Error) -> Self {
+		Self::ReviewPayload(error)
+	}
+}
 
 // SQLite diagnostics can include bound FTS input and arbitrary conversion
 // causes. Preserve the structured variant for internal decisions, but expose
@@ -49,6 +55,7 @@ impl std::fmt::Display for Error {
 				write!(f, "database contains {count} unknown job kinds; refusing startup")
 			},
 			Self::Validation(error) => std::fmt::Display::fmt(error, f),
+			Self::ReviewPayload(_) => f.write_str("invalid review payload"),
 			Self::Conflict(conflict) => write!(f, "conflict: {conflict:?}"),
 			Self::Ownership(relation) => write!(f, "ownership mismatch: {relation:?}"),
 			Self::NotFound(entity, id) => write!(f, "{entity:?} {id} not found"),
@@ -67,6 +74,7 @@ impl std::fmt::Debug for Error {
 			Self::Migration(failure) => f.debug_tuple("Migration").field(failure).finish(),
 			Self::UnknownJobKinds(count) => f.debug_tuple("UnknownJobKinds").field(count).finish(),
 			Self::Validation(error) => f.debug_tuple("Validation").field(error).finish(),
+			Self::ReviewPayload(_) => f.write_str("ReviewPayload([redacted])"),
 			Self::Conflict(conflict) => f.debug_tuple("Conflict").field(conflict).finish(),
 			Self::Ownership(relation) => f.debug_tuple("Ownership").field(relation).finish(),
 			Self::NotFound(entity, id) => {
@@ -143,6 +151,7 @@ impl Db {
 		conn.pragma_update(None, "foreign_keys", "ON")?;
 		conn.pragma_update(None, "synchronous", "NORMAL")?;
 		migrate(&mut conn)?;
+		crate::review_coverage::register(&conn)?;
 		Ok(Self { conn: Mutex::new(conn), identity: Arc::new(DbIdentity) })
 	}
 

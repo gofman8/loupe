@@ -1,14 +1,37 @@
 //! Private adapters for campaign SQL checks paired with server integration tests.
+pub(crate) mod campaign {
+	pub(crate) use crate::campaign_workflow::*;
+	pub(crate) fn tick(db: &crate::Db, now: i64) -> crate::Result<TickReport> {
+		tick_retained(db, now, &mut Maintenance::default())
+	}
+	pub(crate) fn tick_retained(
+		db: &crate::Db, now: i64, maintenance: &mut Maintenance,
+	) -> crate::Result<TickReport> {
+		crate::campaign_workflow::tick(
+			db,
+			now,
+			maintenance,
+			crate::admission_claim::validation_tests::test_policy,
+		)
+	}
+	pub(crate) fn try_finish(
+		scope: &crate::scope::RepoScope<'_>, campaign: i64, now: i64,
+	) -> crate::Result<Option<Finish>> {
+		crate::campaign_workflow::try_finish(
+			scope,
+			campaign,
+			now,
+			crate::admission_claim::validation_tests::test_policy,
+		)
+	}
+}
+
 pub(crate) mod marked {
 	pub(crate) mod agent {
 		pub(crate) fn json<P: loupe_core::text::JsonPolicy>(
 			raw: &str,
 		) -> loupe_core::text::BoundedJson<P, loupe_provenance::Agent> {
 			crate::test_support::json(raw).unwrap()
-		}
-		pub(crate) fn empty_refs<const MAX: usize>(
-		) -> crate::source_refs::SourceRefs<MAX, loupe_provenance::Agent> {
-			crate::test_support::refs(vec![]).unwrap()
 		}
 	}
 	pub(crate) mod repo {

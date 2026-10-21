@@ -37,11 +37,21 @@ fn fixture<T>(raw: &str, f: impl for<'a> FnOnce(&'a str, &Mark<'a, Agent>) -> T)
 }
 
 pub(crate) fn text<P: TextPolicy>(raw: &str) -> BoundedText<P, Agent> {
-	fixture(raw, |raw, mark| BoundedText::new(mark, raw).unwrap())
+	try_text(raw).unwrap()
+}
+
+pub(super) fn try_text<P: TextPolicy>(
+	raw: &str,
+) -> Result<BoundedText<P, Agent>, loupe_core::text::Error> {
+	fixture(raw, |raw, mark| BoundedText::new(mark, raw))
 }
 
 pub(super) fn path(raw: &str) -> RepoPath<Agent> {
-	fixture(raw, |raw, mark| RepoPath::new(mark, raw).unwrap())
+	try_path(raw).unwrap()
+}
+
+pub(super) fn try_path(raw: &str) -> Result<RepoPath<Agent>, loupe_core::text::Error> {
+	fixture(raw, |raw, mark| RepoPath::new(mark, raw))
 }
 
 pub(crate) fn repo(reporting: serde_json::Value) -> loupe_storage::Result<RepoRow> {
@@ -77,6 +87,23 @@ pub(super) fn revision(raw: &str) -> BoundedText<RevisionText, Db> {
 		.unwrap()
 }
 
+/// Independent CommonMark parsing, never the production fence-sizing helper.
+pub(super) fn literal_values(body: &str) -> Vec<String> {
+	use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+	let mut values = Vec::new();
+	let mut block = None::<String>;
+	for event in Parser::new(body) {
+		match event {
+			Event::Code(value) => values.push(value.into_string()),
+			Event::Start(Tag::CodeBlock(_)) => block = Some(String::new()),
+			Event::Text(value) if block.is_some() => block.as_mut().unwrap().push_str(&value),
+			Event::End(TagEnd::CodeBlock) => values.push(block.take().unwrap()),
+			_ => {},
+		}
+	}
+	values
+}
+
 /// Use the real SQLite projection and lease issuer for renderer fixtures.
 pub(super) fn prepared(
 	repo: &RepoRow, findings: &[ReportFinding],
@@ -86,6 +113,18 @@ pub(super) fn prepared(
 
 pub(crate) fn prepared_with_db(
 	repo: &RepoRow, findings: &[ReportFinding],
+) -> (
+	std::sync::Arc<loupe_storage::Db>,
+	loupe_storage::reports::PreparedReport,
+	crate::test_support::offline::OfflineDatabase,
+) {
+	prepared_with_reviews(repo, findings, &[])
+}
+
+/// Select a mixed batch through actual stored historical review evidence. No
+/// test-only constructor can set the production report's phase provenance.
+pub(crate) fn prepared_with_reviews(
+	repo: &RepoRow, findings: &[ReportFinding], reviews: &[bool],
 ) -> (
 	std::sync::Arc<loupe_storage::Db>,
 	loupe_storage::reports::PreparedReport,
@@ -102,9 +141,15 @@ pub(crate) fn prepared_with_db(
 		conn.execute("INSERT INTO jobs(id,repo_id,kind,state,incremental,worker_id,lease_expires_at,job_capability_hash,enqueued_at) VALUES(1,1,'scan','leased',0,1,100,?1,0)", [vec![7u8;32]])?;
 		for (index, report) in findings.iter().enumerate() {
 			let mut finding = report.finding.clone();
-			finding.fingerprint = text(&format!("fixture-{index}"));
+			let review = reviews.get(index).copied().unwrap_or(false);
+			if !review {
+				finding.fingerprint = text(&format!("fixture-{index}"));
+			}
 			conn.execute("INSERT INTO findings(id,repo_id,job_id,scanner_id,severity,title,description,file_path,line_start,line_end,cwe,patch_unified,poc_unified,fingerprint,state,verification_required,created_at,source,report_identity) VALUES(?1,1,1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'confirmed',0,0,'agent',randomblob(16))",
 				rusqlite::params![report.id+index as i64,finding.scanner_id.expose(),finding.severity.as_str(),finding.title.expose(),finding.description.expose(),finding.file_path.as_ref().map(RepoPath::expose),finding.line_start,finding.line_end,finding.cwe.as_ref().map(BoundedText::expose),finding.patch_unified.as_ref().map(BoundedText::expose),finding.poc_unified.as_ref().map(BoundedText::expose),finding.fingerprint.expose()])?;
+			if review {
+				conn.execute("INSERT INTO finding_review_details(finding_id,repo_id,workflow_contract_version,profile_version,reviewed_commit_sha,identity_family,identity_anchor,identity_fingerprint,l2_argument,counterevidence,assumptions_gaps,confidence,submitted_rung,created_at,source) VALUES(?1,1,1,1,?2,'fixture','anchor',randomblob(32),'{}','counterevidence','assumptions','medium','L2',0,'agent')", rusqlite::params![report.id+index as i64,report.reviewed_revision.as_ref().map(BoundedText::expose).unwrap_or("retained-review")])?;
+			}
 		}
 		if let Some(revision) = findings.first().and_then(|finding| finding.reviewed_revision.as_ref()) {
 			conn.execute("UPDATE jobs SET head_sha=?1 WHERE id=1", [revision.expose()])?;

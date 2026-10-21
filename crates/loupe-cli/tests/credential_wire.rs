@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use loupe_proto::PROTOCOL_VERSION;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -67,7 +68,7 @@ async fn capture(args: &[&str], credential: Option<&str>, response: &str) -> (St
 async fn actual_credential_commands_preserve_wire_contracts() {
 	const SECRET: &str = "FAKE_CLI_WIRE_\"\\\n\r\té秘密";
 	const EMPTY: &str = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
-	let repo_body = r#"{"protocol_version":2,"repo_id":42}"#;
+	let repo_body = format!(r#"{{"protocol_version":{PROTOCOL_VERSION},"repo_id":42}}"#);
 	let repo_response = format!(
 		"HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
 		repo_body.len(),
@@ -78,13 +79,13 @@ async fn actual_credential_commands_preserve_wire_contracts() {
 			vec!["github-app", "set", "--app-id", "42"],
 			"PUT /v1/github-app",
 			EMPTY,
-			json!({"protocol_version":2,"app_id":42,"private_key_pem":SECRET}),
+			json!({"protocol_version":PROTOCOL_VERSION,"app_id":42,"private_key_pem":SECRET}),
 		),
 		(
 			vec!["repo", "rotate-pat", "7"],
 			"POST /v1/repos/7/reporting/github-pat",
 			EMPTY,
-			json!({"protocol_version":2,"github_pat":SECRET}),
+			json!({"protocol_version":PROTOCOL_VERSION,"github_pat":SECRET}),
 		),
 		(
 			vec![
@@ -98,7 +99,7 @@ async fn actual_credential_commands_preserve_wire_contracts() {
 			],
 			"PUT /v1/repos/7/reporting/github",
 			EMPTY,
-			json!({"protocol_version":2,"target_owner":"acme","target_repo":"issues","github_pat":SECRET}),
+			json!({"protocol_version":PROTOCOL_VERSION,"target_owner":"acme","target_repo":"issues","github_pat":SECRET}),
 		),
 		(
 			vec![
@@ -113,7 +114,7 @@ async fn actual_credential_commands_preserve_wire_contracts() {
 			],
 			"POST /v1/repos",
 			repo_response.as_str(),
-			json!({"protocol_version":2,"clone_url":"local","reporting":{"kind":"github_issue","target_owner":"acme","target_repo":"issues","github_pat":SECRET}}),
+			json!({"protocol_version":PROTOCOL_VERSION,"clone_url":"local","reporting":{"kind":"github_issue","target_owner":"acme","target_repo":"issues","github_pat":SECRET}}),
 		),
 	] {
 		let (headers, body) = capture(&args, Some(SECRET), response).await;
@@ -129,7 +130,10 @@ async fn actual_credential_commands_preserve_wire_contracts() {
 		EMPTY,
 	)
 	.await;
-	assert_eq!(body, json!({"protocol_version":2,"target_owner":"acme","target_repo":"issues"}));
+	assert_eq!(
+		body,
+		json!({"protocol_version":PROTOCOL_VERSION,"target_owner":"acme","target_repo":"issues"})
+	);
 }
 
 #[tokio::test]
@@ -142,6 +146,6 @@ async fn explicit_pat_overrides_environment_without_changing_bytes() {
 			EMPTY,
 		)
 		.await;
-		assert_eq!(body, json!({"protocol_version":2,"github_pat":explicit}));
+		assert_eq!(body, json!({"protocol_version":PROTOCOL_VERSION,"github_pat":explicit}));
 	}
 }

@@ -7,6 +7,22 @@ use serde_json::{json, Value};
 use crate::utils::test_logger;
 use crate::{cli_common as limits, cli_response_oracle as oracle};
 const CONSTRUCTED_LIMIT: usize = 16 * 1024 * 1024;
+
+#[test]
+fn phase_cancel_oracle_keeps_original_bytes_and_legacy_shapes() {
+	let phase = br#"{"protocol_version":3,"job_id":7,"state":"cancelled","eligible_at":null}"#;
+	assert!(check(ResponseCase::CancelJob, phase).result.is_ok());
+	assert!(check(ResponseCase::CancelJob, &bytes(&job())).result.is_ok());
+	for raw in [
+		r#"{"protocol_version":2,"job_id":7,"state":"cancelled"}"#,
+		r#"{"protocol_version":3,"job_id":7,"job_id":7,"state":"cancelled"}"#,
+		r#"{"protocol_version":3,"job_id":7,"state":"cancelled","extra":true}"#,
+		r#"{"protocol_version":3,"job_id":0,"state":"cancelled"}"#,
+		r#"{"protocol_version":3,"job_id":7,"state":"succeeded"}"#,
+	] {
+		assert!(check(ResponseCase::CancelJob, raw.as_bytes()).result.is_err(), "{raw}");
+	}
+}
 fn encoded(value: &str) -> String {
 	serde_json::to_string(value).unwrap_or_else(|e| panic!("fixture encoding: {e}"))
 }

@@ -2,6 +2,8 @@
 
 use super::*;
 
+const PRIVATE_REVIEWED_REVISION: &str = "private-reviewed-revision-sentinel";
+
 struct CountingVerifier(Arc<std::sync::atomic::AtomicUsize>);
 #[async_trait::async_trait]
 impl Scanner for CountingVerifier {
@@ -23,6 +25,26 @@ impl Scanner for CountingVerifier {
 #[tokio::test]
 async fn missing_or_unavailable_revision_emits_terminal_verdict_then_successful_completion() {
 	revision_outcomes(false).await;
+}
+
+#[tokio::test]
+async fn unavailable_revision_diagnostics_omit_server_text() {
+	if !crate::test_env::in_env(
+		"runner::tests::ingress_tests::unavailable_revision_diagnostics_omit_server_text",
+		"reviewed-revision-log",
+		&[],
+	) {
+		return;
+	}
+	let capture = crate::test_support::LogCapture::default();
+	capture.install();
+	revision_outcomes(false).await;
+	let logs = capture.text();
+	assert!(logs.contains("verify revision missing from refreshed cache; re-cloning"));
+	assert!(
+		!logs.contains(PRIVATE_REVIEWED_REVISION),
+		"server-provided reviewed revision leaked into runner diagnostics"
+	);
 }
 
 #[test]
@@ -105,9 +127,14 @@ async fn revision_outcomes(cancel_during_cache: bool) {
 		Runner::new(client, cache, vec![Arc::new(CountingVerifier(verifier_calls.clone()))]);
 	let absent_oid = "1111111111111111111111111111111111111111";
 	let mut cancelled_calls = Vec::new();
-	for revision in
-		[None, Some(" \t"), Some("base"), Some(absent_oid), Some(valid_revision.as_str())]
-	{
+	for revision in [
+		None,
+		Some(" \t"),
+		Some("base"),
+		Some(PRIVATE_REVIEWED_REVISION),
+		Some(absent_oid),
+		Some(valid_revision.as_str()),
+	] {
 		// Original response bytes are admitted by the actual HTTP lease decoder.
 		let mut env = serde_json::json!({
 			"kind": "lease", "protocol_version": PROTOCOL_VERSION,
@@ -173,7 +200,7 @@ async fn revision_outcomes(cancel_during_cache: bool) {
 			None => "original reviewed revision is unavailable: verify lease did not carry the original reviewed revision".to_owned(),
 			Some(sha) if sha == valid_revision => "scanner does not verify".to_owned(),
 			Some(sha) => {
-				let operation = if sha == "base" { "parsing" } else { "locating" };
+				let operation = if sha == absent_oid { "locating" } else { "parsing" };
 				format!("original reviewed revision {sha} is unavailable after refreshing and re-cloning the repository: {operation} reviewed revision {sha}")
 			},
 		};

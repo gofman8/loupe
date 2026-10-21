@@ -23,6 +23,7 @@ const TABLES: &[(&str, Validator)] = &[
 	("lead_observations", crate::lead_observations::validate_stored_rows),
 	("job_checkpoints", crate::checkpoints::validate_stored_rows),
 	("job_terminal_receipts", crate::terminal_receipt::validate_stored_rows),
+	("job_terminal_payloads", crate::terminal_payloads::validate_stored_rows),
 	("secrets", crate::secrets::validate_stored_rows),
 	("finding_review_details", crate::finding_details::validate_stored_reviews),
 	("verification_attempt_details", crate::finding_details::validate_stored_attempts),
@@ -31,16 +32,40 @@ const TABLES: &[(&str, Validator)] = &[
 	("staged_proof_artifacts", crate::proofs::validate_stored_staged),
 	("proof_executions", crate::proofs::validate_stored_executions),
 	("verification_proofs", crate::proofs::validate_stored_proofs),
+	("lead_drilldown_intents", validate_lead_intents),
+	("finding_verification_intents", validate_verification_intents),
 ];
 
-// These tables carry no user documents; scalar storage and foreign keys are
-// sufficient. Keeping their projections explicit also supplies safe names.
+// These projections carry no user documents; scalar storage, CHECK constraints
+// and foreign keys are sufficient. Explicit projections supply safe names and
+// cover phase state reserved before its runtime DAO is introduced.
 const STRUCTURAL: &[(&str, &str)] = &[
-	("job_assigned_review_units", "job_id,review_unit_id,position,completed"),
+	("jobs", "prepared_attempt,prepared_capability_hash,prepared_at"),
+	("job_assigned_review_units", "job_id,review_unit_id,position,completed,assignment_epoch"),
 	("verification_proof_artifacts", "repo_id,verification_proof_id,proof_artifact_id"),
 	("verification_proof_executions", "repo_id,verification_proof_id,proof_execution_id"),
 	("schema_meta", "id,version,applied_at"),
+	("generation_manifests", "generation_id,format_version,owner_job_id,expected_entry_count,expected_digest,received_entry_count,received_canonical_bytes,created_at,sealed_at"),
+	("generation_inventory_units", "generation_id,inventory_entry_id,review_unit_id"),
+	("survey_continuation_batches", "batch_id,repo_id,generation_id,campaign_id,producer_job_id,batch_ordinal,logical_sequence,continuation_class,state,not_before,block_reason,admitted_job_id,expected_unit_count,accepted_band,accepted_score,priority_policy_version,created_at"),
+	("review_unit_holds", "review_unit_id,generation_id,producing_job_id,producing_result_id,source_assignment_epoch,continuation_class,block_reason,pending_batch_id,batch_position,created_at,updated_at"),
+	("campaign_admission_spending", "campaign_id,policy_version,general_spent,urgent_spent,verification_spent"),
+	("job_admission_charges", "job_id,campaign_id,pool"),
 ];
+
+// Both reserved intent tables share the same stored revision contract. Their
+// integer primary keys are also rowids; all other fields are projected here.
+const INTENT_COLUMNS: &str = "repo_id,generation_id,originating_job_id,originating_campaign_id,admission_campaign_id,source_commit_sha,profile_version,profile_digest,intent_revision,intent_kind,continuation_class,logical_sequence,state,not_before,block_reason,admitted_job_id,accepted_band,accepted_score,priority_policy_version,created_at,updated_at";
+
+fn validate_lead_intents(conn: &Connection) -> Result<()> {
+	scan(conn, "lead_drilldown_intents", INTENT_COLUMNS, |row| crate::ingress::revision(row, 5))
+}
+
+fn validate_verification_intents(conn: &Connection) -> Result<()> {
+	scan(conn, "finding_verification_intents", INTENT_COLUMNS, |row| {
+		crate::ingress::revision(row, 5)
+	})
+}
 
 pub(crate) fn validate(conn: &Connection) -> Result<()> {
 	for (_, validate) in TABLES {

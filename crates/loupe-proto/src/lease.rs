@@ -81,10 +81,14 @@ impl<'de> Deserialize<'de> for JobCapability {
 pub struct LeaseRequest<S: Source> {
 	pub protocol_version: u16,
 	pub capabilities: Vec<BoundedText<LeaseCapabilityName, S>>,
+	/// Separate from legacy scanner tags; empty until phase workers exist.
+	#[serde(default)]
+	pub review_capabilities:
+		crate::review_lease::LeaseList<crate::review_lease::ReviewCapability, 3>,
 	#[serde(default)]
 	pub wait_seconds: u32,
 }
-record_impls!(LeaseRequest<S> { protocol_version, capabilities, wait_seconds });
+record_impls!(LeaseRequest<S> { protocol_version, capabilities, review_capabilities, wait_seconds });
 
 /// Response body. Either a job is handed out (`Lease(LeaseEnvelope)`) or
 /// the queue is empty / no job matches the worker's capabilities (`Empty`).
@@ -145,10 +149,16 @@ pub enum LeasePayload<ContentS: Source, MetaS: Source> {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		reviewed_sha: Option<BoundedText<RevisionText, MetaS>>,
 	},
+	ReviewSurvey(Box<crate::review_lease::ReviewSurveyLease<ContentS, MetaS>>),
+	ReviewDrilldown(Box<crate::review_lease::ReviewDrilldownLease<ContentS, MetaS>>),
+	ReviewVerify(Box<crate::review_lease::ReviewVerifyLease<ContentS, MetaS>>),
 }
 impl<ContentS: Source, MetaS: Source> Clone for LeasePayload<ContentS, MetaS> {
 	fn clone(&self) -> Self {
 		match self {
+			Self::ReviewSurvey(value) => Self::ReviewSurvey(value.clone()),
+			Self::ReviewDrilldown(value) => Self::ReviewDrilldown(value.clone()),
+			Self::ReviewVerify(value) => Self::ReviewVerify(value.clone()),
 			Self::Scan { since_sha } => Self::Scan { since_sha: since_sha.clone() },
 			Self::Verify { finding_id, finding, reviewed_sha } => Self::Verify {
 				finding_id: *finding_id,
@@ -161,6 +171,9 @@ impl<ContentS: Source, MetaS: Source> Clone for LeasePayload<ContentS, MetaS> {
 impl<ContentS: Source, MetaS: Source> PartialEq for LeasePayload<ContentS, MetaS> {
 	fn eq(&self, other: &Self) -> bool {
 		match (self, other) {
+			(Self::ReviewSurvey(a), Self::ReviewSurvey(b)) => a == b,
+			(Self::ReviewDrilldown(a), Self::ReviewDrilldown(b)) => a == b,
+			(Self::ReviewVerify(a), Self::ReviewVerify(b)) => a == b,
 			(Self::Scan { since_sha: a }, Self::Scan { since_sha: b }) => a == b,
 			(
 				Self::Verify { finding_id: a, finding: b, reviewed_sha: c },
@@ -286,7 +299,7 @@ mod tests {
 				assert_eq!(*f, finding);
 				assert_eq!(reviewed_sha.as_ref().map(|sha| sha.expose()), Some("abc123"));
 			},
-			LeasePayload::Scan { .. } => panic!("expected Verify payload"),
+			_ => panic!("expected Verify payload"),
 		}
 	}
 

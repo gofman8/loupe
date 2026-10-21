@@ -94,7 +94,20 @@ pub struct LeaseRequest {
 	pub protocol_version: u16,
 	pub capabilities: Vec<String>,
 	#[serde(default)]
+	pub review_capabilities: Vec<ReviewCapability>,
+	#[serde(default)]
 	pub wait_seconds: u32,
+}
+
+// Keep the request oracle independent of production capability admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewCapability {
+	#[serde(rename = "review:survey:v1")]
+	Survey,
+	#[serde(rename = "review:drilldown:v1")]
+	Drilldown,
+	#[serde(rename = "review:verify:v1")]
+	Verify,
 }
 
 /// Response body. Either a job is handed out (`Lease(LeaseEnvelope)`) or

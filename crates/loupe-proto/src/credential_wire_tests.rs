@@ -6,6 +6,18 @@ use serde::ser::{Serialize, SerializeSeq, Serializer};
 use super::*;
 
 #[test]
+fn bounded_encoding_counts_escaped_json_before_allocating() {
+	let value = "FAKE_SECRET\n\"\\λ";
+	let expected = serde_json::to_vec(&value).unwrap();
+	CLEANUPS.with(|seen| seen.borrow_mut().clear());
+	assert!(encode_bounded(&value, false, expected.len() - 1).is_err());
+	CLEANUPS.with(|seen| assert!(seen.borrow().is_empty(), "rejection allocated a secret buffer"));
+	let exact = encode_bounded(&value, false, expected.len()).unwrap();
+	assert_eq!(exact.expose(), &expected);
+	assert_eq!(format!("{exact:?}"), "[redacted]");
+}
+
+#[test]
 fn count_overflow_and_second_pass_growth_fail_closed() {
 	let mut count = Count(usize::MAX);
 	assert!(count.write_all(b"x").is_err());

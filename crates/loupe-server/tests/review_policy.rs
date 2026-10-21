@@ -3,10 +3,122 @@ use loupe_server::review::policy::ReviewPolicy;
 use loupe_server::FileConfig;
 
 #[test]
+fn startup_always_validates_v2_reserves_even_without_new_toml_keys() {
+	let config: FileConfig = common::file_config("[review]\ncampaign_max_jobs=3").unwrap();
+	assert!(
+		config.review.resolve().is_err(),
+		"V2 startup must reject defaults that overcommit a small campaign budget"
+	);
+}
+
+#[test]
+fn app_state_always_validates_v2_reserves() {
+	let state = loupe_server::AppState::new(
+		std::sync::Arc::new(
+			loupe_storage::Db::open_in_memory(&loupe_storage::secrets::MasterKey::for_tests())
+				.unwrap(),
+		),
+		std::sync::Arc::new(loupe_tls::Ca::new("policy-test").unwrap()),
+		std::sync::Arc::new(loupe_server::reporters::GithubReporter::new().unwrap()),
+	);
+	assert!(
+		state
+			.with_review_policy(ReviewPolicy { campaign_max_jobs: 3, ..ReviewPolicy::default() })
+			.is_err(),
+		"AppState must enforce the same V2 admission policy as startup"
+	);
+}
+
+#[test]
+fn review_toml_accepts_v2_admission_keys() {
+	let parsed = common::file_config(
+		"[review]\nmax_units_per_survey=32\nmax_leads_per_survey=16\nmax_sibling_leads_per_drilldown=4\ncampaign_urgent_reserve=4\ncampaign_verification_reserve=4\n",
+	);
+	assert!(parsed.is_ok(), "v2 admission configuration must be accepted: {parsed:?}");
+}
+
+#[test]
+fn v2_snapshots_freeze_admission_without_changing_v1_bytes() {
+	use loupe_storage::admission_policy::CampaignPolicyV2;
+	let policy = ReviewPolicy::default();
+	let old = policy.snapshot().unwrap();
+	let new = policy.snapshot_v2().unwrap();
+	assert_eq!(new, CampaignPolicyV2::default());
+	assert!(!String::from_utf8(new.canonical_bytes().unwrap())
+		.unwrap()
+		.contains("campaign_handoff_reserve"));
+	let mut changed = policy.clone();
+	changed.max_units_per_survey = 64;
+	changed.max_leads_per_survey = 30;
+	changed.max_sibling_leads_per_drilldown = 8;
+	changed.campaign_urgent_reserve = 8;
+	assert_eq!(changed.snapshot().unwrap(), old);
+	assert_ne!(changed.snapshot_v2().unwrap(), new);
+	let frozen =
+		CampaignPolicyV2::from_json(std::str::from_utf8(&new.canonical_bytes().unwrap()).unwrap())
+			.unwrap();
+	assert_eq!(frozen.general_capacity().unwrap(), 56);
+	changed = policy;
+	changed.active_jobs_per_repo = 8;
+	changed.lease_seconds = 500;
+	changed.urgency_burst_length = 2;
+	assert_eq!(changed.snapshot_v2().unwrap(), new);
+}
+
+#[test]
+fn v2_startup_validation_does_not_import_legacy_reserve() {
+	let mut small = ReviewPolicy { campaign_max_jobs: 3, ..ReviewPolicy::default() };
+	assert!(small.snapshot().is_ok());
+	assert!(small.snapshot_v2().is_err());
+	let old_config: FileConfig = common::file_config("[review]\ncampaign_max_jobs=3").unwrap();
+	assert!(
+		old_config.review.resolve().is_err(),
+		"V2 creation requires explicitly fitting protected reserves for small caps"
+	);
+	small.campaign_max_jobs = 1;
+	small.campaign_urgent_reserve = 0;
+	small.campaign_verification_reserve = 0;
+	assert!(small.snapshot().is_err(), "v1 still owns its shared handoff reserve");
+	assert!(small.snapshot_v2().is_ok(), "v2 ignores the obsolete shared reserve");
+	let explicit: FileConfig = common::file_config(
+		"[review]\ncampaign_max_jobs=1\ncampaign_urgent_reserve=0\ncampaign_verification_reserve=0",
+	)
+	.unwrap();
+	assert!(explicit.review.resolve().is_ok());
+}
+
+#[test]
+fn admission_toml_validation_is_checked_and_wire_sized() {
+	for raw in [
+		"max_units_per_survey=0",
+		"max_leads_per_survey=0",
+		"max_sibling_leads_per_drilldown=0",
+		"campaign_urgent_reserve=-1",
+		"campaign_verification_reserve=-1",
+		"campaign_urgent_reserve=60",
+		"campaign_urgent_reserve=9223372036854775807",
+		"campaign_max_jobs=3\nmax_units_per_survey=32",
+	] {
+		let config: FileConfig = common::file_config(&format!("[review]\n{raw}")).unwrap();
+		assert!(config.review.resolve().is_err(), "{raw}");
+	}
+	for raw in
+		["max_units_per_survey=4294967296", "max_leads_per_survey=-1", "priority_policy_version=2"]
+	{
+		assert!(common::file_config(&format!("[review]\n{raw}")).is_err(), "{raw}");
+	}
+	let config: FileConfig = common::file_config("[review]\nmax_units_per_survey=4294967295\nmax_leads_per_survey=40\nmax_sibling_leads_per_drilldown=8").unwrap();
+	let policy = config.review.resolve().unwrap();
+	assert_eq!(policy.max_units_per_survey, u32::MAX);
+	assert_eq!(policy.max_leads_per_survey, 40);
+	assert_eq!(policy.max_sibling_leads_per_drilldown, 8);
+}
+
+#[test]
 fn review_policy_defaults_and_snapshot_are_stable() {
 	let policy = ReviewPolicy::default();
 	policy.validate().unwrap();
-	let snapshot = common::stored_policy(&policy);
+	let snapshot = common::stored_legacy_policy(&policy);
 	assert_eq!(
 		snapshot.expose(),
 		r#"{"campaign_deadline_seconds":21600,"campaign_handoff_reserve":2,"campaign_max_jobs":64,"drilldown_deadline_seconds":2700,"drilldown_submit_margin_seconds":420,"drilldown_token_budget":null,"max_attempts":3,"retry_backoff_base_seconds":60,"retry_backoff_cap_seconds":3600,"survey_deadline_seconds":1800,"survey_submit_margin_seconds":300,"survey_token_budget":null,"survey_units_per_job":4,"verify_deadline_seconds":3600,"verify_submit_margin_seconds":600,"verify_token_budget":null,"version":1}"#
@@ -38,7 +150,7 @@ fn server_snapshots_round_trip_through_storage_policy() {
 		survey_token_budget: Some(1000),
 		..ReviewPolicy::default()
 	};
-	let snapshot = common::stored_policy(&policy);
+	let snapshot = common::stored_legacy_policy(&policy);
 	let decoded = loupe_storage::scheduler::CampaignPolicy::from_snapshot(&snapshot).unwrap();
 	assert_eq!(decoded.campaign_max_jobs, 19);
 	assert_eq!(decoded.campaign_handoff_reserve, 3);

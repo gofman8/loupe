@@ -38,10 +38,34 @@ macro_rules! source_fixture {
 			pub fn json<P: JsonPolicy>(raw: &str) -> BoundedJson<P, $source> {
 				fixture(raw, |raw, mark| BoundedJson::new(mark, raw).unwrap())
 			}
+			pub fn identifier<P: loupe_core::text::IdentPolicy>(
+				raw: &str,
+			) -> loupe_core::text::Identifier<P, $source> {
+				fixture(raw, |raw, mark| loupe_core::text::Identifier::new(mark, raw).unwrap())
+			}
+			pub fn anchor<P: loupe_core::text::AnchorPolicy>(
+				raw: &str,
+			) -> loupe_core::text::Anchor<P, $source> {
+				fixture(raw, |raw, mark| loupe_core::text::Anchor::new(mark, raw).unwrap())
+			}
 			pub fn empty_refs<const MAX: usize>(
 			) -> loupe_storage::source_refs::SourceRefs<MAX, $source> {
 				fixture("[]", |_, mark| {
 					loupe_storage::source_refs::SourceRefs::new(mark, vec![]).unwrap()
+				})
+			}
+			pub fn single_ref<const MAX: usize>(
+				path: &str,
+			) -> loupe_storage::source_refs::SourceRefs<MAX, $source> {
+				fixture(path, |raw, mark| {
+					loupe_storage::source_refs::SourceRefs::new(
+						mark,
+						vec![loupe_core::text::SourceRef {
+							path: loupe_core::text::RepoPath::new(mark, raw).unwrap(),
+							symbol: None,
+						}],
+					)
+					.unwrap()
 				})
 			}
 			pub fn try_text<P: TextPolicy>(
@@ -55,6 +79,33 @@ macro_rules! source_fixture {
 source_fixture!(agent, loupe_provenance::Agent);
 source_fixture!(repo, loupe_provenance::Repo);
 source_fixture!(operator, loupe_provenance::Operator);
+
+/// Fixed Agent evidence for comparing a typed stored row with authored fixtures.
+pub fn lead_evidence(
+	raw: &str,
+) -> loupe_core::review_payload::LeadEvidenceV1<loupe_provenance::Agent> {
+	agent::fixture(raw, |raw, mark| {
+		loupe_core::review_payload::LeadEvidenceV1::from_json(mark, raw).unwrap()
+	})
+}
+
+/// Fixed Agent terminal evidence for typed assertions against authored fixtures.
+pub fn drilldown_terminal(
+	raw: &str,
+) -> loupe_core::review_payload::DrilldownTerminalV1<loupe_provenance::Agent> {
+	agent::fixture(raw, |raw, mark| {
+		loupe_core::review_payload::DrilldownTerminalV1::from_json(mark, raw).unwrap()
+	})
+}
+
+/// Fixed Agent verification evidence for assertions against authored fixtures.
+pub fn verification_terminal(
+	raw: &str,
+) -> loupe_core::review_payload::VerificationTerminalV1<loupe_provenance::Agent> {
+	agent::fixture(raw, |raw, mark| {
+		loupe_core::review_payload::VerificationTerminalV1::from_json(mark, raw).unwrap()
+	})
+}
 
 /// Synthetic authenticated Operator authority for direct integration fixtures.
 #[allow(unsafe_code)]

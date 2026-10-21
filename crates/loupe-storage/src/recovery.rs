@@ -56,6 +56,9 @@ pub fn retry_verification_candidates(
 				"SELECT f.id, f.repo_id, f.job_id
 						   FROM findings f
 						  WHERE f.verification_required <> 0
+						    AND NOT EXISTS (SELECT 1 FROM finding_review_details d WHERE d.finding_id=f.id)
+						    AND NOT EXISTS (SELECT 1 FROM finding_verification_intents i WHERE i.finding_id=f.id)
+						    AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.id=f.job_id AND p.campaign_id IS NOT NULL)
 						    AND EXISTS(SELECT 1 FROM jobs parent WHERE parent.id=f.job_id AND parent.repo_id=f.repo_id)
 						    AND (?1 IS NULL OR f.repo_id = ?1)
 						    AND (

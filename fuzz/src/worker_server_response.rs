@@ -4,6 +4,9 @@
 //! Byte 1 controls the chunk size. Byte 2 selects an ordinary response,
 //! padding to the 16 MiB budget (254), or one byte over (255). Remaining
 //! bytes are the server body. Padding is streamed, never materialized.
+//! Scan/Verify retain the independent differential oracle. Recognized phase
+//! leases exercise HTTP admission and closed errors, not an independent phase
+//! schema/carry oracle (the latter remains an S3b follow-up).
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -32,6 +35,8 @@ pub fn do_test(data: &[u8]) {
 	let expected = (kind < 4 && length <= MAX_RESPONSE_BYTES)
 		.then(|| crate::worker_client_ingress::oracle::client(kind, bytes))
 		.flatten();
+	let phase =
+		(kind == 0).then(|| crate::worker_client_ingress::oracle::phase_kind(bytes)).flatten();
 	// A new listening port per input exhausts the ephemeral range with
 	// TIME_WAIT sockets during sustained campaigns. Keep the endpoint and
 	// its owning reactor together for the lifetime of this target.
@@ -89,6 +94,18 @@ pub fn do_test(data: &[u8]) {
 				let message = format!("{error:#}");
 				assert!(message.contains("response body exceeds"));
 				assert!(message.len() < 512);
+			} else if let Some(phase) = phase {
+				match result {
+					Ok(actual) => {
+						let actual = actual.unwrap_or_else(|error| panic!("phase output: {error}"));
+						assert_eq!(actual["kind"], "lease");
+						assert_eq!(actual["payload"]["kind"], phase);
+					},
+					Err(error) => {
+						assert!(format!("{error:#}").len() < 512);
+						assert!(crate::worker_client_ingress::closed_phase_error(&error.root_cause().to_string()), "phase HTTP error is not closed metadata: {error:#}");
+					},
+				}
 			} else {
 				assert_eq!(result.is_ok(), expected.is_some(), "worker response decoder disagrees");
 				if let Ok(actual) = &result {
@@ -157,6 +174,11 @@ mod tests {
 		let response = include_bytes!("../test_cases/worker_server_response/heartbeat");
 		super::do_test(response);
 		super::do_test(response);
+		// Keep every HTTP fixture control in this test: parallel tests must
+		// not race different response bodies through the shared listener.
+		let mut phase = vec![0, 1, 0];
+		phase.extend_from_slice(crate::worker_client_ingress::tests::PHASE_LEASE);
+		super::do_test(&phase);
 		let allocated = super::LISTENER_BINDS.load(std::sync::atomic::Ordering::Relaxed) - before;
 		assert!(allocated <= 1, "repeated responses allocated {allocated} TCP listeners");
 	}

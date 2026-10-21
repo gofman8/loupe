@@ -27,12 +27,28 @@ pub const MAX_ATTEMPTS: u32 = 3;
 pub const JOB_CANCELLED_BY_ADMIN_ERROR: &str = "cancelled by admin";
 pub const LEASE_EXPIRED_AFTER_MAX_ATTEMPTS_ERROR: &str = "lease expired after max attempts";
 
-/// Widen only when the runtime can authorize and finish the added kinds.
-pub const RUNTIME_KINDS: &[JobKind<DbSource>] = &[JobKind::Scan, JobKind::Verify];
+// Numeric durable markers only: absent or unreadable evidence cannot downgrade
+// canonical phase work to legacy recovery. Evaluated against `jobs`.
+const PHASE_FINDING_TARGET_SQL: &str = "(
+ EXISTS(SELECT 1 FROM finding_review_details d WHERE d.finding_id=jobs.target_finding_id)
+ OR EXISTS(SELECT 1 FROM finding_verification_intents i WHERE i.finding_id=jobs.target_finding_id)
+ OR EXISTS(SELECT 1 FROM findings f JOIN jobs p ON p.id=f.job_id WHERE f.id=jobs.target_finding_id AND p.campaign_id IS NOT NULL))";
 
-fn runtime_kinds_sql() -> &'static str {
+pub(crate) fn targets_phase_finding(conn: &Connection, repo: i64, job: i64) -> crate::Result<bool> {
+	Ok(conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?2 AND {PHASE_FINDING_TARGET_SQL})"), params![job,repo], |row| row.get(0))?)
+}
+
+/// Job kinds supported by this binary. Phase claims still require explicit
+/// review capabilities and the transactional review admission owner.
+pub const RUNTIME_KINDS: &[JobKind<DbSource>] =
+	&[JobKind::Scan, JobKind::Survey, JobKind::Drilldown, JobKind::Verify];
+
+/// Only these kinds may enter legacy enqueue, lease, or control paths.
+pub const LEGACY_RUNTIME_KINDS: &[JobKind<DbSource>] = &[JobKind::Scan, JobKind::Verify];
+
+fn legacy_kinds_sql() -> &'static str {
 	static SQL: LazyLock<String> = LazyLock::new(|| {
-		RUNTIME_KINDS
+		LEGACY_RUNTIME_KINDS
 			.iter()
 			.map(|kind| format!("'{}'", kind.as_str()))
 			.collect::<Vec<_>>()
@@ -115,11 +131,15 @@ pub struct QueuedJob<S: Source> {
 }
 
 pub fn get(scope: &crate::scope::RepoScope<'_>, id: i64) -> crate::Result<Option<JobRow>> {
-	Ok(scope
-		.conn
+	get_scoped_raw(scope.conn, scope.repo_id, id)
+}
+pub(crate) fn get_scoped_raw(
+	conn: &Connection, repo: i64, id: i64,
+) -> crate::Result<Option<JobRow>> {
+	Ok(conn
 		.query_row(
 			&format!("SELECT {JOB_COLUMNS} FROM jobs WHERE id=?1 AND repo_id=?2"),
-			params![id, scope.repo_id],
+			params![id, repo],
 			row_to_job,
 		)
 		.optional()?)
@@ -277,7 +297,7 @@ pub(crate) fn heartbeat(
 		   AND job_capability_hash = ?5
 		   AND lease_expires_at >= ?6
 		   AND kind IN ({})",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		params![lease_until, job_id, leased_state.as_str(), worker_id, job_capability_hash, now],
 	)?;
@@ -315,7 +335,7 @@ pub(crate) fn complete<RevisionS: Source, DiagnosticS: Source>(
 		   AND job_capability_hash = ?8
 		   AND lease_expires_at >= ?9
 		   AND kind IN ({})",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		params![
 			target_state.as_str(),
@@ -340,7 +360,7 @@ pub(crate) fn cancel(
 ) -> rusqlite::Result<CancelOutcome> {
 	let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 	let Some(row) = get_raw(&tx, job_id)? else { return Ok(CancelOutcome::NotFound) };
-	if !RUNTIME_KINDS.contains(&row.kind) {
+	if !LEGACY_RUNTIME_KINDS.contains(&row.kind) {
 		return Ok(CancelOutcome::UnsupportedKind);
 	}
 	let target_state = match row.state.apply(JobTransition::Cancel) {
@@ -358,7 +378,7 @@ pub(crate) fn cancel(
 		       finished_at = ?3,
 		       error = ?4
 		 WHERE id = ?1 AND repo_id=?5 AND state IN ('queued','leased') AND kind IN ({})",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		(job_id, target_state.as_str(), now, JOB_CANCELLED_BY_ADMIN_ERROR, row.repo_id),
 	)?;
@@ -405,8 +425,11 @@ pub(crate) fn retry_failed(
 	conn: &mut Connection, job_id: i64, now: i64, validating_deadline: i64,
 ) -> rusqlite::Result<RetryOutcome> {
 	let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+	if tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND (campaign_id IS NOT NULL OR {PHASE_FINDING_TARGET_SQL}))"),[job_id],|r|r.get::<_,bool>(0))? {
+		return Ok(RetryOutcome::Conflict("phase work requires typed recovery; legacy retry cannot reset its frozen attempt budget".into()));
+	}
 	let Some(row) = get_raw(&tx, job_id)? else { return Ok(RetryOutcome::NotFound) };
-	if !RUNTIME_KINDS.contains(&row.kind) {
+	if !LEGACY_RUNTIME_KINDS.contains(&row.kind) {
 		return Ok(RetryOutcome::UnsupportedKind);
 	}
 	if row.state != JobState::Failed {
@@ -499,7 +522,7 @@ pub(crate) fn requeue_failed(
 		       enqueued_at = ?2
 		 WHERE id = ?3 AND state = ?4 AND repo_id=?5
 		   AND kind IN ({})",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		(target_state.as_str(), now, job_id, JobState::Failed.as_str(), repo_id),
 	)?;
@@ -549,7 +572,8 @@ impl<S: Source> Default for JobFilter<S> {
 	}
 }
 
-/// Resolve an opaque capability to its one exact, live lease.
+/// Resolve an opaque capability to its one exact, live legacy lease.
+/// Campaign verification shares the verify kind but never legacy authority.
 pub(crate) fn get_active_by_capability_hash(
 	conn: &Connection, worker_id: i64, job_capability_hash: &[u8], now: i64,
 ) -> rusqlite::Result<Option<JobRow>> {
@@ -561,8 +585,9 @@ pub(crate) fn get_active_by_capability_hash(
 			   AND state = 'leased'
 			   AND lease_expires_at IS NOT NULL
 			   AND lease_expires_at >= ?3
+			   AND campaign_id IS NULL
 			   AND kind IN ({runtime})",
-			runtime = runtime_kinds_sql(),
+			runtime = legacy_kinds_sql(),
 		),
 		params![worker_id, job_capability_hash, now],
 		row_to_job,
@@ -570,8 +595,8 @@ pub(crate) fn get_active_by_capability_hash(
 	.optional()
 }
 
-/// Run a mutation in one transaction tied to the exact lease the
-/// caller previously authorized. Returning `None` means that lease is
+/// Run a legacy mutation in one transaction tied to the exact lease the
+/// caller previously authorized. Returning `None` means that legacy lease is
 /// no longer active and the mutation was not run.
 #[cfg(test)]
 pub(crate) fn with_active_lease_transaction<T>(
@@ -671,7 +696,7 @@ pub(crate) fn worker_has_active_lease_for_repo(
 		       AND lease_expires_at >= ?3
 		       AND kind IN ({})
 		 )",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		params![repo_id, worker_id, now],
 		|r| r.get(0),
@@ -695,8 +720,19 @@ pub(crate) fn reap_stale_leases(conn: &mut Connection, now: i64) -> crate::Resul
 		.query_map([now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
 		.collect::<rusqlite::Result<Vec<_>>>()?;
 	let mut reaped = legacy;
+	let mut first_error = None;
 	for (id, repo) in campaign_jobs {
-		reaped += reap_campaign_selection(conn, id, repo, now)?;
+		match reap_campaign_selection(conn, id, repo, now) {
+			Ok(count) => reaped += count,
+			Err(error) => {
+				if first_error.is_none() {
+					first_error = Some(error);
+				}
+			},
+		}
+	}
+	if let Some(error) = first_error {
+		return Err(error);
 	}
 	Ok(reaped)
 }
@@ -721,24 +757,9 @@ fn reap_campaign_selection(
 		)?;
 		Ok(true)
 	});
-	match outcome {
-		Ok(reaped) => Ok(usize::from(reaped)),
-		Err(cause) => {
-			let message = format!("reaper could not decide a retry: {cause}");
-			let failed = crate::transaction::immediate(conn, |tx| {
-				Ok(tx.execute(
-					"UPDATE jobs
-						   SET state = 'failed', error = ?2, finished_at = ?3, worker_id = NULL,
-						       lease_expires_at = NULL, job_capability_hash = NULL
-						 WHERE id = ?1 AND repo_id=?4 AND state = 'leased'
-						   AND campaign_id IS NOT NULL AND lease_expires_at<?3
-						   AND kind IN ('survey','drilldown','verify')",
-					params![id, message, now, repo],
-				)?)
-			})?;
-			Ok(failed)
-		},
-	}
+	// Compatibility decisions belong to the lifecycle owner. Unexpected SQL
+	// failures roll back this job and propagate to the outer continue loop.
+	outcome.map(usize::from)
 }
 
 fn reap_legacy(conn: &Transaction<'_>, now: i64) -> crate::Result<usize> {
@@ -746,6 +767,15 @@ fn reap_legacy(conn: &Transaction<'_>, now: i64) -> crate::Result<usize> {
 		JobState::Leased.apply(JobTransition::ReapToQueued).map_err(sql_state_transition_error)?;
 	let failed_state =
 		JobState::Leased.apply(JobTransition::ReapToFailed).map_err(sql_state_transition_error)?;
+	let incompatible = conn.execute(
+		&format!(
+			"UPDATE jobs SET state=?2,worker_id=NULL,lease_expires_at=NULL,
+	 job_capability_hash=NULL,finished_at=?1,error=COALESCE(error,?3)
+	 WHERE campaign_id IS NULL AND kind='verify' AND state='leased'
+	 AND lease_expires_at<?1 AND {PHASE_FINDING_TARGET_SQL}"
+		),
+		params![now, failed_state.as_str(), "legacy verification cannot target phase findings"],
+	)?;
 	let failing_scan_jobs = {
 		let mut stmt = conn.prepare(
 			"SELECT id,repo_id FROM jobs
@@ -773,7 +803,7 @@ fn reap_legacy(conn: &Transaction<'_>, now: i64) -> crate::Result<usize> {
 		   AND attempts < ?3
 		   AND campaign_id IS NULL
 		   AND kind IN ({})",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		params![now, requeued_state.as_str(), MAX_ATTEMPTS],
 	)?;
@@ -791,14 +821,14 @@ fn reap_legacy(conn: &Transaction<'_>, now: i64) -> crate::Result<usize> {
 		   AND attempts >= ?2
 		   AND campaign_id IS NULL
 		   AND kind IN ({})",
-			runtime_kinds_sql()
+			legacy_kinds_sql()
 		),
 		params![now, MAX_ATTEMPTS, failed_state.as_str(), LEASE_EXPIRED_AFTER_MAX_ATTEMPTS_ERROR],
 	)?;
 	for (job_id, repo_id) in failing_scan_jobs {
 		crate::findings::delete_pending_for_job(conn, repo_id, job_id)?;
 	}
-	Ok(requeued + failed)
+	Ok(incompatible + requeued + failed)
 }
 
 fn sql_state_transition_error(error: StateTransitionError) -> rusqlite::Error {

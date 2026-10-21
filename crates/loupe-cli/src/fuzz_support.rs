@@ -55,6 +55,7 @@ pub enum ResponseValue {
 	Worker(loupe_proto::RegisterWorkerResponse),
 	Jobs(Vec<loupe_proto::JobInfo<Server>>),
 	Job(loupe_proto::JobInfo<Server>),
+	PhaseControl(loupe_proto::review_lifecycle::PhaseControlResponse),
 	Findings(loupe_proto::ListFindingsResponse<loupe_provenance::Agent, Server>),
 	Finding(loupe_proto::FindingDetail<loupe_provenance::Agent, Server>),
 	Verification(loupe_proto::RetryVerifyResponse),
@@ -108,7 +109,10 @@ pub fn observe_response(case: ResponseCase, raw: &[u8]) -> ResponseObservation {
 		ResponseCase::ListJobs => ingress::list_jobs(input).map(ResponseValue::Jobs),
 		ResponseCase::GetJob => ingress::get_job(input).map(ResponseValue::Job),
 		ResponseCase::RetryJob => ingress::retry_job(input).map(ResponseValue::Job),
-		ResponseCase::CancelJob => ingress::cancel_job(input).map(ResponseValue::Job),
+		ResponseCase::CancelJob => ingress::cancel_job(input).map(|value| match value {
+			ingress::CancelResponse::Legacy(job) => ResponseValue::Job(job),
+			ingress::CancelResponse::Phase(job) => ResponseValue::PhaseControl(job),
+		}),
 		ResponseCase::ListFindings => ingress::list_findings(input).map(ResponseValue::Findings),
 		ResponseCase::SearchFindings => {
 			ingress::search_findings(input).map(ResponseValue::Findings)

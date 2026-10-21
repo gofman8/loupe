@@ -24,7 +24,7 @@ fn v3_preserves_encrypted_legacy_data_and_claims() {
 		assert!(fk_enabled(conn));
 		assert_eq!(rows(conn, "SELECT name, sql FROM sqlite_master WHERE name IN ('idx_jobs_queued', 'idx_jobs_lease', 'idx_jobs_repo', 'idx_jobs_capability') ORDER BY name"), legacy_indexes);
 		for job in rows(conn, "SELECT * FROM jobs ORDER BY id") {
-			assert_eq!(job.len(), 30, "17 legacy columns plus 13 nullable additions");
+			assert_eq!(job.len(), 33, "17 legacy columns plus 16 nullable additions");
 			assert!(job[17..].iter().all(|value| *value == rusqlite::types::Value::Null), "legacy jobs must not acquire synthetic phase context");
 		}
 		assert_eq!(

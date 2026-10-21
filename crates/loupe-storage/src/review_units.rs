@@ -11,10 +11,12 @@ use crate::source_refs::UnitRefs;
 use crate::{inventory, ownership, Conflict, Entity, Error, Ownership, Result};
 
 /// Current ordinary conclusive evidence. Assignment state is not coverage.
-pub const UNIT_COVERED: &str = "EXISTS(SELECT 1 FROM review_unit_results r WHERE r.review_unit_id=u.review_unit_id AND r.invalidated=0 AND r.commit_sha=g.generation_commit_sha AND r.profile_version=g.profile_version AND r.disposition IN ('lead_created','no_lead_found','not_applicable') AND r.corroborates_review_unit_result_id IS NULL AND r.corroborates_inventory_exclusion_id IS NULL)";
+pub const UNIT_COVERED: &str = crate::review_coverage::ordinary_result!(
+	"r.disposition IN ('lead_created','no_lead_found','not_applicable')"
+);
 /// Ordinary scheduling eligibility, composed from the same evidence predicate.
 pub static UNIT_NEEDS_WORK: LazyLock<String> = LazyLock::new(|| {
-	format!("u.status='open' AND u.stale=0 AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=u.review_unit_id AND j.state IN ('queued','leased')) AND NOT ({UNIT_COVERED})")
+	format!("u.status='open' AND u.stale=0 AND NOT EXISTS(SELECT 1 FROM review_unit_holds h WHERE h.review_unit_id=u.review_unit_id) AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=u.review_unit_id AND j.state IN ('queued','leased')) AND NOT ({UNIT_COVERED})")
 });
 string_enum!(Status { Open=>"open", Deferred=>"deferred", Retired=>"retired" });
 string_enum!(Priority { Urgent=>"urgent", High=>"high", Normal=>"normal", Background=>"background" });
@@ -83,8 +85,51 @@ pub fn create<KeyS: Source>(
 		0
 	};
 	inventory::verify_refs(scope, new.generation_id, new.source_refs.as_slice())?;
-	tx.execute("INSERT INTO review_units (generation_id,client_review_unit_key,title,objective,priority_band,priority_proposal,source_refs,depends_on,closure_criteria,semantic_context,carry_depth,carried_from_review_unit_id,created_by_job_id,created_at)
- SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14 WHERE EXISTS(SELECT 1 FROM review_generations WHERE generation_id=?1 AND repo_id=?15)",params![new.generation_id,new.client_key.expose(),new.title.expose(),new.objective.expose(),new.priority.as_str(),new.priority_proposal.map(BoundedJson::expose),new.source_refs.expose(),new.depends_on.map(BoundedJson::expose),new.closure_criteria.map(BoundedText::expose),new.semantic_context.map(BoundedJson::expose),depth,new.carried_from,new.created_by_job,now,scope.repo_id])
+	insert_admitted(
+		tx,
+		repo,
+		&AdmittedUnit {
+			generation: new.generation_id,
+			key: new.client_key.expose(),
+			title: new.title,
+			objective: new.objective,
+			priority: new.priority,
+			proposal: new.priority_proposal.map(BoundedJson::expose),
+			refs: new.source_refs,
+			dependencies: new.depends_on.map(BoundedJson::expose),
+			closure: new.closure_criteria.map(BoundedText::expose),
+			context: new.semantic_context.map(BoundedJson::expose),
+			carry_depth: depth,
+			carried_from: new.carried_from,
+			created_by_job: new.created_by_job,
+		},
+		now,
+	)
+}
+
+/// Private persistence projection. Semantic text and refs keep their Agent
+/// owners; raw fields come only from admitted content or closed host metadata.
+pub(crate) struct AdmittedUnit<'a> {
+	pub generation: i64,
+	pub key: &'a str,
+	pub title: &'a BoundedText<Title, Agent>,
+	pub objective: &'a BoundedText<Objective, Agent>,
+	pub priority: Priority,
+	pub proposal: Option<&'a str>,
+	pub refs: &'a UnitRefs<Agent>,
+	pub dependencies: Option<&'a str>,
+	pub closure: Option<&'a str>,
+	pub context: Option<&'a str>,
+	pub carry_depth: i64,
+	pub carried_from: Option<i64>,
+	pub created_by_job: Option<i64>,
+}
+pub(crate) fn insert_admitted(
+	tx: &Connection, repo: i64, new: &AdmittedUnit<'_>, now: i64,
+) -> Result<i64> {
+	tx.execute("INSERT INTO review_units (generation_id,client_review_unit_key,title,objective,priority_band,priority_proposal,source_refs,depends_on,closure_criteria,semantic_context,carry_depth,carried_from_review_unit_id,created_by_job_id,created_at,source)
+ SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'agent' WHERE EXISTS(SELECT 1 FROM review_generations WHERE generation_id=?1 AND repo_id=?15)",
+ params![new.generation,new.key,new.title.expose(),new.objective.expose(),new.priority.as_str(),new.proposal,new.refs.expose(),new.dependencies,new.closure,new.context,new.carry_depth,new.carried_from,new.created_by_job,now,repo])
  .map_err(|e|classify(e,"review_units.generation_id, review_units.client_review_unit_key",Conflict::UnitKey))?;
 	Ok(tx.last_insert_rowid())
 }
@@ -176,7 +221,7 @@ pub(crate) fn assign_selected(
 	}
 	let generation: Option<i64> = tx
 		.query_row(
-			"SELECT generation_id FROM jobs WHERE id=?1 AND repo_id=?2 AND state IN ('queued','leased')",
+			"SELECT generation_id FROM jobs WHERE id=?1 AND repo_id=?2 AND state IN ('queued','leased') AND NOT EXISTS(SELECT 1 FROM survey_continuation_batches b WHERE b.admitted_job_id=jobs.id)",
 			params![job,repo],
 			|r| r.get(0),
 		)
@@ -189,7 +234,7 @@ pub(crate) fn assign_selected(
 			return Err(Error::Conflict(Conflict::Assignment));
 		}
 		ownership::unit_in_generation(tx, claim.unit_id, generation, Ownership::Assignment)?;
-		changed(tx.execute("UPDATE review_units SET assignment_epoch=assignment_epoch+1 WHERE review_unit_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=review_units.generation_id AND g.repo_id=?3) AND status='open' AND assignment_epoch=?2 AND assignment_epoch<9223372036854775807 AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=?1 AND j.state IN ('queued','leased'))",params![claim.unit_id,claim.expected_epoch,repo])?,Conflict::Assignment)?;
+		changed(tx.execute("UPDATE review_units SET assignment_epoch=assignment_epoch+1 WHERE review_unit_id=?1 AND EXISTS(SELECT 1 FROM review_generations g WHERE g.generation_id=review_units.generation_id AND g.repo_id=?3) AND status='open' AND assignment_epoch=?2 AND assignment_epoch<9223372036854775807 AND NOT EXISTS(SELECT 1 FROM review_unit_holds WHERE review_unit_id=?1) AND NOT EXISTS(SELECT 1 FROM job_assigned_review_units a JOIN jobs j ON j.id=a.job_id WHERE a.review_unit_id=?1 AND j.state IN ('queued','leased'))",params![claim.unit_id,claim.expected_epoch,repo])?,Conflict::Assignment)?;
 	}
 	// A later batch extends the job's ordered set rather than restarting at 0.
 	let start: i64 = tx.query_row(
@@ -198,7 +243,7 @@ pub(crate) fn assign_selected(
 		|r| r.get(0),
 	)?;
 	for (offset, claim) in units.iter().enumerate() {
-		tx.execute("INSERT INTO job_assigned_review_units (job_id,review_unit_id,position) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?4)",params![job,claim.unit_id,start + offset as i64,repo])?;
+		tx.execute("INSERT INTO job_assigned_review_units (job_id,review_unit_id,position,assignment_epoch) SELECT ?1,u.review_unit_id,?3,u.assignment_epoch FROM review_units u JOIN review_generations g ON g.generation_id=u.generation_id WHERE u.review_unit_id=?2 AND g.repo_id=?4 AND EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND repo_id=?4)",params![job,claim.unit_id,start + offset as i64,repo])?;
 	}
 	Ok(())
 }

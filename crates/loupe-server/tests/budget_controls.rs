@@ -141,12 +141,15 @@ async fn json_extraction_does_not_charge_the_worker_body_twice() {
 		"protocol_version": loupe_proto::PROTOCOL_VERSION,
 		"capabilities": [],
 		"wait_seconds": 0,
-		"future_padding": "x".repeat(128 * 1024),
+		"future_padding": "x".repeat(4 * 1024),
 	})
 	.to_string();
+	assert!(body.len() <= 8192, "the fixture must fit the lease body cap");
+	let capacity = 2 * body.len() + 2 * 1024;
+	assert!(2 * body.len() <= capacity && capacity < 3 * body.len());
 	let config = loupe_server::request_budget::WorkerBudgetConfig {
 		bytes: loupe_server::request_budget::BucketConfig {
-			capacity: (2 * body.len() + 64 * 1024) as u64,
+			capacity: capacity as u64,
 			refill_per_second: 1,
 		},
 		..Default::default()

@@ -140,7 +140,7 @@ async fn upstream(
 		capability,
 	});
 	let body = b"{\"forwarded\":true}";
-	socket.write_all(format!("HTTP/1.1 201 Created\r\nX-Loupe-Protocol: 2\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await?;
+	socket.write_all(format!("HTTP/1.1 201 Created\r\nX-Loupe-Protocol: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", loupe_proto::PROTOCOL_VERSION, body.len()).as_bytes()).await?;
 	socket.write_all(body).await?;
 	socket.shutdown().await
 }
@@ -195,7 +195,7 @@ impl Case {
 		match value {
 			Ok(mut value) => {
 				if let Some(object) = value.as_object_mut() {
-					object.insert("protocol_version".into(), 2.into());
+					object.insert("protocol_version".into(), loupe_proto::PROTOCOL_VERSION.into());
 				}
 				if let Ok(Some(f)) = &mut self.forward {
 					f.body = Some(value);
@@ -626,7 +626,8 @@ pub fn do_test(data: &[u8]) {
 					Some(Forward {
 						method: method.into(),
 						uri: format!("{}{id}{suffix}", prefix.replacen("/api", "/v1", 1)),
-						body: (which == 9).then(|| json!({"protocol_version":2})),
+						body: (which == 9)
+							.then(|| json!({"protocol_version":loupe_proto::PROTOCOL_VERSION})),
 					})
 				})
 				.ok_or((400, "invalid request path identifier"));
@@ -906,7 +907,7 @@ pub fn do_test(data: &[u8]) {
 				assert_eq!(status, 200);
 				let value: Value =
 					serde_json::from_slice(&body).unwrap_or_else(|_| panic!("config JSON"));
-				assert_eq!(value["protocol_version"], 2);
+				assert_eq!(value["protocol_version"], loupe_proto::PROTOCOL_VERSION);
 				assert_eq!(value["poll_seconds"], 5);
 				assert!(captured.is_empty());
 			},
@@ -916,7 +917,10 @@ pub fn do_test(data: &[u8]) {
 				let observed = &captured[0];
 				assert_eq!(observed.method, expected.method);
 				assert_eq!(observed.uri, expected.uri);
-				assert_eq!(observed.protocol.as_deref(), Some("2"));
+				assert_eq!(
+					observed.protocol.as_deref(),
+					Some(loupe_proto::PROTOCOL_VERSION.to_string().as_str())
+				);
 				assert!(!observed.capability);
 				let actual = if observed.body.is_empty() {
 					None

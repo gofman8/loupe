@@ -37,6 +37,10 @@ impl<ContentS: Source, MetaS: Source> LeaseResponse<ContentS, MetaS> {
 	pub fn credential_json(&self) -> serde_json::Result<Secret<Vec<u8>>> {
 		encode(self, false)
 	}
+	/// Bound the entire escaped response before allocating its wiping buffer.
+	pub fn credential_json_bounded(&self, limit: usize) -> serde_json::Result<Secret<Vec<u8>>> {
+		encode_bounded(self, false, limit)
+	}
 }
 impl<S: Source> RegisterRepoRequest<S> {
 	/// Deliver this registration and its optional PAT through the admin wire sink.
@@ -145,8 +149,17 @@ fn write_json(value: &impl Serialize, writer: impl Write, pretty: bool) -> serde
 }
 
 fn encode(value: &impl Serialize, pretty: bool) -> serde_json::Result<Secret<Vec<u8>>> {
+	encode_bounded(value, pretty, usize::MAX)
+}
+
+fn encode_bounded(
+	value: &impl Serialize, pretty: bool, limit: usize,
+) -> serde_json::Result<Secret<Vec<u8>>> {
 	let mut count = Count(0);
 	write_json(value, &mut count, pretty)?;
+	if count.0 > limit {
+		return Err(serde_json::Error::io(io::Error::other("credential JSON exceeds byte limit")));
+	}
 	let mut buffer = JsonBuffer::new(count.0);
 	write_json(value, &mut buffer, pretty)?;
 	buffer.finish()

@@ -11,6 +11,7 @@ pub enum LegacyValue {
 	Worker(loupe_proto::RegisterWorkerResponse),
 	Jobs(Vec<wire::JobInfo>),
 	Job(wire::JobInfo),
+	PhaseControl(wire::PhaseControl),
 	Findings(wire::ListFindingsResponse),
 	Finding(wire::FindingDetail),
 	Verification(loupe_proto::RetryVerifyResponse),
@@ -27,7 +28,23 @@ pub fn legacy(case: ResponseCase, raw: &[u8]) -> serde_json::Result<LegacyValue>
 		C::ScanRepo => serde_json::from_slice(raw).map(V::Scan),
 		C::RegisterWorker => serde_json::from_slice(raw).map(V::Worker),
 		C::ListJobs => serde_json::from_slice(raw).map(V::Jobs),
-		C::GetJob | C::RetryJob | C::CancelJob => serde_json::from_slice(raw).map(V::Job),
+		C::GetJob | C::RetryJob => serde_json::from_slice(raw).map(V::Job),
+		C::CancelJob => {
+			// Independent shape probe; never call the production decoder as oracle.
+			let phase = if raw.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+				serde_json::from_slice::<
+					std::collections::BTreeMap<String, &serde_json::value::RawValue>,
+				>(raw)?
+				.contains_key("protocol_version")
+			} else {
+				false
+			};
+			if phase {
+				serde_json::from_slice(raw).map(V::PhaseControl)
+			} else {
+				serde_json::from_slice(raw).map(V::Job)
+			}
+		},
 		C::ListFindings | C::SearchFindings => serde_json::from_slice(raw).map(V::Findings),
 		C::GetFinding => serde_json::from_slice(raw).map(V::Finding),
 		C::RetryVerification => serde_json::from_slice(raw).map(V::Verification),
@@ -73,6 +90,7 @@ pub fn policies(value: &LegacyValue) -> bool {
 		}),
 		V::Jobs(jobs) => jobs.iter().all(job),
 		V::Job(j) => job(j),
+		V::PhaseControl(p) => p.protocol_version == loupe_proto::PROTOCOL_VERSION && p.job_id > 0,
 		V::Findings(f) => f.findings.iter().all(summary),
 		V::Finding(f) => {
 			[&f.scanner_id, &f.title, &f.fingerprint].into_iter().all(|s| exact(s, false))
@@ -104,6 +122,7 @@ pub fn compare(expected: LegacyValue, actual: ResponseValue) {
 		(V::Scan(a), A::Scan(b)) => assert_eq!(a, b),
 		(V::Jobs(a), A::Jobs(b)) => same(a, b),
 		(V::Job(a), A::Job(b)) => same(a, b),
+		(V::PhaseControl(a), A::PhaseControl(b)) => same(a, b),
 		(V::Findings(a), A::Findings(b)) => same(a, b),
 		(V::Finding(a), A::Finding(b)) => same(a, b),
 		(V::Verification(a), A::Verification(b)) => assert_eq!(a, b),
@@ -194,6 +213,21 @@ pub(crate) mod wire {
 	use loupe_core::{FindingState, JobState, Severity};
 	use loupe_proto::GithubReportingAuth;
 	use serde::{Deserialize, Serialize};
+	#[derive(Serialize, Deserialize)]
+	#[serde(deny_unknown_fields)]
+	pub struct PhaseControl {
+		pub protocol_version: u16,
+		pub job_id: i64,
+		pub state: PhaseState,
+		pub eligible_at: Option<i64>,
+	}
+	#[derive(Serialize, Deserialize)]
+	#[serde(rename_all = "snake_case")]
+	pub enum PhaseState {
+		Queued,
+		Failed,
+		Cancelled,
+	}
 	#[derive(Debug, Serialize, Deserialize)]
 	pub struct GithubAppSummary {
 		pub app_id: u64,

@@ -8,6 +8,7 @@ use loupe_server::fuzz_support::{self as actual, RequestCase};
 use crate::utils::test_logger;
 
 const CAP: usize = 2 * 1024 * 1024;
+const LEASE_CAP: usize = 8192;
 const RAW_CAP: usize = 64 * 1024;
 
 mod reporter;
@@ -97,6 +98,10 @@ fn collector(finish: u8, boundary: u8, chunk: usize, prefix: &[u8], schedule: u8
 
 fn router(case: RequestCase) {
 	let result = runtime().block_on(actual::request_route(case));
+	let cap = if case.route == 1 { LEASE_CAP } else { CAP };
+	if case.boundary != 0 {
+		assert_eq!(result.length, cap - 2 + usize::from(case.boundary));
+	}
 	assert_eq!(result.protocol.as_deref(), Some(PROTOCOL_VERSION.to_string().as_str()));
 	assert!(!result.response.contains("private_body_sentinel"));
 	assert!(!result.response.contains("private_stream_sentinel"));
@@ -142,7 +147,7 @@ fn router(case: RequestCase) {
 		401
 	} else if case.actor == 0 && denied {
 		429
-	} else if case.actor == 0 && polled > CAP {
+	} else if case.actor == 0 && polled > cap {
 		413
 	} else if (case.actor == 0 && case.stream_error) || case.protocol >= 2 {
 		400
@@ -166,7 +171,7 @@ fn router(case: RequestCase) {
 	assert_eq!(result.status, expected, "actual router ordering: {}", result.response);
 	if case.actor != 0 && !operator_collects {
 		assert_eq!(polled, 0, "unauthorized or ignored Operator body was polled");
-	} else if !denied && polled <= CAP {
+	} else if !denied && polled <= cap {
 		assert_eq!(polled, result.length, "actual collector omitted input");
 	}
 	assert_eq!(
@@ -208,7 +213,7 @@ pub fn do_test(data: &[u8]) {
 				bytes_capacity: match budget % 4 {
 					0 => 1,
 					1 => 31,
-					2 => CAP as u64,
+					2 => (if route % 4 == 1 { LEASE_CAP } else { CAP }) as u64,
 					_ => 8 * 1024 * 1024,
 				},
 				stream_error: flags & 1 != 0,

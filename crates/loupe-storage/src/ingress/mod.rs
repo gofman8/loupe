@@ -11,15 +11,27 @@ use loupe_provenance::{
 use rusqlite::types::{Type, ValueRef};
 use rusqlite::Row;
 
+pub(crate) mod admission_policy;
 mod app;
+pub(crate) mod candidates;
+pub(crate) mod checkpoint;
+pub(crate) mod coverage;
+pub(crate) mod host_preparation;
+pub(crate) mod lifecycle;
+pub(crate) mod profile;
 mod refs;
 mod reporting;
+pub(crate) mod review_authority;
+mod review_payload;
 #[cfg(test)]
 mod tests;
 pub(crate) use app::{app, app_summary};
 use policy::{AuditName, JobDiagnostic, JobKindName, RevisionText};
 pub(crate) use refs::{inspected_refs, unit_refs};
 pub(crate) use reporting::{reporting, scanner_document};
+pub(crate) use review_payload::{
+	drilldown_terminal, finding_evidence, survey_terminal, verification_terminal,
+};
 
 // debug-ok: fixed category, static field and closed policy rule only.
 #[derive(Debug)]
@@ -79,6 +91,19 @@ fn column<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Untrusted<&'a 
 	// SAFETY: this is the original TEXT value returned by SQLite, not a
 	// reserialized value or a caller-supplied string.
 	Ok(Untrusted::new(bytes, unsafe { Ingress::<Db>::new() }))
+}
+// Scalar arguments, like row columns, are borrowed from this actual SQLite
+// invocation. No caller-supplied byte slice can enter this issuance boundary.
+#[allow(unsafe_code)] // Only original SQL TEXT returned by this Context is labelled.
+fn function_text<'a>(
+	ctx: &'a rusqlite::functions::Context<'_>, index: usize,
+) -> Option<Untrusted<&'a [u8], Db>> {
+	let ValueRef::Text(bytes) = ctx.get_raw(index) else { return None };
+	#[cfg(test)]
+	coverage::observe("argument", bytes);
+	// SAFETY: the exact TEXT argument remains borrowed from the live Context,
+	// never reconstructed from JSON or a typed value.
+	Some(Untrusted::new(bytes, unsafe { Ingress::<Db>::new() }))
 }
 #[allow(unsafe_code)] // Only original SQL BLOB returned by this Row is labelled.
 fn blob<'a>(row: &'a Row<'_>, index: usize) -> rusqlite::Result<Untrusted<&'a [u8], Db>> {
@@ -271,6 +296,22 @@ optional_exit!(
 );
 
 db_field!(StoredDbPayload, db_payload, BoundedJson, policy::Payload, existing);
+agent_field!(
+	StoredReviewFindingTitle,
+	AgentReviewFindingTitle,
+	review_finding_title,
+	BoundedText,
+	policy::ReviewFindingTitle,
+	admission
+);
+agent_field!(
+	StoredReviewFindingDescription,
+	AgentReviewFindingDescription,
+	review_finding_description,
+	BoundedText,
+	policy::ReviewFindingDescription,
+	admission
+);
 optional_exit!(optional_db_payload, db_payload, BoundedJson<policy::Payload, Db>);
 
 db_field!(StoredClientKey, client_key, Identifier, policy::ClientKey, existing);
@@ -281,6 +322,17 @@ agent_field!(StoredObjective, AgentObjective, objective, BoundedText, policy::Ob
 
 agent_field!(StoredArgument, AgentArgument, argument, BoundedText, policy::Argument, existing);
 optional_exit!(optional_argument, argument, BoundedText<policy::Argument, Agent>);
+
+// Frozen lease projection is deliberately stricter than historical storage.
+agent_field!(
+	StoredClosureCriteria,
+	AgentClosureCriteria,
+	closure_criteria,
+	BoundedText,
+	policy::Reason,
+	existing
+);
+optional_exit!(optional_closure_criteria, closure_criteria, BoundedText<policy::Reason, Agent>);
 
 agent_field!(
 	StoredAgentPayload,
@@ -305,6 +357,42 @@ optional_exit!(optional_instance, instance, Anchor<policy::InstanceKey, Agent>);
 
 pub(crate) fn job_kind(row: &Row<'_>, index: usize) -> rusqlite::Result<loupe_core::JobKind<Db>> {
 	Ok(loupe_core::JobKind::from_text(job_kind_text(row, index)?))
+}
+
+/// Numeric dependency projection from the original SQL token. Bound the list
+/// during parsing; no text owner, relabelling or normalized JSON is involved.
+pub(crate) fn admission_dependencies(row: &Row<'_>, index: usize) -> rusqlite::Result<Vec<i64>> {
+	use serde::de::{Error as _, SeqAccess, Visitor};
+	use serde::Deserializer as _;
+	if is_null(row, index)? {
+		return Ok(Vec::new());
+	}
+	struct Dependencies;
+	impl<'de> Visitor<'de> for Dependencies {
+		type Value = Vec<i64>;
+		fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			f.write_str("bounded review dependencies")
+		}
+		fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+			let mut values = Vec::new();
+			while let Some(value) = seq.next_element::<i64>()? {
+				if values.len() == 8 {
+					return Err(A::Error::custom("too many review dependencies"));
+				}
+				values.push(value);
+			}
+			Ok(values)
+		}
+	}
+	let raw = row.get_ref(index)?.as_str()?;
+	if raw.len() > loupe_core::text::policy::LEGACY_TEXT_MAX_BYTES {
+		return Err(admission_error(index, invalid()));
+	}
+	let mut decoder = serde_json::Deserializer::from_str(raw);
+	let values =
+		decoder.deserialize_seq(Dependencies).map_err(|_| admission_error(index, invalid()))?;
+	decoder.end().map_err(|_| admission_error(index, invalid()))?;
+	Ok(values)
 }
 
 struct StoredPath;
@@ -354,17 +442,61 @@ impl Validate<&[u8], Db> for StoredInventoryPath {
 pub(crate) fn inventory_path(
 	row: &Row<'_>, index: usize, representable: bool,
 ) -> rusqlite::Result<crate::inventory::InventoryPath<Db>> {
-	if representable {
-		Ok(crate::inventory::InventoryPath::Representable(
+	let source = if representable {
+		Some(
 			column(row, index)?
 				.validate(StoredInventoryPath)
 				.map_err(|e| sql_error(index, ReadError::existing(e)))?,
-		))
+		)
 	} else {
 		// Display aliases for invalid Git bytes retain their visible status.
 		// They must not be reinterpreted as a representable RepoPath.
-		inventory(row, index).map(crate::inventory::InventoryPath::Unrepresentable)
+		None
+	};
+	Ok(crate::inventory::InventoryPath::stored(inventory(row, index)?, None, source))
+}
+
+struct StoredInventoryBytes;
+impl Validate<&[u8], Db> for StoredInventoryBytes {
+	type Output = crate::inventory::RawPath<Db>;
+	type Error = Error;
+	fn validate<'v>(
+		self, input: Unvalidated<'v, &[u8]>, mark: Mark<'v, Db>,
+	) -> Result<Self::Output, Error> {
+		crate::inventory::RawPath::new(&mark, input.get())
 	}
+}
+
+pub(crate) fn stored_inventory_path(
+	row: &Row<'_>, rendering: usize, raw: usize, source: usize, representable: bool,
+) -> rusqlite::Result<crate::inventory::InventoryPath<Db>> {
+	if representable {
+		// Keep the published admission policy for historical display paths.
+		// A missing source projection must not reclassify malformed text as
+		// an intentionally unrepresentable Git entry.
+		column(row, rendering)?
+			.validate(StoredInventoryPath)
+			.map_err(|error| sql_error(rendering, ReadError::existing(error)))?;
+	}
+	let raw = if is_null(row, raw)? {
+		None
+	} else {
+		Some(
+			blob(row, raw)?
+				.validate(StoredInventoryBytes)
+				.map_err(|error| admission_error(raw, error))?,
+		)
+	};
+	let source = if is_null(row, source)? {
+		None
+	} else {
+		Some(
+			column(row, source)?
+				.validate(StoredInventoryPath)
+				.map_err(|error| sql_error(source, ReadError::existing(error)))?,
+		)
+	};
+	Ok(crate::inventory::InventoryPath::stored(inventory(row, rendering)?, raw, source))
 }
 
 /// Only this exact historical classification permits the designated Db→Agent

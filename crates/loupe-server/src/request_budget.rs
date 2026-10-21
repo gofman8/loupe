@@ -241,7 +241,8 @@ impl WorkerBudgets {
 		&self, worker: i64, token: Ingress<Worker>, request: &mut Request,
 	) -> Result<(), StatusCode> {
 		self.charge(worker, Charge::Request)?;
-		if request.method() == Method::POST && request.uri().path() == "/v1/jobs/lease" {
+		let lease = request.method() == Method::POST && request.uri().path() == "/v1/jobs/lease";
+		if lease {
 			self.charge(worker, Charge::Lease)?;
 		}
 		// Match Axum's 2 MiB JSON/Bytes cap while charging actual chunks,
@@ -252,6 +253,15 @@ impl WorkerBudgets {
 		while let Some(chunk) = stream.next().await {
 			let chunk = chunk.map_err(|_| StatusCode::BAD_REQUEST)?;
 			self.charge(worker, Charge::Bytes(chunk.len() as u64))?;
+			if lease && chunk.len() > 8192usize.saturating_sub(buffered.as_ref().len()) {
+				emit(SecurityEvent::BudgetExhausted {
+					context: EventContext { worker_id: Some(worker), ..Default::default() },
+					resource: BudgetResource::RequestBodyBytes,
+					used: None,
+					limit: Some(8192),
+				});
+				return Err(StatusCode::PAYLOAD_TOO_LARGE);
+			}
 			buffered.append(&chunk).inspect_err(|_| {
 				emit(SecurityEvent::BudgetExhausted {
 					context: EventContext { worker_id: Some(worker), ..Default::default() },

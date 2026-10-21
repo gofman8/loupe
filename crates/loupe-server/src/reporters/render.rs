@@ -108,17 +108,27 @@ pub(crate) struct ReportView<'a> {
 	pub(super) finding: &'a Finding<Agent>,
 	pub(super) reviewed_revision: Option<&'a BoundedText<RevisionText, Db>>,
 	pub(super) patch: Option<&'a BoundedText<PatchUnified, Agent>>,
+	pub(super) phase_review: bool,
 }
 
 impl<'a> ReportView<'a> {
 	pub(crate) fn selected(finding: &'a loupe_storage::reports::ReportFinding) -> Self {
-		Self::new(finding.id(), finding.finding(), finding.reviewed_revision())
+		Self {
+			phase_review: finding.is_phase_review(),
+			..Self::new(finding.id(), finding.finding(), finding.reviewed_revision())
+		}
 	}
 	pub(crate) fn new(
 		id: i64, finding: &'a Finding<Agent>,
 		reviewed_revision: Option<&'a BoundedText<RevisionText, Db>>,
 	) -> Self {
-		Self { id, finding, reviewed_revision, patch: finding.patch_unified.as_ref() }
+		Self {
+			id,
+			finding,
+			reviewed_revision,
+			patch: finding.patch_unified.as_ref(),
+			phase_review: false,
+		}
 	}
 	pub(crate) fn with_patch(mut self, patch: &'a BoundedText<PatchUnified, Agent>) -> Self {
 		self.patch = Some(patch);
@@ -311,7 +321,7 @@ impl ReportBuilder {
 		&mut self, path: &RepoPath<S>, start: Option<u32>, end: Option<u32>,
 	) -> Result<(), ReportError> {
 		let suffix = match (start, end) {
-			(Some(start), Some(end)) if self.markdown && end != start => format!(":{start}-{end}"),
+			(Some(start), Some(end)) if end != start => format!(":{start}-{end}"),
 			(Some(start), _) => format!(":{start}"),
 			_ => String::new(),
 		};

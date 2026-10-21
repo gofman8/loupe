@@ -13,6 +13,7 @@ use rand_core::{OsRng, RngCore};
 use crate::auth::AuthedWorker;
 use crate::state::AppState;
 
+/// Legacy authority only; phase operations use the transaction-bound review facade.
 pub(crate) struct AuthorizedJob {
 	pub row: JobRow,
 	pub capability_hash: [u8; 32],
@@ -50,7 +51,7 @@ pub(crate) fn issue() -> (JobCapability, [u8; 32]) {
 	(token, hash)
 }
 
-/// Parse the capability header without requiring a live lease.
+/// Parse without a live lease: terminal retries authenticate their sealed receipt.
 pub fn parse_hash(headers: &HeaderMap) -> Result<[u8; 32], (StatusCode, String)> {
 	parse_capability(headers).ok_or_else(forbidden)
 }
@@ -338,8 +339,19 @@ mod tests {
 		// `authorize` rejects anything of a different length before it
 		// hashes, so widening the random token without widening the
 		// filter would reject every capability the server just issued.
-		let (token, _) = issue();
+		let (token, expected_hash) = issue();
 		assert_eq!(token.expose_secret().len(), JOB_CAPABILITY_TOKEN_CHARS);
+		let mut headers = HeaderMap::new();
+		headers.insert(JOB_CAPABILITY_HEADER, token.expose_secret().parse().unwrap());
+		assert_eq!(parse_hash(&headers).unwrap(), expected_hash);
+	}
+
+	#[test]
+	fn absent_and_wrong_length_capabilities_share_the_denial() {
+		let mut headers = HeaderMap::new();
+		assert_eq!(parse_hash(&headers).unwrap_err(), forbidden());
+		headers.insert(JOB_CAPABILITY_HEADER, "short".parse().unwrap());
+		assert_eq!(parse_hash(&headers).unwrap_err(), forbidden());
 	}
 }
 
