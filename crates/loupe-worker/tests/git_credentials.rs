@@ -399,16 +399,14 @@ fn helper_connection_cannot_block_on_full_socket_backlog() {
 	use std::os::unix::net::UnixStream;
 	use std::process::Stdio;
 
-	use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+	use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 	let root = tempfile::tempdir().unwrap();
 	let socket = root.path().join("full.sock");
-	let listener = rustix::net::socket_with(
-		AddressFamily::UNIX,
-		SocketType::STREAM,
-		SocketFlags::CLOEXEC,
-		None,
-	)
-	.unwrap();
+	// Plain socket + fcntl rather than `socket_with(SocketFlags::CLOEXEC)`,
+	// which does not exist on Apple targets. The test is single-threaded
+	// up to here, so the non-atomic flag set cannot race a fork.
+	let listener = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+	rustix::io::fcntl_setfd(&listener, rustix::io::FdFlags::CLOEXEC).unwrap();
 	rustix::net::bind(&listener, &SocketAddrUnix::new(&socket).unwrap()).unwrap();
 	rustix::net::listen(&listener, 0).unwrap();
 	let _occupied = UnixStream::connect(&socket).unwrap();

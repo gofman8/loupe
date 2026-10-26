@@ -96,3 +96,42 @@ pub(crate) fn patch(raw: &str) -> crate::source_discovery::ScannerConfigPatch {
 		.expect("scanner text admitted")
 		.expect("valid scanner patch")
 }
+
+/// Create a FIFO at `path` (mode 0600). `mkfifoat` is not exposed by
+/// rustix on Apple targets, so non-Linux test hosts shell out to the
+/// POSIX `mkfifo` utility instead.
+pub(crate) fn make_fifo(path: &Path) {
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	rustix::fs::mkfifoat(rustix::fs::CWD, path, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+		.unwrap();
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	{
+		let status = std::process::Command::new("mkfifo").arg("-m").arg("600").arg(path).status().unwrap();
+		assert!(status.success(), "mkfifo {} failed", path.display());
+	}
+}
+
+/// A `true` executable that exists on this host: `/bin/true` on most Linux
+/// images, `/usr/bin/true` on macOS (which has no `/bin/true`).
+pub(crate) fn true_binary() -> &'static str {
+	if Path::new("/bin/true").exists() { "/bin/true" } else { "/usr/bin/true" }
+}
+
+/// Whether `pid` no longer exists (has been reaped). Linux reads procfs;
+/// other Unix hosts ask `kill -0`, which — like a `/proc/<pid>` entry —
+/// still succeeds for an unreaped zombie, so both mean "reaped" alike.
+pub(crate) fn process_gone(pid: u32) -> bool {
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	{
+		!Path::new(&format!("/proc/{pid}")).exists()
+	}
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	{
+		!std::process::Command::new("kill")
+			.args(["-0", &pid.to_string()])
+			.stderr(std::process::Stdio::null())
+			.status()
+			.map(|status| status.success())
+			.unwrap_or(false)
+	}
+}

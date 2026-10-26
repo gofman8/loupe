@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rustix::io::{fcntl_setfd, read, write, Errno, FdFlags};
-use rustix::pipe::{pipe_with, PipeFlags};
+
 use serde::Deserialize;
 
 use crate::sandbox::{validate_network_host, SandboxNetworkMode, SANDBOX_RESOLV_CONF_PLACEHOLDER};
@@ -302,6 +302,34 @@ fn run_networked_sandbox_with_tools(
 	status
 }
 
+/// A close-on-exec pipe, optionally non-blocking. `pipe2` with flags is
+/// Linux-only; Apple targets get a plain `pipe` with the flags applied by
+/// `fcntl`. The network sandbox itself only runs where bwrap exists, but
+/// the crate must still build on macOS, where workers run unsandboxed.
+fn cloexec_pipe(nonblocking: bool) -> rustix::io::Result<(OwnedFd, OwnedFd)> {
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	{
+		use rustix::pipe::{pipe_with, PipeFlags};
+		let mut flags = PipeFlags::CLOEXEC;
+		if nonblocking {
+			flags |= PipeFlags::NONBLOCK;
+		}
+		pipe_with(flags)
+	}
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	{
+		use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
+		let (read_end, write_end) = rustix::pipe::pipe()?;
+		for end in [&read_end, &write_end] {
+			fcntl_setfd(end, FdFlags::CLOEXEC)?;
+			if nonblocking {
+				fcntl_setfl(end, fcntl_getfl(end)? | OFlags::NONBLOCK)?;
+			}
+		}
+		Ok((read_end, write_end))
+	}
+}
+
 #[derive(Clone, Copy)]
 enum InheritedEnd {
 	Read,
@@ -309,11 +337,7 @@ enum InheritedEnd {
 }
 
 fn inheritable_pipe(nonblocking: bool, inherited: InheritedEnd) -> Result<(OwnedFd, OwnedFd)> {
-	let mut flags = PipeFlags::CLOEXEC;
-	if nonblocking {
-		flags |= PipeFlags::NONBLOCK;
-	}
-	let (read_end, write_end) = pipe_with(flags)?;
+	let (read_end, write_end) = cloexec_pipe(nonblocking)?;
 	match inherited {
 		InheritedEnd::Read => fcntl_setfd(&read_end, FdFlags::empty())?,
 		InheritedEnd::Write => fcntl_setfd(&write_end, FdFlags::empty())?,

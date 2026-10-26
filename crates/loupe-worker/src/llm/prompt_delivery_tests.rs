@@ -29,7 +29,7 @@ async fn s3_prompt_delivery_fixture() -> (Vec<u8>, String, String) {
 	std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 	let backend = PromptTestBackend::with_bin(script.as_os_str())
 		.with_sandbox_disabled_for_tests()
-		.with_model_broker_context(test_model_broker("/bin/true"));
+		.with_model_broker_context(test_model_broker(crate::test_support::true_binary()));
 	let response = backend
 		.run(LlmRequest {
 			security: crate::canary::JobSecurity::new(Default::default(), Vec::new()).unwrap(),
@@ -116,7 +116,7 @@ async fn s3_lifecycle_fixture(
 	std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 	let backend = PromptTestBackend::with_bin(script.as_os_str())
 		.with_sandbox_disabled_for_tests()
-		.with_model_broker_context(test_model_broker("/bin/true"));
+		.with_model_broker_context(test_model_broker(crate::test_support::true_binary()));
 	let cancel = CancellationToken::new();
 	let cancellation = cancel_after.map(|delay| {
 		let cancel = cancel.clone();
@@ -149,7 +149,7 @@ async fn s3_lifecycle_fixture(
 		cancellation.await.unwrap();
 	}
 	let pid: u32 = std::fs::read_to_string(pid).unwrap().parse().unwrap();
-	let reaped = !std::path::Path::new(&format!("/proc/{pid}")).exists();
+	let reaped = crate::test_support::process_gone(pid);
 	(result, elapsed, std::fs::read(input).unwrap_or_default(), reaped)
 }
 
@@ -316,7 +316,7 @@ async fn sandbox_output_is_absent_from_success_logs_and_failure_chains() {
 		std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 		let backend = PromptTestBackend::with_bin(script.as_os_str())
 			.with_sandbox_disabled_for_tests()
-			.with_model_broker_context(test_model_broker("/bin/true"))
+			.with_model_broker_context(test_model_broker(crate::test_support::true_binary()))
 			.with_log_agent_output(true);
 		let result = backend
 			.run(LlmRequest {
@@ -403,7 +403,7 @@ async fn common_quarantine_cancels_and_reaps_the_running_child() {
 	};
 	let backend = PromptTestBackend::with_bin(script.as_os_str())
 		.with_sandbox_disabled_for_tests()
-		.with_model_broker_context(test_model_broker("/bin/true"));
+		.with_model_broker_context(test_model_broker(crate::test_support::true_binary()));
 	let mut task = tokio::spawn(async move { backend.run(request).await });
 	let pid = tokio::time::timeout(Duration::from_secs(2), async {
 		loop {
@@ -426,7 +426,7 @@ async fn common_quarantine_cancels_and_reaps_the_running_child() {
 		let _ = task.await;
 	}
 	assert!(
-		!std::path::Path::new(&format!("/proc/{pid}")).exists(),
+		crate::test_support::process_gone(pid),
 		"child must be explicitly reaped"
 	);
 	let error = result

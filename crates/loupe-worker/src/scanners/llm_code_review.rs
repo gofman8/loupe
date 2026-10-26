@@ -341,12 +341,7 @@ mod tests {
 	async fn fifo_discovery_control(cancel_before: bool) {
 		let directory = tempfile::tempdir().unwrap();
 		let path = directory.path().join("Cargo.toml");
-		rustix::fs::mkfifoat(
-			rustix::fs::CWD,
-			&path,
-			rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-		)
-		.unwrap();
+		crate::test_support::make_fifo(&path);
 		let ctx = make_ctx(directory.path());
 		if cancel_before {
 			ctx.cancel.cancel();

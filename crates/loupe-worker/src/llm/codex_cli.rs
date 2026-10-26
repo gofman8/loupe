@@ -498,7 +498,7 @@ mod tests {
 		std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 		let backend = CodexCliBackend::with_bin(script.as_os_str())
 			.with_sandbox_disabled_for_tests()
-			.with_model_broker_context(test_model_broker("/bin/true"));
+			.with_model_broker_context(test_model_broker(crate::test_support::true_binary()));
 		let result = backend
 			.run(LlmRequest {
 				security: crate::canary::JobSecurity::new(Default::default(), Vec::new()).unwrap(),
@@ -745,7 +745,7 @@ mod tests {
 		// `loupe-worker-no-such-bin` definitely does not exist on PATH.
 		let workdir = tempfile::tempdir().unwrap();
 		let backend = CodexCliBackend::with_bin("loupe-worker-no-such-bin")
-			.with_model_broker_context(test_model_broker("/bin/true"));
+			.with_model_broker_context(test_model_broker(crate::test_support::true_binary()));
 		let req = LlmRequest {
 			security: crate::canary::JobSecurity::new(Default::default(), Vec::new()).unwrap(),
 			tool_boundary: crate::llm::prompt::JobToolBoundary::new().unwrap(),
@@ -784,7 +784,7 @@ mod tests {
 
 		let backend = CodexCliBackend::with_bin(bin_path.as_os_str())
 			.with_sandbox_disabled_for_tests()
-			.with_model_broker_context(test_model_broker("/bin/true"));
+			.with_model_broker_context(test_model_broker(crate::test_support::true_binary()));
 		let req = LlmRequest {
 			security: crate::canary::JobSecurity::new(Default::default(), Vec::new()).unwrap(),
 			tool_boundary: crate::llm::prompt::JobToolBoundary::new().unwrap(),

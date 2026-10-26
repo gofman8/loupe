@@ -8,8 +8,7 @@ async fn citation_special_file_refusal_does_not_wait_for_a_fifo_writer() {
 	let (workdir, submission) = super::tests::valid_local_submission();
 	let path = workdir.path().join(submission.file_path.expose());
 	std::fs::remove_file(&path).unwrap();
-	rustix::fs::mkfifoat(rustix::fs::CWD, &path, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
-		.unwrap();
+	crate::test_support::make_fifo(&path);
 	let root = workdir.path().to_owned();
 	let mut task = tokio::spawn(async move {
 		validate_local_llm_submission(&root, &submission, Default::default()).await

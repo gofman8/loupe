@@ -609,14 +609,33 @@ fn shell_quote(text: &str) -> String {
 	format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// A close-on-exec, non-blocking socket. Linux sets both flags atomically
+/// at creation; Apple targets have no `SOCK_CLOEXEC`/`SOCK_NONBLOCK`, so
+/// the flags are applied with `fcntl` before the descriptor is returned.
+/// Nothing else holds the descriptor in between, but a concurrent `fork`
+/// could inherit it, which is why the atomic path stays on Linux.
+fn cloexec_nonblocking_unix_socket(
+	family: rustix::net::AddressFamily, kind: rustix::net::SocketType,
+) -> io::Result<std::os::fd::OwnedFd> {
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	{
+		use rustix::net::SocketFlags;
+		Ok(rustix::net::socket_with(family, kind, SocketFlags::CLOEXEC | SocketFlags::NONBLOCK, None)?)
+	}
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	{
+		use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
+		use rustix::io::{fcntl_setfd, FdFlags};
+		let fd = rustix::net::socket(family, kind, None)?;
+		fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
+		fcntl_setfl(&fd, fcntl_getfl(&fd)? | OFlags::NONBLOCK)?;
+		Ok(fd)
+	}
+}
+
 fn connect(socket: &Path, deadline: Instant) -> io::Result<UnixStream> {
-	use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
-	let fd = rustix::net::socket_with(
-		AddressFamily::UNIX,
-		SocketType::STREAM,
-		SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
-		None,
-	)?;
+	use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+	let fd = cloexec_nonblocking_unix_socket(AddressFamily::UNIX, SocketType::STREAM)?;
 	match rustix::net::connect(&fd, &SocketAddrUnix::new(socket)?) {
 		Ok(()) => {},
 		Err(rustix::io::Errno::INPROGRESS) => {
